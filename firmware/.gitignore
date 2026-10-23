@@ -8,11 +8,10 @@
 
 
 #para la IA
-src_firmware.txt
-estructuraSRC.sh
-INFORME.md
-opinion_de_otra_ia.md
-TODOs.md
 migration
 migration/*
+*.sh
+*.log
 *.txt
+
+!wokwi-project.txt

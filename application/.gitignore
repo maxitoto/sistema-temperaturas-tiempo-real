@@ -39,11 +39,8 @@ migrations/*
 generated/*
 
 #para la IA
-migrations
+migration
 migration/*
-estructuraSRC.sh
-lo_que_vi.log
+*.sh
 *.log
-src_backend_frontend_shared.txt
 *.txt
-USB_numeroGrande.log
