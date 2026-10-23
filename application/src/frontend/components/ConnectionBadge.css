@@ -1,0 +1,94 @@
+.conn-badge {
+  --ok: #10b981;
+  --ok-glow: rgba(16, 185, 129, 0.4);
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --muted: #9ca3af;
+  --bg: #ffffff;
+  --border: #e3e6eb;
+  --text: #1a1d23;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s;
+  user-select: none;
+}
+.conn-badge:hover:not(:disabled) { background: #f9fafb; }
+.conn-badge:active:not(:disabled) { transform: translateY(1px); }
+.conn-badge:disabled { cursor: progress; opacity: 0.85; }
+
+@media (prefers-color-scheme: dark) {
+  .conn-badge {
+    --bg: #1c2028;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+  }
+  .conn-badge:hover:not(:disabled) { background: #232833; }
+}
+
+.conn-badge__dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+
+.conn-badge__label { line-height: 1; }
+
+/* Estados */
+.conn-badge[data-status='connected'] .conn-badge__dot {
+  background: var(--ok);
+  animation: conn-badge-pulse 2s infinite;
+}
+.conn-badge[data-status='connected'] {
+  border-color: rgba(16, 185, 129, 0.3);
+  color: var(--ok);
+}
+
+.conn-badge[data-status='error'] .conn-badge__dot {
+  background: var(--err);
+  animation: conn-badge-shake 0.4s ease-in-out;
+}
+.conn-badge[data-status='error'] {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--err);
+}
+
+.conn-badge[data-status='connecting'] .conn-badge__dot,
+.conn-badge[data-status='disconnecting'] .conn-badge__dot {
+  background: var(--warn);
+  animation: conn-badge-blink 1s infinite;
+}
+
+/* Spinner inline (solo cuando hay acción en curso) */
+.conn-badge__spinner {
+  width: 0.75em; height: 0.75em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: conn-badge-spin 0.7s linear infinite;
+}
+
+@keyframes conn-badge-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--ok-glow); }
+  70%  { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes conn-badge-blink { 50% { opacity: 0.35; } }
+@keyframes conn-badge-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-2px); }
+  75%      { transform: translateX(2px); }
+}
+@keyframes conn-badge-spin { to { transform: rotate(360deg); } }

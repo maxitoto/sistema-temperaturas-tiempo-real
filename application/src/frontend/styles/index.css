@@ -1,0 +1,307 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:is(.dark *));
+
+h1 {
+    @apply text-2xl font-bold tracking-tight;
+}
+
+h3 {
+    @apply font-bold text-lg text-foreground;
+}
+
+p {
+    @apply text-slate-500 text-sm
+}
+
+.stack-row {
+    @apply flex flex-row items-center justify-center;
+}
+
+.stack-col {
+    @apply flex flex-col items-center justify-center;
+}
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Inter Variable', sans-serif;
+
+    --color-foreground: var(--foreground);
+    --color-foreground-secondary: var(--foreground-secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-card-foreground: var(--card-foreground);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-success-foreground: var(--success-foreground);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-info-foreground: var(--info-foreground);
+    --color-error-foreground: var(--error-foreground);
+
+    --color-primary: var(--primary);
+    --color-secondary: var(--secondary);
+    --color-destructive: var(--destructive);
+    --color-error: var(--error);
+    --color-success: var(--success);
+    --color-warning: var(--warning);
+    --color-info: var(--info);
+    --color-hover: var(--hover);
+    --color-active: var(--active);
+    --color-primary-light: var(--primary-light);
+    --color-secondary-light: var(--secondary-light);
+    --color-success-light: var(--success-light);
+    --color-error-light: var(--error-light);
+    --color-warning-light: var(--warning-light);
+    --color-info-light: var(--info-light);
+    --color-disabled: var(--disabled);
+
+    --color-background: var(--background);
+    --color-card: var(--card);
+    --color-muted: var(--muted);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent: var(--sidebar-accent);
+
+    --color-alert-err-bg: var(--alert-err-bg);
+    --color-alert-err-border: var(--alert-err-border);
+    --color-alert-err-icon: var(--alert-err-icon);
+    --color-alert-warn-bg: var(--alert-warn-bg);
+    --color-alert-warn-border: var(--alert-warn-border);
+    --color-alert-warn-icon: var(--alert-warn-icon);
+    --color-alert-success-bg: var(--alert-success-bg);
+    --color-alert-success-border: var(--alert-success-border);
+    --color-alert-success-icon: var(--alert-success-icon);
+    --color-alert-inactive-bg: var(--alert-inactive-bg);
+    --color-alert-inactive-border: var(--alert-inactive-border);
+    --color-alert-inactive-icon: var(--alert-inactive-icon);
+
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(27.8% 0.033 256.848);
+    --foreground-secondary: oklch(55.1% 0.027 264.364);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --primary: oklch(69.6% 0.17 162.48);
+    --primary-light: oklch(97.9% 0.021 166.113);
+    --secondary-light: oklch(98.5% 0 0);
+    --success-light: #ecfdf5;
+    --error-light: #fef2f2;
+    --warning-light: #fefce8;
+    --info-light: #eff6ff;
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --disabled: oklch(53.233% 0.01459 255.634);
+    --border: oklch(92.9% 0.013 255.508);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+    --hover: oklch(88.803% 0.02219 256.809);
+    --destructive: oklch(0.577 0.245 27.325);
+    --error: oklch(57.7% 0.245 27.325);
+    --success: #10b981;
+    --success-foreground: oklch(0.985 0 0);
+    --warning: #eab308;
+    --warning-foreground: oklch(0.205 0 0);
+    --info: #3b82f6;
+    --info-foreground: oklch(0.985 0 0);
+    --error-foreground: oklch(0.985 0 0);
+    --active: #c4c6c9;
+    --alert-err-bg: #fef2f2;
+    --alert-err-border: #fee2e2;
+    --alert-err-icon: #ef4444;
+    --alert-warn-bg: #fefce8;
+    --alert-warn-border: #fef9c3;
+    --alert-warn-icon: #eab308;
+    --alert-success-bg: #ecfdf5;
+    --alert-success-border: #d1fae5;
+    --alert-success-icon: #10b981;
+    --alert-inactive-bg: #f8fafc;
+    --alert-inactive-border: #f1f5f9;
+    --alert-inactive-icon: #64748b;
+}
+
+.dark {
+    --background: oklch(18.312% 0.03092 263.398);
+    --foreground: oklch(0.985 0 0);
+    --foreground-secondary: oklch(70.8% 0.027 264.364);
+    --card: oklch(25.019% 0.0192 276.075);
+    --card-foreground: oklch(0.985 0 0);
+    --primary: oklch(69.6% 0.17 162.48);
+    --primary-foreground: oklch(0.205 0 0);
+    --primary-light: rgba(52, 211, 153, 0.15);
+    --secondary: oklch(0.269 0 0);
+    --secondary-light: oklch(30% 0 0);
+    --success-light: rgba(52, 211, 153, 0.15);
+    --error-light: rgba(248, 113, 113, 0.15);
+    --warning-light: rgba(245, 158, 11, 0.15);
+    --info-light: rgba(96, 165, 250, 0.15);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --disabled: oklch(45% 0.015 256.809);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(25.019% 0.0192 276.075);
+    --ring: oklch(0.556 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+    --hover: oklch(31.522% 0.00284 16.614);
+    --destructive: oklch(0.704 0.191 22.216);
+    --error: oklch(0.704 0.191 22.216);
+    --success: #34d399;
+    --success-foreground: oklch(0.205 0 0);
+    --warning: #f59e0b;
+    --warning-foreground: oklch(0.205 0 0);
+    --info: #60a5fa;
+    --info-foreground: oklch(0.205 0 0);
+    --error-foreground: oklch(0.985 0 0);
+    --active: #606163;
+    --alert-err-bg: oklch(24% 0.03 22);
+    --alert-err-border: oklch(35% 0.06 22);
+    --alert-err-icon: #f87171;
+    --alert-warn-bg: rgb(254 252 232 / 0.12);
+    --alert-warn-border: rgba(234, 179, 8, 0.4);
+    --alert-warn-icon: #f59e0b;
+    --alert-success-bg: rgb(236 253 245 / 0.12);
+    --alert-success-border: rgba(16, 185, 129, 0.4);
+    --alert-success-icon: #34d399;
+    --alert-inactive-bg: rgba(15, 23, 42, 0.16);
+    --alert-inactive-border: rgba(148, 163, 184, 0.4);
+    --alert-inactive-icon: #94a3b8;
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+
+    body {
+        @apply bg-background text-foreground;
+    }
+
+    html {
+        @apply font-sans;
+    }
+}
+
+@layer components {
+    .btn {
+        @apply cursor-pointer inline-flex items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:pointer-events-none disabled:opacity-50 gap-2;
+        --btn-bg: var(--primary);
+        --btn-fg: var(--primary-foreground);
+        --btn-border: var(--primary);
+        --btn-light: var(--primary-light);
+    }
+
+    .btn-solid {
+        @apply py-2 px-4;
+        background-color: var(--btn-bg);
+        color: var(--btn-fg);
+    }
+
+    .btn-solid:hover {
+        filter: brightness(0.9);
+    }
+
+    .btn-outline {
+        @apply py-2 px-4 border;
+        background-color: transparent;
+        border-color: var(--btn-border);
+    }
+
+    .btn-outline:hover {
+        background-color: var(--btn-bg);
+        color: var(--btn-fg);
+        filter: opacity(0.8);
+    }
+
+    .btn-icon {
+        @apply p-2 border border-transparent;
+        background-color: transparent;
+        color: var(--btn-border);
+    }
+
+    .btn-icon:hover {
+        background-color: var(--btn-light);
+    }
+
+    .btn-primary {
+        --btn-bg: var(--primary);
+        --btn-fg: var(--primary-foreground);
+        --btn-border: var(--primary-foreground);
+        --btn-light: var(--primary-light);
+    }
+
+    .btn-secondary {
+        --btn-bg: var(--secondary);
+        --btn-fg: var(--secondary-foreground);
+        --btn-border: var(--secondary-foreground);
+        --btn-light: var(--secondary-light);
+    }
+
+    .btn-success {
+        --btn-bg: var(--success);
+        --btn-fg: var(--success-foreground);
+        --btn-border: var(--success);
+        --btn-light: var(--success-light);
+    }
+
+    .btn-error {
+        --btn-bg: var(--error);
+        --btn-fg: var(--error-foreground);
+        --btn-border: var(--error);
+        --btn-light: var(--error-light);
+    }
+
+    .btn-warning {
+        --btn-bg: var(--warning);
+        --btn-fg: var(--warning-foreground);
+        --btn-border: var(--warning);
+        --btn-light: var(--warning-light);
+    }
+
+    .btn-info {
+        --btn-bg: var(--info);
+        --btn-fg: var(--info-foreground);
+        --btn-border: var(--info);
+        --btn-light: var(--info-light);
+    }
+}

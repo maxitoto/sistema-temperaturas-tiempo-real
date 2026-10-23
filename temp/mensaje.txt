@@ -1,0 +1,108 @@
+release!: baseline v1.0.0 — OSI/RPC/DB/DTO/LTS/Auth/Encrypt [template]
+
+Snapshot final e inmutable del stack completo de comunicación.
+Este commit establece el punto de partida canónico. NO admite
+extensiones ni modificaciones: se usa como template para derivar
+nuevos proyectos vía fork / checkout / git worktree.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STACK INCLUIDO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OSI (7 capas)
+    · 1 Física        → USB Serial + TCP (ESP8266/ESP32)
+    · 2 Enlace        → HDLC byte-stuffing, FCS CRC-16
+    · 3 Red           → direccionamiento lógico, TTL
+    · 4 Transporte    → TCP-like Stop-and-Wait ARQ, RTO, retransmisión
+    · 5 Sesión        → handshake Challenge-Response SHA-256, sessionId
+    · 6 Presentación  → MessagePack encode/decode zero-heap
+    · 7 Aplicación    → runtime RPC + hook de política inyectable
+
+  RPC
+    · CapaAplicacion con EvaluadorPoliticaRPC desacoplado
+    · CALL/REPLY correlacionado por reqId (XID)
+    · Eventos asíncronos (fire-and-forget)
+    · Timeouts por llamada, no por sesión
+
+  DB
+    · DDL macro DEFINE_TABLE (packed structs, 0 heap)
+    · CREATE / EXISTS / DROP / TRUNCATE sobre MicroSD
+    · Wire format packed, big-endian, padding cero
+
+  DTO
+    · Codegen Python (scripts/gen_dto.py) → C++ + TS simétricos
+    · SCHEMA_HASH en handshake → rechazo si diverge
+    · static_assert de tamaño en C++, const WIRE_SIZE en TS
+    · Round-trip test CI (byte-a-byte C++ vs TS)
+
+  LTS
+    · Baseline Long-Term Support, sin EOL definido
+    · Contrato estable de capas 1-7 y wire format
+
+  Autenticación
+    · Challenge-Response HMAC-SHA256 (Capa 5)
+    · Secreto por dispositivo (TOFU vía USB en primer arranque)
+    · Nonce 4B + SHA256(nonce || secreto) → sessionId 16b
+
+  Autorización
+    · EvaluadorPoliticaRPC en Capa 7 (sin acoplar a Capas 1-6)
+    · Reglas por canal físico (USB-only)
+    · Reglas por rango de dominio (umbrales válidos)
+    · Reglas por estado (provisioning, rotación de clave)
+
+  Encrypt por campo
+    · Util selectivo para datos sensibles (SMTP password, WiFi key)
+    · Aplicado antes de serializar → opaco en el wire
+
+  Encrypt por mensaje
+    · Keystream SHA256(secreto || nonce || reqId || bloque)
+    · XOR in-place sobre payload (0 bytes extra de RAM)
+    · Composable con CRC de Capa 2 (integridad + confidencialidad)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPATIBILIDAD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Firmware   ESP8266 (Wokwi) | ESP32 (nativo, USB CDC)
+  Backend    Electron main + runtime Node ≥ 20
+  Frontend   React 18 + TypeScript 5
+  Wire       MessagePack, packed structs, big-endian
+  Tooling    PlatformIO, Vite, Python 3.11+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GARANTÍAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ Cero allocaciones dinámicas en camino caliente (0 heap)
+  ✓ Determinismo: mismo schema → mismos bytes
+  ✓ Simetría: SCHEMA_HASH idéntico o handshake aborta
+  ✓ Triple barrera de seguridad:
+      (1) autenticación de sesión (Capa 5)
+      (2) autorización de aplicación (Capa 7)
+      (3) cifrado selectivo/stream (Capa 6)
+  ✓ Separación estricta mecanismo (Capas 5-6) / política (Capa 7)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REGLAS DE USO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PROHIBIDO
+    ✗ Modificar esta rama (protegida en remoto)
+    ✗ Extenderla con features nuevos
+    ✗ Force-push o borrado
+    ✗ Cambiar el wire format
+
+  PERMITIDO
+    ✓ Fork / checkout / git worktree como base
+    ✓ Derivar ramas nuevas (feature/*, fix/*)
+    ✓ Copiar el árbol completo a un proyecto nuevo
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFERENCIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Tag inmutable:   v1.0.0-osi-rpc-stack
+  README:          sección "Ramas de referencia y uso como template"
+  Protección:      GitHub branch protection / GitLab protected branch
+
+Co-authored-by: <tu nombre/email>

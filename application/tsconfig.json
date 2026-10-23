@@ -1,0 +1,59 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "paths": {
+      /* Electron */
+      "#services/*": ["./src/backend/services/*"],
+      "#services/": ["./src/backend/services"],
+      "#model/*": ["./src/backend/model/*"],
+      "#model/": ["./src/backend/model"],
+
+      /* Shared */
+      "#shared/*": ["./src/shared/*"],
+      "#shared/": ["./src/shared"],
+      "#types/*": ["./src/shared/types/*"],
+      "#types/": ["./src/shared/types"],
+
+      "#components/*": ["./src/frontend/components/*"],
+      "#hooks/*": ["./src/frontend/hooks/*"],
+      "#styles/*": ["./src/frontend/styles/*"],
+      "#assets/*": ["./src/frontend/assets/*"],
+      "#pages/*": ["./src/frontend/pages/*"],
+      "#components": ["./src/frontend/components"],
+      "#contexts": ["./src/frontend/contexts"],
+      "#contexts/*": ["./src/frontend/contexts/*"],
+      "#hooks": ["./src/frontend/hooks"],
+      "#styles": ["./src/frontend/styles"],
+      "#assets": ["./src/frontend/assets"],
+      "#pages": ["./src/frontend/pages"],
+      "#pages/": ["./src/frontend/pages"],
+      "#utils": ["./src/frontend/utils/index.ts"],
+      "#utils/*": ["./src/frontend/utils/*"],
+      "#utils/": ["./src/frontend/utils"],
+      "#models/": ["./src/frontend/models"],
+      "#models/*": ["./src/frontend/models/*"],
+    }
+  },
+  "include": ["src", "electron"],
+  "exclude": ["node_modules", "scripts"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

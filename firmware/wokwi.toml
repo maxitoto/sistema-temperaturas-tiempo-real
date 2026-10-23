@@ -1,0 +1,13 @@
+[wokwi]
+version = 1
+firmware = '.pio/build/WokwiSimulator/firmware.bin'
+elf = '.pio/build/WokWiSimulator/firmware.elf'
+
+rfc2217ServerPort = 4000
+
+[net]
+gateway = "ws://127.0.0.1:9011"
+
+[[net.forward]] #red gateway
+from = "127.0.0.1:9080"
+to = "target:80" 
