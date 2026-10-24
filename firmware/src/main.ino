@@ -5,9 +5,13 @@
 #include "plugins/conectividad/modem/RedHost.h"
 #include "plugins/conectividad/modem/ServidorTCP.h"
 #include "plugins/conectividad/modem/Modem.h"
+
 #include "communication/ContenedorComunicacion.h"
+
 #include "state/EstadoSistema.h"
 #include "scheduler/Planificador.h"
+
+#include "stubs/contratos.h"
 #include "stubs/serverExample.h"
 #include "stubs/clientExample.h"
 
@@ -24,29 +28,24 @@ Modem modem(&redAp, &redSta, &servidorTcp);
 ContenedorComunicacion pila(&puertoUsb, &servidorTcp, "SECRETO_HMAC_DEFAULT");
 Planificador scheduler;
 
+BackendStub backendStub(pila.appRpc);
+Contratos::IBackend& backend = backendStub;
+
 void tareaComunicacion() {
-    DebugOLED::contarCicloScheduler(); // Mide los Hz reales del Planificador
+    DebugOLED::contarCicloScheduler();
     modem.mantenerRed();
     pila.procesarCiclo();
-
-    if (gEstadoSistema.solicitarSyncReloj && pila.appRpc.hayClientesActivos()) {
-        gEstadoSistema.solicitarSyncReloj = false;
-        uint16_t rid = ClientExampleStub::solicitarHoraAlBackend(
-            pila.appRpc,
-            gEstadoSistema.motivoSyncReloj
-        );
-        DebugOLED::registrarTx(pila.presentacion.obtenerNodoPreferido(), "SYNC_CLK", rid);
-    }
 }
 
 void tareaSincronizacionPeriodica() {
-    if (!gEstadoSistema.relojSincronizado) {
-        gEstadoSistema.motivoSyncReloj = "SYNC_INICIAL_PENDIENTE";
-        gEstadoSistema.solicitarSyncReloj = true;
-    } else {
-        gEstadoSistema.motivoSyncReloj = "SYNC_MANTENIMIENTO_30S";
-        gEstadoSistema.solicitarSyncReloj = true;
-    }
+    if (!pila.appRpc.hayClientesActivos()) return;
+
+    const char* motivo = gEstadoSistema.relojSincronizado
+                         ? "SYNC_MANTENIMIENTO_30S"
+                         : "SYNC_INICIAL_PENDIENTE";
+
+    uint16_t rid = backend.sincronizarReloj(motivo);
+    DebugOLED::registrarTx(pila.presentacion.obtenerNodoPreferido(), "SYNC_CLK", rid);
 }
 
 void tareaEscribirEnOled() {
@@ -57,7 +56,7 @@ void tareaEscribirEnOled() {
 
 void setup() {
     puertoUsb.inicializar();
-    DebugOLED::inicializar(); // <-- Inicializa OLED en pines 21/22
+    DebugOLED::inicializar();
     modem.configurarRedes("", "", false, "Wokwi-GUEST", "", true);
 
     ServerExampleStub::registrarStubsServidor(pila.appRpc, pila.presentacion);
