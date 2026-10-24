@@ -1,6 +1,13 @@
 // Archivo: ./src/backend/stubs/clientExample.ts
 import { pila } from "../communication/ContenedorComunicacion";
 import { OpcionesLlamada } from "../communication/layers/CapaAplicacion";
+import {
+  IFirmware,
+  RPC,
+  RespuestaCalculoFirmware,
+  SolicitudConfigSeguraDTO,
+  RespuestaAuditoriaFirmwareDTO,
+} from "./contratos";
 
 // =========================================================================
 // 1. CRIPTOGRAFÍA SIMÉTRICA DE CANAL (CAPA 6) Y DE CAMPO (CAPA 7)
@@ -36,96 +43,63 @@ export function encriptarCampoSensible(textoPlano: string): Uint8Array {
 }
 
 // =========================================================================
-// 2. DTOs EXPLÍCITOS (DATA TRANSFER OBJECTS)
+// 2. STUBS CLIENTE (CAPA 7)
 // =========================================================================
-export interface RespuestaCalculoFirmware {
-  resultado: number;
-  estado: string;
-  heapLibreBytes: number;
+// STUB CLIENTE: implementa el contrato IFirmware llamando por red
+// =========================================================================
+export class FirmwareStub implements IFirmware {
+  async sumarYLeerEstado(
+    base: number,
+    factor: number,
+    opts?: OpcionesLlamada
+  ): Promise<RespuestaCalculoFirmware> {
+    const [resultado, estado, heapLibreBytes] = await pila.appRpc.call<[number, string, number]>(
+      RPC.SUMAR_Y_ESTADO,
+      [Number(base), Number(factor)],
+      opts
+    );
+    return {
+      resultado: Number(resultado),
+      estado: String(estado),
+      heapLibreBytes: Number(heapLibreBytes),
+    };
+  }
+
+  async guardarConfiguracionSegura(
+    dto: SolicitudConfigSeguraDTO,
+    opts?: OpcionesLlamada
+  ): Promise<RespuestaAuditoriaFirmwareDTO> {
+    const smtpCifradaBin = encriptarCampoSensible(dto.smtpPasswordPlana);
+
+    const [
+      idRegistro, tempMinGuardada, tempMaxGuardada, smtpDesencriptadaEnFirmware,
+      modificadoPor, rolUsuario, medioUsado, totalFilasEnDB,
+    ] = await pila.appRpc.call<[number, number, number, string, string, string, string, number]>(
+      RPC.GUARDAR_CONFIG_SEGURA,
+      [
+        dto.emisorCertificado,
+        dto.firmaCertificado,
+        dto.username,
+        dto.pinHash,
+        Number(dto.tempMin),
+        Number(dto.tempMax),
+        smtpCifradaBin,
+      ],
+      opts
+    );
+
+    return {
+      idRegistro: Number(idRegistro),
+      tempMinGuardada: Number(tempMinGuardada),
+      tempMaxGuardada: Number(tempMaxGuardada),
+      smtpDesencriptadaEnFirmware: String(smtpDesencriptadaEnFirmware),
+      modificadoPor: String(modificadoPor),
+      rolUsuario: String(rolUsuario),
+      medioUsado: String(medioUsado),
+      totalFilasEnDB: Number(totalFilasEnDB),
+      hexCampoCifradoEnviado: Buffer.from(smtpCifradaBin).toString("hex"),
+    };
+  }
 }
 
-export interface SolicitudConfigSeguraDTO {
-  emisorCertificado: string;
-  firmaCertificado: string;
-  username: string;
-  pinHash: string;
-  tempMin: number;
-  tempMax: number;
-  smtpPasswordPlana: string;
-}
-
-export interface RespuestaAuditoriaFirmwareDTO {
-  idRegistro: number;
-  tempMinGuardada: number;
-  tempMaxGuardada: number;
-  smtpDesencriptadaEnFirmware: string;
-  modificadoPor: string;
-  rolUsuario: string;
-  medioUsado: string;
-  totalFilasEnDB: number;
-  hexCampoCifradoEnviado: string;
-}
-
-// =========================================================================
-// 3. STUBS CLIENTE (CAPA 7)
-// =========================================================================
-export const sumarYLeerEstado = async (
-  base: number,
-  factor: number,
-  opts?: OpcionesLlamada
-): Promise<RespuestaCalculoFirmware> => {
-  const [resultado, estado, heapLibreBytes] = await pila.appRpc.call<
-    [number, string, number]
-  >("RPC_SUMAR_Y_ESTADO", [Number(base), Number(factor)], opts);
-
-  return {
-    resultado: Number(resultado),
-    estado: String(estado),
-    heapLibreBytes: Number(heapLibreBytes),
-  };
-};
-
-export const guardarConfiguracionSegura = async (
-  dto: SolicitudConfigSeguraDTO,
-  opts?: OpcionesLlamada
-): Promise<RespuestaAuditoriaFirmwareDTO> => {
-  // Encriptamos el campo sensible en Capa 7 (viaja como binario 0xC4 en MessagePack)
-  const smtpCifradaBin = encriptarCampoSensible(dto.smtpPasswordPlana);
-
-  const [
-    idRegistro,
-    tempMinGuardada,
-    tempMaxGuardada,
-    smtpDesencriptadaEnFirmware,
-    modificadoPor,
-    rolUsuario,
-    medioUsado,
-    totalFilasEnDB,
-  ] = await pila.appRpc.call<
-    [number, number, number, string, string, string, string, number]
-  >(
-    "RPC_GUARDAR_CONFIG_SEGURA",
-    [
-      dto.emisorCertificado,
-      dto.firmaCertificado,
-      dto.username,
-      dto.pinHash,
-      Number(dto.tempMin),
-      Number(dto.tempMax),
-      smtpCifradaBin,
-    ],
-    opts
-  );
-
-  return {
-    idRegistro: Number(idRegistro),
-    tempMinGuardada: Number(tempMinGuardada),
-    tempMaxGuardada: Number(tempMaxGuardada),
-    smtpDesencriptadaEnFirmware: String(smtpDesencriptadaEnFirmware),
-    modificadoPor: String(modificadoPor),
-    rolUsuario: String(rolUsuario),
-    medioUsado: String(medioUsado),
-    totalFilasEnDB: Number(totalFilasEnDB),
-    hexCampoCifradoEnviado: Buffer.from(smtpCifradaBin).toString("hex"),
-  };
-};
+export const firmware: IFirmware = new FirmwareStub();

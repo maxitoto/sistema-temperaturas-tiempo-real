@@ -1,12 +1,15 @@
-// Archivo: ./src/stubs/serverExample.h
+// src/stubs/serverExample.h
 #pragma once
 #include <Arduino.h>
 #include <string.h>
 #include "communication/layers/CapaAplicacion.h"
 #include "state/EstadoSistema.h"
 #include "debug/DebugOLED.h"
+#include "stubs/contratos.h"
 
 namespace ServerExampleStub {
+
+    using namespace Contratos;
 
     // =========================================================================
     // 1. CRIPTOGRAFÍA DEL PROCESO DE USUARIO (Canal Completo y Campo Sensible)
@@ -38,43 +41,7 @@ namespace ServerExampleStub {
     }
 
     // =========================================================================
-    // 2. DTOs (DATA TRANSFER OBJECTS) CON MARSHALLING / UNMARSHALLING EXPLÍCITO
-    // =========================================================================
-    struct CertificadoLiteDTO {
-        char emisor[24];
-        char firmaHex[36];
-
-        bool deserializar(LectorMsgPack& r) {
-            return r.leerTexto(emisor, sizeof(emisor)) &&
-                   r.leerTexto(firmaHex, sizeof(firmaHex));
-        }
-    };
-
-    struct UsuarioCredencialDTO {
-        char username[20];
-        char pinHash[24];
-
-        bool deserializar(LectorMsgPack& r) {
-            return r.leerTexto(username, sizeof(username)) &&
-                   r.leerTexto(pinHash, sizeof(pinHash));
-        }
-    };
-
-    struct ConfigHeladeraDTO {
-        float tempMin;
-        float tempMax;
-        uint8_t smtpPasswordCifrada[48];
-        size_t lenPasswordCifrada = 0;
-
-        bool deserializar(LectorMsgPack& r) {
-            return r.leerFloat(tempMin) &&
-                   r.leerFloat(tempMax) &&
-                   r.leerBinario(smtpPasswordCifrada, sizeof(smtpPasswordCifrada), lenPasswordCifrada);
-        }
-    };
-
-    // =========================================================================
-    // 3. BASE DE DATOS Y ORM CASERO EN FIRMWARE (Estático en .bss, 0 Heap)
+    // 2. BASE DE DATOS Y ORM CASERO EN FIRMWARE (Estático en .bss, 0 Heap)
     // =========================================================================
     struct RegistroUsuarioDB {
         const char* username;
@@ -154,7 +121,7 @@ namespace ServerExampleStub {
     static BaseDeDatosFirmware dbFirmware;
 
     // =========================================================================
-    // 4. MIDDLEWARE DE POLÍTICA DE ACCESO (Certificado TLS + Rol + Rango)
+    // 3. MIDDLEWARE DE POLÍTICA DE ACCESO (Certificado TLS + Rol + Rango)
     // =========================================================================
     inline bool evaluarPoliticaProcesoUsuario(
         const char* comando, size_t cantidadArgs, LectorMsgPack argsCopia,
@@ -213,83 +180,90 @@ namespace ServerExampleStub {
     }
 
     // =========================================================================
-    // 5. PROCEDIMIENTOS DE NEGOCIO Y REGISTRO DE STUBS (CAPA 7)
+    // IMPLEMENTACIÓN REAL (no sabe nada de RPC ni MessagePack)
     // =========================================================================
-    struct RespuestaEstado {
-        float resultado;
-        const char* estado;
-        uint32_t heapLibre;
-    };
+    class FirmwareImpl : public IFirmware {
+      public:
+        RespuestaEstado sumarYEstado(float base, float factor) override {
+            float resultado = base + (factor * 1.5f);
+            gEstadoSistema.ultimoResultadoCalculado = resultado;
+            gEstadoSistema.totalLlamadasRecibidas++;
+            return {
+                resultado,
+                gEstadoSistema.relojSincronizado ? "SYNC_OK" : "ESTABLE",
+                ESP.getFreeHeap()
+            };
+        }
 
-    inline RespuestaEstado ejecutarSumarYEstado(float base, float factor) {
-        float resultado = base + (factor * 1.5f);
-        gEstadoSistema.ultimoResultadoCalculado = resultado;
-        gEstadoSistema.totalLlamadasRecibidas++;
-
-        return {
-            resultado,
-            gEstadoSistema.relojSincronizado ? "SYNC_OK" : "ESTABLE",
-            ESP.getFreeHeap()
-        };
-    }
-
-    inline void registrarStubsServidor(CapaAplicacion& appRpc, CapaPresentacion& capaPres) {
-        // 1. Activar Encriptación de Mensaje Completo en Capa 6
-        capaPres.configurarTransformadores(transformarMensajeCanalTLS, transformarMensajeCanalTLS);
-
-        // 2. Activar Middleware de Políticas en Capa 7 (Proceso de Usuario)
-        appRpc.establecerEvaluadorPolitica(evaluarPoliticaProcesoUsuario);
-
-        // Ruta 1: Ejemplo clásico de cálculo
-        appRpc.on("RPC_SUMAR_Y_ESTADO", [](size_t cantArgs, LectorMsgPack& args,
-                                           EscritorMsgPack& resp, const MetaCall&) -> bool {
-            if (cantArgs < 2) return false;
-
-            float base = 0.0f;
-            float factor = 0.0f;
-            if (!args.leerFloat(base) || !args.leerFloat(factor)) return false;
-
-            RespuestaEstado out = ejecutarSumarYEstado(base, factor);
-
-            return resp.iniciarArray(4) &&
-                   resp.escribirTexto("OK") &&
-                   resp.escribirFloat(out.resultado) &&
-                   resp.escribirTexto(out.estado) &&
-                   resp.escribirUInt(out.heapLibre);
-        });
-
-        // Ruta 2: Ejemplo completo con Certificado TLS + Usuario/Rol + Cifrado de Campo + DB/ORM
-        appRpc.on("RPC_GUARDAR_CONFIG_SEGURA", [](size_t cantArgs, LectorMsgPack& args,
-                                                  EscritorMsgPack& resp, const MetaCall& meta) -> bool {
-            if (cantArgs < 7) return false;
-
-            CertificadoLiteDTO cert;
-            UsuarioCredencialDTO cred;
-            ConfigHeladeraDTO dto;
-            if (!cert.deserializar(args) || !cred.deserializar(args) || !dto.deserializar(args)) {
-                return false;
-            }
-
-            // Desencriptamos el campo sensible (clave SMTP) recién en la lógica de negocio
+        bool guardarConfig(const UsuarioCredencialDTO& cred,
+                           const ConfigHeladeraDTO& cfg,
+                           int idNodo,
+                           RespuestaConfigDTO& out) override {
             char passPlana[32] = {0};
-            desencriptarCampoSensible(dto.smtpPasswordCifrada, dto.lenPasswordCifrada, passPlana, sizeof(passPlana));
+            desencriptarCampoSensible(cfg.smtpPasswordCifrada, cfg.lenPasswordCifrada,
+                                      passPlana, sizeof(passPlana));
 
             const RegistroUsuarioDB* usr = dbFirmware.buscarUsuario(cred.username);
             const char* rol = usr ? usr->rol : "ADMIN";
 
-            // Guardamos en la Base de Datos del Firmware mediante el ORM estático
-            const RegistroConfigAuditoriaDB& filaGuardada = dbFirmware.insertarConfiguracion(
-                dto.tempMin,
-                dto.tempMax,
-                passPlana,
-                cred.username,
-                rol,
-                meta.idNodo
-            );
+            const RegistroConfigAuditoriaDB& fila = dbFirmware.insertarConfiguracion(
+                cfg.tempMin, cfg.tempMax, passPlana, cred.username, rol, idNodo);
+
+            out.idRegistro = fila.idRegistro;
+            out.tempMin = fila.tempMin;
+            out.tempMax = fila.tempMax;
+            strncpy(out.smtpPasswordClara, fila.smtpPasswordClara, sizeof(out.smtpPasswordClara) - 1);
+            out.smtpPasswordClara[sizeof(out.smtpPasswordClara) - 1] = '\0';
+            strncpy(out.modificadoPor, fila.modificadoPor, sizeof(out.modificadoPor) - 1);
+            out.modificadoPor[sizeof(out.modificadoPor) - 1] = '\0';
+            strncpy(out.rolUsuario, fila.rolUsuario, sizeof(out.rolUsuario) - 1);
+            out.rolUsuario[sizeof(out.rolUsuario) - 1] = '\0';
+            out.medioUsado = fila.medioUsado;
+            out.totalFilas = (uint32_t)dbFirmware.totalInserciones;
 
             gEstadoSistema.totalLlamadasRecibidas++;
-            return filaGuardada.serializarFila(resp, (uint32_t)dbFirmware.totalInserciones);
+            return true;
+        }
+    };
+
+    static FirmwareImpl firmwareImpl;
+
+    // =========================================================================
+    // SKELETON: traduce RPC entrante -> llamada a IFirmware -> respuesta RPC
+    // =========================================================================
+    inline IFirmware*& servicioFirmware() {
+        static IFirmware* p = nullptr;
+        return p;
+    }
+
+    inline void registrarSkeletonFirmware(CapaAplicacion& appRpc, IFirmware& impl) {
+        servicioFirmware() = &impl;
+
+        appRpc.on(RPC_SUMAR_Y_ESTADO, [](size_t cantArgs, LectorMsgPack& args,
+                                         EscritorMsgPack& resp, const MetaCall&) -> bool {
+            float base = 0.0f, factor = 0.0f;
+            if (cantArgs < 2 || !args.leerFloat(base) || !args.leerFloat(factor)) return false;
+            return servicioFirmware()->sumarYEstado(base, factor).serializar(resp);
         });
+
+        appRpc.on(RPC_GUARDAR_CONFIG_SEGURA, [](size_t cantArgs, LectorMsgPack& args,
+                                                EscritorMsgPack& resp, const MetaCall& meta) -> bool {
+            CertificadoLiteDTO cert;
+            UsuarioCredencialDTO cred;
+            ConfigHeladeraDTO cfg;
+            if (cantArgs < 7 || !cert.deserializar(args) ||
+                !cred.deserializar(args) || !cfg.deserializar(args)) return false;
+
+            RespuestaConfigDTO out;
+            if (!servicioFirmware()->guardarConfig(cred, cfg, meta.idNodo, out)) return false;
+            return out.serializar(resp);
+        });
+    }
+
+    inline void registrarStubsServidor(CapaAplicacion& appRpc, CapaPresentacion& capaPres) {
+        capaPres.configurarTransformadores(transformarMensajeCanalTLS, transformarMensajeCanalTLS);
+        appRpc.establecerEvaluadorPolitica(evaluarPoliticaProcesoUsuario);
+        registrarSkeletonFirmware(appRpc, firmwareImpl);
     }
 
 }

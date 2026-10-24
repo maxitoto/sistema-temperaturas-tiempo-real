@@ -1,5 +1,5 @@
 // Archivo: ./src/backend/services/clientServices.ts
-import { sumarYLeerEstado, guardarConfiguracionSegura } from "../stubs/clientExample";
+import { firmware } from "../stubs/clientExample";
 import {
   conectarPorUSB,
   desconectarPorUSB,
@@ -11,8 +11,8 @@ import {
 } from "../plugins/conectividad/servicosConectivos";
 
 export const clientServices = {
-  sumarYLeerEstado,
-  guardarConfiguracionSegura,
+  sumarYLeerEstado: firmware.sumarYLeerEstado,
+  guardarConfiguracionSegura: firmware.guardarConfiguracionSegura,
   conectarPorUSB,
   desconectarPorUSB,
   conectarPorWiFi,
