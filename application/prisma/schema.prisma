@@ -1,131 +1,48 @@
-// Archivo: prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
+  url      = "file:../src/backend/database/monitor.db"
 }
 
-model ubicacion {
-  id_ubicacion Int      @id @default(autoincrement())
-  nombre       String   @unique(map: "sqlite_autoindex_ubicacion_1")
-  descripcion  String?
-  sensor       sensor[]
-}
-
+// 1. Metadatos semánticos del sensor (envuelven la respuesta RPC del Firmware)
 model sensor {
-  id_sensor            Int                    @id @default(autoincrement())
-  id_sensor_esp        Int?
-  id_ubicacion         Int
-  hexadecimal          String                 @unique(map: "sqlite_autoindex_sensor_1")
-  mac_3                String?
-  nombre               String
-  descripcion          String?
-  estado               String                 @default("conectado")
-  activo               String                 @default("ACTIVO")
-  fecha_alta           String
-  ubicacion            ubicacion              @relation(fields: [id_ubicacion], references: [id_ubicacion], onDelete: NoAction, onUpdate: NoAction)
-  configuracion_sensor configuracion_sensor[]
-  medicion             medicion[]
-  evento               evento[]
-  alarma               alarma[]
-
-  @@index([mac_3], map: "idx_sensor_mac3")
+  hexadecimal           String      @id
+  id_sensor             Int         @unique
+  ubicacion             String?
+  ubicacion_descripcion String?
+  nombre                String?
+  descripcion           String?
+  activa                Int         @default(1)
+  fecha_creacion        String      @default("CURRENT_TIMESTAMP")
+  fecha_modificacion    String      @default("CURRENT_TIMESTAMP")
+  auditorias            auditoria[]
 }
 
-model configuracion_sensor {
-  id_configuracion    Int    @id @default(autoincrement())
-  id_sensor           Int
-  temperatura_minima  Float
-  temperatura_maxima  Float
-  error_minimo        Float  @default(0.0) // Calibración a 0°C sincronizada con el ESP
-  error_maximo        Float  @default(0.0) // Calibración a 100°C sincronizada con el ESP
-  activa              Int    @default(1)
-  fecha_configuracion String
-  sensor              sensor @relation(fields: [id_sensor], references: [id_sensor], onDelete: Cascade, onUpdate: NoAction)
+// 2. Auditoría local de quién cambió el nombre o movió de lugar un sensor
+model auditoria {
+  id_auditoria   Int    @id @default(autoincrement())
+  id_sensor      Int
+  accion         String
+  usuario        String
+  nombre         String?
+  apellido       String?
+  activo         Int    @default(1)
+  fecha_creacion String @default("CURRENT_TIMESTAMP")
+
+  sensor         sensor @relation(fields: [id_sensor], references: [id_sensor], onDelete: NoAction, onUpdate: Cascade)
+
+  @@index([id_sensor], map: "idx_auditoria_sensor")
 }
 
-model medicion {
-  id_medicion       Int      @id @default(autoincrement())
-  id_sensor         Int
-  temperatura       Float
-  fecha_hora        String
-  timestamp_local   String?
-  timestamp_backend String?
-  sensor            sensor   @relation(fields: [id_sensor], references: [id_sensor], onDelete: Cascade, onUpdate: NoAction)
-  evento            evento[]
-
-  @@index([id_sensor, fecha_hora], map: "idx_medicion_sensor_fecha")
-}
-
-model evento {
-  id_evento                                  Int       @id @default(autoincrement())
-  id_sensor                                  Int?
-  id_medicion                                Int?
-  tipo                                       String
-  descripcion                                String
-  severidad                                  String
-  fecha_hora                                 String
-  sensor                                     sensor?   @relation(fields: [id_sensor], references: [id_sensor], onDelete: SetNull, onUpdate: NoAction)
-  medicion                                   medicion? @relation(fields: [id_medicion], references: [id_medicion], onDelete: SetNull, onUpdate: NoAction)
-  alarma_alarma_id_evento_resolucionToevento alarma[]  @relation("alarma_id_evento_resolucionToevento")
-  alarma_alarma_id_evento_origenToevento     alarma[]  @relation("alarma_id_evento_origenToevento")
-
-  @@index([tipo], map: "idx_evento_tipo")
-  @@index([id_sensor], map: "idx_evento_sensor")
-  @@index([fecha_hora], map: "idx_evento_fecha")
-}
-
-model alarma {
-  id_alarma                                  Int            @id @default(autoincrement())
-  id_evento_origen                           Int
-  id_evento_resolucion                       Int?
-  id_sensor                                  Int?
-  tipo                                       String
-  descripcion                                String
-  estado                                     String
-  fecha_inicio                               String
-  fecha_resolucion                           String?
-  sensor                                     sensor?        @relation(fields: [id_sensor], references: [id_sensor], onDelete: SetNull, onUpdate: NoAction)
-  evento_alarma_id_evento_resolucionToevento evento?        @relation("alarma_id_evento_resolucionToevento", fields: [id_evento_resolucion], references: [id_evento], onDelete: NoAction, onUpdate: NoAction)
-  evento_alarma_id_evento_origenToevento     evento         @relation("alarma_id_evento_origenToevento", fields: [id_evento_origen], references: [id_evento], onDelete: NoAction, onUpdate: NoAction)
-  notificacion                               notificacion[]
-
-  @@index([tipo], map: "idx_alarma_tipo")
-  @@index([id_sensor], map: "idx_alarma_sensor")
-  @@index([estado], map: "idx_alarma_estado")
-}
-
-model notificacion {
-  id_notificacion Int    @id @default(autoincrement())
-  id_alarma       Int
-  canal           String
-  destinatario    String
-  mensaje         String
-  estado_envio    String
-  fecha_envio     String
-  alarma          alarma @relation(fields: [id_alarma], references: [id_alarma], onDelete: Cascade, onUpdate: NoAction)
-
-  @@index([fecha_envio], map: "idx_notificacion_fecha")
-  @@index([estado_envio], map: "idx_notificacion_estado")
-}
-
-model configuracion_smtp {
-  id_configuracion_smtp  Int    @id @default(autoincrement())
-  host_smtp              String
-  puerto                 Int
-  usuario                String
-  password               String
-  email_remitente        String
-  notificaciones_activas Int    @default(1)
-}
-
-model destinatario {
-  id_destinatario Int     @id @default(autoincrement())
-  nombre          String
-  email           String  @unique(map: "sqlite_autoindex_destinatario_1")
-  activo          Int     @default(1)
-  fecha_creacion  String? @default("CURRENT_TIMESTAMP")
+// 3. Helper de conexión para recordar la IP DHCP y puerto del ESP
+model conexion_firmware {
+  id_conexion        Int    @id @default(1)
+  ip_dhcp            String @default("192.168.4.1")
+  puerto_tcp         Int    @default(80)
+  puerto_usb         String @default("/tmp/virtual_serial")
+  baudios_usb        Int    @default(115200)
+  fecha_modificacion String @default("CURRENT_TIMESTAMP")
 }

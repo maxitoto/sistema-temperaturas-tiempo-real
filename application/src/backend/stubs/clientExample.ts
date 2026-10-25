@@ -4,9 +4,20 @@ import { OpcionesLlamada } from "../communication/layers/CapaAplicacion";
 import {
   IFirmware,
   RPC,
+  CredencialRpcDTO,
   RespuestaCalculoFirmware,
   SolicitudConfigSeguraDTO,
   RespuestaAuditoriaFirmwareDTO,
+  SensorFirmwareDTO,
+  GuardarSensorFirmwareInput,
+  SensoFirmwareDTO,
+  EventoSensorFirmwareDTO,
+  AuditoriaFirmwareRowDTO,
+  CorreoFirmwareDTO,
+  CrearCorreoFirmwareInput,
+  ConfigSmtpFirmwareResumenDTO,
+  ConfigRedYNtpFirmwareDTO,
+  GuardarRedFirmwareInput,
 } from "./contratos";
 
 // =========================================================================
@@ -42,17 +53,44 @@ export function encriptarCampoSensible(textoPlano: string): Uint8Array {
   return cifrado;
 }
 
+function serializarCredencial(cred: CredencialRpcDTO): [string, string, string, string] {
+  return [
+    cred.emisorCertificado ?? "CA-UNTDF-LAB",
+    cred.firmaCertificado ?? "CERT-TLS-UNTDF-2026-VALIDO",
+    cred.username,
+    cred.pinHash,
+  ];
+}
+
+type TuplaSensor = [number, string, number, number, number, number, number, number, number];
+type TuplaSenso = [number, number, number, number, number, number];
+type TuplaEvento = [number, number, number, number, number, number, number];
+type TuplaAuditoria = [number, number, string, string, number];
+type TuplaCorreo = [number, string, string, string, number, number, number];
+
+function mapearTuplaSensor(t: TuplaSensor): SensorFirmwareDTO {
+  return {
+    idSensor: Number(t[0]),
+    hexadecimal: String(t[1]),
+    errorSuperior: Number(t[2]),
+    errorInferior: Number(t[3]),
+    umbralSuperior: Number(t[4]),
+    umbralInferior: Number(t[5]),
+    activa: Number(t[6]),
+    fechaCreacion: Number(t[7]),
+    fechaModificacion: Number(t[8]),
+  };
+}
+
 // =========================================================================
-// 2. STUBS CLIENTE (CAPA 7)
-// =========================================================================
-// STUB CLIENTE: implementa el contrato IFirmware llamando por red
+// 2. STUB CLIENTE RPC: Implementa IFirmware con propiedades enumerables
 // =========================================================================
 export class FirmwareStub implements IFirmware {
-  async sumarYLeerEstado(
+  public readonly sumarYLeerEstado = async (
     base: number,
     factor: number,
     opts?: OpcionesLlamada
-  ): Promise<RespuestaCalculoFirmware> {
+  ): Promise<RespuestaCalculoFirmware> => {
     const [resultado, estado, heapLibreBytes] = await pila.appRpc.call<[number, string, number]>(
       RPC.SUMAR_Y_ESTADO,
       [Number(base), Number(factor)],
@@ -63,12 +101,12 @@ export class FirmwareStub implements IFirmware {
       estado: String(estado),
       heapLibreBytes: Number(heapLibreBytes),
     };
-  }
+  };
 
-  async guardarConfiguracionSegura(
+  public readonly guardarConfiguracionSegura = async (
     dto: SolicitudConfigSeguraDTO,
     opts?: OpcionesLlamada
-  ): Promise<RespuestaAuditoriaFirmwareDTO> {
+  ): Promise<RespuestaAuditoriaFirmwareDTO> => {
     const smtpCifradaBin = encriptarCampoSensible(dto.smtpPasswordPlana);
 
     const [
@@ -99,7 +137,208 @@ export class FirmwareStub implements IFirmware {
       totalFilasEnDB: Number(totalFilasEnDB),
       hexCampoCifradoEnviado: Buffer.from(smtpCifradaBin).toString("hex"),
     };
-  }
+  };
+
+  public readonly listarSensoresFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<SensorFirmwareDTO[]> => {
+    const [filas] = await pila.appRpc.call<[TuplaSensor[]]>(
+      RPC.DB_LISTAR_SENSORES,
+      [...serializarCredencial(cred)],
+      opts
+    );
+    return (filas ?? []).map(mapearTuplaSensor);
+  };
+
+  public readonly guardarSensorFirmware = async (
+    input: GuardarSensorFirmwareInput,
+    opts?: OpcionesLlamada
+  ): Promise<SensorFirmwareDTO> => {
+    const [tupla] = await pila.appRpc.call<[TuplaSensor]>(
+      RPC.DB_GUARDAR_SENSOR,
+      [
+        ...serializarCredencial(input.credencial),
+        input.hexadecimal,
+        Number(input.errorSuperior),
+        Number(input.errorInferior),
+        Number(input.umbralSuperior),
+        Number(input.umbralInferior),
+      ],
+      opts
+    );
+    return mapearTuplaSensor(tupla);
+  };
+
+  public readonly listarUltimosSensosFirmware = async (
+    cred: CredencialRpcDTO,
+    idSensor = 0,
+    limite = 8,
+    opts?: OpcionesLlamada
+  ): Promise<SensoFirmwareDTO[]> => {
+    const [filas] = await pila.appRpc.call<[TuplaSenso[]]>(
+      RPC.DB_ULTIMOS_SENSOS,
+      [...serializarCredencial(cred), Number(idSensor), Number(limite)],
+      opts
+    );
+    return (filas ?? []).map((t) => ({
+      idSenso: Number(t[0]),
+      idSensor: Number(t[1]),
+      temperaturaCruda: Number(t[2]),
+      temperaturaCorregida: Number(t[3]),
+      estadoSensor: Number(t[4]),
+      fechaCreacion: Number(t[5]),
+    }));
+  };
+
+  public readonly listarUltimosEventosFirmware = async (
+    cred: CredencialRpcDTO,
+    idSensor = 0,
+    limite = 8,
+    opts?: OpcionesLlamada
+  ): Promise<EventoSensorFirmwareDTO[]> => {
+    const [filas] = await pila.appRpc.call<[TuplaEvento[]]>(
+      RPC.DB_ULTIMOS_EVENTOS,
+      [...serializarCredencial(cred), Number(idSensor), Number(limite)],
+      opts
+    );
+    return (filas ?? []).map((t) => ({
+      idEventoSensor: Number(t[0]),
+      idSensor: Number(t[1]),
+      idSenso: Number(t[2]),
+      estadoPrevioSensor: Number(t[3]),
+      evento: Number(t[4]),
+      criticidad: Number(t[5]),
+      fechaCreacion: Number(t[6]),
+    }));
+  };
+
+  public readonly listarUltimasAuditoriasFirmware = async (
+    cred: CredencialRpcDTO,
+    limite = 5,
+    opts?: OpcionesLlamada
+  ): Promise<AuditoriaFirmwareRowDTO[]> => {
+    const [filas] = await pila.appRpc.call<[TuplaAuditoria[]]>(
+      RPC.DB_ULTIMAS_AUDITORIAS,
+      [...serializarCredencial(cred), Number(limite)],
+      opts
+    );
+    return (filas ?? []).map((t) => ({
+      idAuditoria: Number(t[0]),
+      idUsuario: Number(t[1]),
+      accion: String(t[2]),
+      detalle: String(t[3]),
+      fechaCreacion: Number(t[4]),
+    }));
+  };
+
+  public readonly listarCorreosFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<CorreoFirmwareDTO[]> => {
+    const [filas] = await pila.appRpc.call<[TuplaCorreo[]]>(
+      RPC.DB_LISTAR_CORREOS,
+      [...serializarCredencial(cred)],
+      opts
+    );
+    return (filas ?? []).map((t) => ({
+      idCorreo: Number(t[0]),
+      nombre: String(t[1]),
+      apellido: String(t[2]),
+      correoElectronico: String(t[3]),
+      tipoRecepcionMensajes: Number(t[4]),
+      estadoEnvio: Number(t[5]),
+      fechaModificacion: Number(t[6]),
+    }));
+  };
+
+  public readonly crearCorreoFirmware = async (
+    input: CrearCorreoFirmwareInput,
+    opts?: OpcionesLlamada
+  ): Promise<CorreoFirmwareDTO> => {
+    const [t] = await pila.appRpc.call<[TuplaCorreo]>(
+      RPC.DB_CREAR_CORREO,
+      [
+        ...serializarCredencial(input.credencial),
+        input.nombre,
+        input.apellido ?? "",
+        input.correoElectronico,
+        Number(input.tipoRecepcionMensajes ?? 0),
+      ],
+      opts
+    );
+    return {
+      idCorreo: Number(t[0]),
+      nombre: String(t[1]),
+      apellido: String(t[2]),
+      correoElectronico: String(t[3]),
+      tipoRecepcionMensajes: Number(t[4]),
+      estadoEnvio: Number(t[5]),
+      fechaModificacion: Number(t[6]),
+    };
+  };
+
+  public readonly obtenerConfigSmtpFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<ConfigSmtpFirmwareResumenDTO> => {
+    const [configurado, hostSmtp, puerto, usuario, emailRemitente, fechaModificacion] =
+      await pila.appRpc.call<[boolean, string, number, string, string, number]>(
+        RPC.DB_OBTENER_SMTP,
+        [...serializarCredencial(cred)],
+        opts
+      );
+    return {
+      configurado: Boolean(configurado),
+      hostSmtp: String(hostSmtp),
+      puerto: Number(puerto),
+      usuario: String(usuario),
+      emailRemitente: String(emailRemitente),
+      fechaModificacion: Number(fechaModificacion),
+    };
+  };
+
+  public readonly obtenerConfigRedYNtpFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<ConfigRedYNtpFirmwareDTO> => {
+    const [ssidSta, ssidAp, fechaModificacion, servidoresNtp] = await pila.appRpc.call<
+      [string, string, number, string[]]
+    >(RPC.DB_OBTENER_RED_Y_NTP, [...serializarCredencial(cred)], opts);
+
+    return {
+      ssidSta: String(ssidSta),
+      ssidAp: String(ssidAp),
+      fechaModificacion: Number(fechaModificacion),
+      servidoresNtp: (servidoresNtp ?? []).map(String),
+    };
+  };
+
+  public readonly guardarConfigRedFirmware = async (
+    input: GuardarRedFirmwareInput,
+    opts?: OpcionesLlamada
+  ): Promise<{ ssidSta: string; ssidAp: string; fechaModificacion: number }> => {
+    const passStaBin = encriptarCampoSensible(input.passwordStaPlana);
+    const passApBin = encriptarCampoSensible(input.passwordApPlana);
+
+    const [ssidSta, ssidAp, fechaModificacion] = await pila.appRpc.call<[string, string, number]>(
+      RPC.DB_GUARDAR_RED,
+      [
+        ...serializarCredencial(input.credencial),
+        input.ssidSta,
+        passStaBin,
+        input.ssidAp,
+        passApBin,
+      ],
+      opts
+    );
+
+    return {
+      ssidSta: String(ssidSta),
+      ssidAp: String(ssidAp),
+      fechaModificacion: Number(fechaModificacion),
+    };
+  };
 }
 
 export const firmware: IFirmware = new FirmwareStub();

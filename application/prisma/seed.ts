@@ -1,16 +1,24 @@
+// ./prisma/seed.ts
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  await prisma.ubicacion.upsert({
-    where: { nombre: "Sin Asignar" },
-    update: {},
-    create: {
-      nombre: "Sin Asignar",
-      descripcion: "Ubicación inicial por defecto para sensores autodescubiertos en el bus OneWire",
-    },
-  });
+  /* 
+  aqui se puede inicializar datos la base de datos 
+  ejemplo:
+    await prisma.conexion_firmware.upsert({
+      where: { id_conexion: 1 },
+      update: {},
+      create: {
+        id_conexion: 1,
+        ip_dhcp: "192.168.4.1",
+        puerto_tcp: 80,
+        puerto_usb: "/tmp/virtual_serial",
+        baudios_usb: 115200,
+      },
+    });
+  */
 }
 
 main()
