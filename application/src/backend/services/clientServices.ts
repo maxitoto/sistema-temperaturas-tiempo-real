@@ -1,23 +1,16 @@
 // Archivo: ./src/backend/services/clientServices.ts
 import { firmware } from "../stubs/clientExample";
-import {
-  conectarPorUSB,
-  desconectarPorUSB,
-  conectarPorWiFi,
-  desconectarPorWiFi,
-  estaConectado,
-  obtenerEstadoConexion,
-  listarPuertosUSB,
-} from "../plugins/conectividad/servicosConectivos";
+import { serviciosConectivos } from "../plugins/conectividad/servicosConectivos";
+import { consultasMixtas } from '../database/consultas/consultasMixtas';
+import { auditoriaRepository } from '../database/consultas/repositories/auditoriaRepository';
+import { sensorRepository } from '../database/consultas/repositories/sensorRepository';
+import { conexionFirmwareRepository } from '../database/consultas/repositories/conexionFirmwareRepository';
 
 export const clientServices = {
-  sumarYLeerEstado: firmware.sumarYLeerEstado,
-  guardarConfiguracionSegura: firmware.guardarConfiguracionSegura,
-  conectarPorUSB,
-  desconectarPorUSB,
-  conectarPorWiFi,
-  desconectarPorWiFi,
-  estaConectado,
-  obtenerEstadoConexion,
-  listarPuertosUSB,
+  ...serviciosConectivos,
+  ...auditoriaRepository,
+  ...consultasMixtas,
+  ...sensorRepository,
+  ...conexionFirmwareRepository,
+  ...firmware,
 };
