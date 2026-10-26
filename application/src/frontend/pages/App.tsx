@@ -1,14 +1,15 @@
-// src/renderer/App.tsx
-import { SumarYLeerEstadoPanel } from '#components/SumarYLeerEstadoPanel';
-import { DatabaseExplorer } from '#components/DatabaseExplorer'
-import { DatosEnVivoPanel } from '#components/DatosEnVivoPanel';
+import { SumarYLeerEstadoPanel } from '../components/SumarYLeerEstadoPanel';
+import { DatosEnVivoPanel }      from '../components/DatosEnVivoPanel';
+import { DatabaseExplorer }      from '../components/DatabaseExplorer';
+import { ConfiguracionRedPanel } from '../components/ConfiguracionRedPanel';
 
 export default function App() {
   return (
-    <main style={{ padding: '1rem', minHeight: '100vh', background: '#A5A5A5' }}>
+    <main style={{ padding: '1rem', minHeight: '100vh', background: '#f0f2f5' }}>
       <SumarYLeerEstadoPanel />
-      <DatabaseExplorer />
       <DatosEnVivoPanel />
+      <DatabaseExplorer />
+      <ConfiguracionRedPanel />
     </main>
   );
 }

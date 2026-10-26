@@ -185,6 +185,7 @@ namespace EsquemaFisicoDB {
         char     STA_password[65];              // default: ""
         char     SSID_AP[33];                   // default: ""
         char     AP_password[65];               // default: ""
+        uint16_t puerto_udp;                    // default: 81
         uint8_t  activa;                        // default: 1
         uint32_t fecha_creacion;                // Inmutable al reemplazar
         uint32_t fecha_modificacion;

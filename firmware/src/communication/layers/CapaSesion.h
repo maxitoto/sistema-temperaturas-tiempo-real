@@ -1,7 +1,12 @@
 // Archivo: ./src/communication/layers/CapaSesion.h
 #pragma once
 #include <Arduino.h>
-#include <mbedtls/md.h>
+#if defined(ESP32)
+  #include <mbedtls/md.h>
+#elif defined(ESP8266)
+  #include <bearssl/bearssl_hash.h>
+#endif
+
 #include "communication/common/BufferRed.h"
 #include "communication/layers/CapaTransporte.h"
 
@@ -95,14 +100,22 @@ class CapaSesion {
             (uint8_t)(nonce >> 8),
             (uint8_t)(nonce & 0xFF)
         };
-        mbedtls_md_context_t ctx;
-        mbedtls_md_init(&ctx);
-        mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
-        mbedtls_md_starts(&ctx);
-        mbedtls_md_update(&ctx, bytesNonce, 4);
-        mbedtls_md_update(&ctx, (const unsigned char*)secretoCompartido, strlen(secretoCompartido));
-        mbedtls_md_finish(&ctx, hashSalida32B);
-        mbedtls_md_free(&ctx);
+        #if defined(ESP32)
+            mbedtls_md_context_t ctx;
+            mbedtls_md_init(&ctx);
+            mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
+            mbedtls_md_starts(&ctx);
+            mbedtls_md_update(&ctx, bytesNonce, 4);
+            mbedtls_md_update(&ctx, (const unsigned char*)secretoCompartido, strlen(secretoCompartido));
+            mbedtls_md_finish(&ctx, hashSalida32B);
+            mbedtls_md_free(&ctx);
+        #elif defined(ESP8266)
+            br_sha256_context ctx;
+            br_sha256_init(&ctx);
+            br_sha256_update(&ctx, bytesNonce, 4);
+            br_sha256_update(&ctx, secretoCompartido, strlen(secretoCompartido));
+            br_sha256_out(&ctx, hashSalida32B);
+        #endif
     }
 
     bool empujarSobreYEnviar(int idNodo, uint8_t tipo, uint16_t sesId, uint16_t reqId,

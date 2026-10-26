@@ -13,6 +13,7 @@ namespace Contratos {
     static const char* const RPC_SUMAR_Y_ESTADO          = "RPC_SUMAR_Y_ESTADO";
     static const char* const RPC_GUARDAR_CONFIG_SEGURA   = "RPC_GUARDAR_CONFIG_SEGURA";
     static const char* const RPC_SYNC_RELOJ              = "RPC_SYNC_RELOJ";
+    static const char* const RPC_REINICIAR_FIRMWARE      = "RPC_REINICIAR_FIRMWARE";
 
     // Nuevos endpoints RPC de Base de Datos (DQL y DML autenticados)
     static const char* const RPC_DB_LISTAR_SENSORES      = "RPC_DB_LISTAR_SENSORES";
@@ -105,17 +106,19 @@ namespace Contratos {
     };
 
     struct GuardarRedInputDTO {
-        char    ssidSta[33];
-        uint8_t passStaCifrada[64];
-        size_t  lenPassSta = 0;
-        char    ssidAp[33];
-        uint8_t passApCifrada[64];
-        size_t  lenPassAp = 0;
+        char     ssidSta[33];
+        uint8_t  passStaCifrada[64];
+        size_t   lenPassSta = 0;
+        char     ssidAp[33];
+        uint8_t  passApCifrada[64];
+        size_t   lenPassAp = 0;
+        uint32_t puertoUdp = 81;
         bool deserializar(LectorMsgPack& r) {
             return r.leerTexto(ssidSta, sizeof(ssidSta)) &&
                    r.leerBinario(passStaCifrada, sizeof(passStaCifrada), lenPassSta) &&
                    r.leerTexto(ssidAp, sizeof(ssidAp)) &&
-                   r.leerBinario(passApCifrada, sizeof(passApCifrada), lenPassAp);
+                   r.leerBinario(passApCifrada, sizeof(passApCifrada), lenPassAp) &&
+                   r.leerUInt32(puertoUdp);
         }
     };
 
@@ -221,6 +224,7 @@ namespace Contratos {
                                    const ConfigHeladeraDTO& cfg,
                                    int idNodo,
                                    RespuestaConfigDTO& out) = 0;
+        virtual bool reiniciarFirmware(const UsuarioCredencialDTO& cred) = 0;
 
         // Consultas DQL y Mutaciones DML sobre los Repositorios de la MicroSD
         virtual size_t listarSensores(const UsuarioCredencialDTO& cred, FilaSensor* out, size_t maxItems) = 0;

@@ -212,6 +212,7 @@ class CapaTransporte {
                 ctrl.hayPaqueteEnCola = false;
                 ctrl.seqRemotaEsperada = seq + 1;
                 enviarControlTCP(id, ptoDestino, ptoOrigen, FLAG_ACK, ctrl.seqLocal, ctrl.seqRemotaEsperada);
+                red->desconectarNodo(id);
                 return false;
             }
 

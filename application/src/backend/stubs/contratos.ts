@@ -121,7 +121,14 @@ export interface ConfigSmtpFirmwareResumenDTO {
 export interface ConfigRedYNtpFirmwareDTO {
   ssidSta: string;
   ssidAp: string;
+  puertoUdp: number;
   fechaModificacion: number;
+  staConectado: boolean;
+  ipSta: string;
+  apActivo: boolean;
+  ipAp: string;
+  macWiFi: string;
+  clientesUdpActivos: number;
   servidoresNtp: string[];
 }
 
@@ -131,6 +138,16 @@ export interface GuardarRedFirmwareInput {
   passwordStaPlana: string;
   ssidAp: string;
   passwordApPlana: string;
+  puertoUdp?: number;
+}
+
+export interface RespuestaGuardarRedFirmwareDTO {
+  ssidSta: string;
+  ssidAp: string;
+  puertoUdp: number;
+  fechaModificacion: number;
+  requiereReinicio: boolean;
+  mensaje: string;
 }
 
 export interface RespuestaReloj {
@@ -144,6 +161,8 @@ export interface IFirmware {
   sumarYLeerEstado: (base: number, factor: number, opts?: OpcionesLlamada) => Promise<RespuestaCalculoFirmware>;
   guardarConfiguracionSegura: (dto: SolicitudConfigSeguraDTO, opts?: OpcionesLlamada) => Promise<RespuestaAuditoriaFirmwareDTO>;
 
+  reiniciarFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<{ reiniciando: boolean; detalle: string }>;
+
   // Consultas DQL y Mutaciones DML hacia la MicroSD del Firmware
   listarSensoresFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<SensorFirmwareDTO[]>;
   guardarSensorFirmware: (input: GuardarSensorFirmwareInput, opts?: OpcionesLlamada) => Promise<SensorFirmwareDTO>;
@@ -154,7 +173,7 @@ export interface IFirmware {
   crearCorreoFirmware: (input: CrearCorreoFirmwareInput, opts?: OpcionesLlamada) => Promise<CorreoFirmwareDTO>;
   obtenerConfigSmtpFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<ConfigSmtpFirmwareResumenDTO>;
   obtenerConfigRedYNtpFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<ConfigRedYNtpFirmwareDTO>;
-  guardarConfigRedFirmware: (input: GuardarRedFirmwareInput, opts?: OpcionesLlamada) => Promise<{ ssidSta: string; ssidAp: string; fechaModificacion: number }>;
+  guardarConfigRedFirmware: (input: GuardarRedFirmwareInput, opts?: OpcionesLlamada) => Promise<RespuestaGuardarRedFirmwareDTO>;
 }
 
 // ---------- Contrato: servicio que EXPONE el backend (firmware lo llama) ----------
@@ -168,6 +187,7 @@ export const RPC = {
   SUMAR_Y_ESTADO: "RPC_SUMAR_Y_ESTADO",
   GUARDAR_CONFIG_SEGURA: "RPC_GUARDAR_CONFIG_SEGURA",
   SYNC_RELOJ: "RPC_SYNC_RELOJ",
+  REINICIAR_FIRMWARE: "RPC_REINICIAR_FIRMWARE",
   DB_LISTAR_SENSORES: "RPC_DB_LISTAR_SENSORES",
   DB_GUARDAR_SENSOR: "RPC_DB_GUARDAR_SENSOR",
   DB_ULTIMOS_SENSOS: "RPC_DB_ULTIMOS_SENSOS",

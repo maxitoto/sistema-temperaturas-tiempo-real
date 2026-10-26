@@ -313,47 +313,98 @@ export class FirmwareStub implements IFirmware {
     };
   };
 
-  public readonly obtenerConfigRedYNtpFirmware = async (
+public readonly obtenerConfigRedYNtpFirmware = async (
     cred: CredencialRpcDTO,
     opts?: OpcionesLlamada
   ): Promise<ConfigRedYNtpFirmwareDTO> => {
-    const [ssidSta, ssidAp, fechaModificacion, servidoresNtp] = await pila.appRpc.call<
-      [string, string, number, string[]]
+    const [
+      ssidSta,
+      ssidAp,
+      puertoUdp,
+      fechaModificacion,
+      staConectado,
+      ipSta,
+      apActivo,
+      ipAp,
+      macWiFi,
+      clientesUdpActivos,
+      servidoresNtp,
+    ] = await pila.appRpc.call<
+      [string, string, number, number, boolean, string, boolean, string, string, number, string[]]
     >(RPC.DB_OBTENER_RED_Y_NTP, [...serializarCredencial(cred)], opts);
 
     return {
       ssidSta: String(ssidSta),
       ssidAp: String(ssidAp),
+      puertoUdp: Number(puertoUdp || 81),
       fechaModificacion: Number(fechaModificacion),
+      staConectado: Boolean(staConectado),
+      ipSta: String(ipSta),
+      apActivo: Boolean(apActivo),
+      ipAp: String(ipAp),
+      macWiFi: String(macWiFi),
+      clientesUdpActivos: Number(clientesUdpActivos),
       servidoresNtp: (servidoresNtp ?? []).map(String),
     };
   };
 
-  public readonly guardarConfigRedFirmware = async (
+public readonly guardarConfigRedFirmware = async (
     input: GuardarRedFirmwareInput,
     opts?: OpcionesLlamada
-  ): Promise<{ ssidSta: string; ssidAp: string; fechaModificacion: number }> => {
+  ): Promise<{
+    ssidSta: string;
+    ssidAp: string;
+    puertoUdp: number;
+    fechaModificacion: number;
+    requiereReinicio: boolean;
+    mensaje: string;
+  }> => {
+    if (input.ssidAp.trim().length > 0 && input.passwordApPlana.length > 0 && input.passwordApPlana.length < 8) {
+      throw new Error("La contraseña de la red AP (WPA2) debe tener al menos 8 caracteres o dejarse vacía.");
+    }
+
     const passStaBin = encriptarCampoSensible(input.passwordStaPlana);
     const passApBin = encriptarCampoSensible(input.passwordApPlana);
+    const puerto = Number(input.puertoUdp ?? 81);
 
-    const [ssidSta, ssidAp, fechaModificacion] = await pila.appRpc.call<[string, string, number]>(
-      RPC.DB_GUARDAR_RED,
-      [
-        ...serializarCredencial(input.credencial),
-        input.ssidSta,
-        passStaBin,
-        input.ssidAp,
-        passApBin,
-      ],
-      opts
-    );
+    const [ssidSta, ssidAp, puertoUdp, fechaModificacion, requiereReinicio] =
+      await pila.appRpc.call<[string, string, number, number, boolean]>(
+        RPC.DB_GUARDAR_RED,
+        [
+          ...serializarCredencial(input.credencial),
+          input.ssidSta.trim(),
+          passStaBin,
+          input.ssidAp.trim(),
+          passApBin,
+          puerto,
+        ],
+        opts
+      );
 
     return {
       ssidSta: String(ssidSta),
       ssidAp: String(ssidAp),
+      puertoUdp: Number(puertoUdp),
       fechaModificacion: Number(fechaModificacion),
+      requiereReinicio: Boolean(requiereReinicio),
+      mensaje: "Configuración guardada en MicroSD. Reinicie el firmware para aplicar la red y el puerto.",
     };
   };
-}
+
+  public readonly reiniciarFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<{ reiniciando: boolean; detalle: string }> => {
+    const [reiniciando, detalle] = await pila.appRpc.call<[boolean, string]>(
+      RPC.REINICIAR_FIRMWARE,
+      [...serializarCredencial(cred)],
+      opts
+    );
+    return {
+      reiniciando: Boolean(reiniciando),
+      detalle: String(detalle),
+    };
+  };
+};
 
 export const firmware: IFirmware = new FirmwareStub();

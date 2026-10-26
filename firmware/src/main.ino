@@ -29,8 +29,8 @@ EstadoSistema gEstadoSistema;
 PuertoUSB puertoUsb(115200);
 RedInterna redAp;
 RedHost redSta;
-ServidorUDP ServidorUDP(81, 3);
-Modem modem(&redAp, &redSta, &ServidorUDP);
+ServidorUDP servidorUdp(81, 3);
+Modem modem(&redAp, &redSta, &servidorUdp);
 MicroSD tarjetaSd(PIN_CS_SD);
 
 // 2. Base de Datos del Firmware (SGBD + ClienteORM)
@@ -38,7 +38,7 @@ SGBD::MotorSGBD motorSgbd(&tarjetaSd);
 ORM::ClienteORM dbOrm(&motorSgbd);
 
 // 3. Pila de Comunicaciones OSI y Planificador
-ContenedorComunicacion pila(&puertoUsb, &ServidorUDP, "SECRETO_HMAC_DEFAULT");
+ContenedorComunicacion pila(&puertoUsb, &servidorUdp, "SECRETO_HMAC_DEFAULT");
 Planificador scheduler;
 
 BackendStub backendStub(pila.appRpc);
@@ -48,6 +48,14 @@ void tareaComunicacion() {
     DebugOLED::contarCicloScheduler();
     modem.mantenerRed();
     pila.procesarCiclo();
+
+    // Si se solicitó reinicio remoto por RPC, espera 400ms para que salga el ACK y reinicia
+    if (gEstadoSistema.reinicioPendiente &&
+        (millis() - gEstadoSistema.instanteSolicitudReinicioMs >= 400UL)) {
+        tarjetaSd.sincronizarTodo();
+        delay(50);
+        ESP.restart();
+    }
 }
 
 void tareaSincronizacionPeriodica() {
@@ -63,7 +71,9 @@ void tareaSincronizacionPeriodica() {
 
 void tareaEscribirEnOled() {
     bool usbOk  = pila.sesion.estaAutenticado(0);
-    bool wifiOk = pila.sesion.estaAutenticado(1) || pila.sesion.estaAutenticado(2);
+    bool wifiOk = pila.sesion.estaAutenticado(1) ||
+                  pila.sesion.estaAutenticado(2) ||
+                  pila.sesion.estaAutenticado(3);
     DebugOLED::refrescar(usbOk, wifiOk, gEstadoSistema.totalLlamadasRecibidas);
 }
 
@@ -71,20 +81,30 @@ void setup() {
     puertoUsb.inicializar();
     DebugOLED::inicializar();
 
-    // 1. Monta la MicroSD, ejecuta el DDL de las 10 tablas, vincula Repositorios,
-    //    siembra datos iniciales y registra los Skeletons RPC y la seguridad
-    ServerExampleStub::registrarStubsServidor(pila.appRpc, pila.presentacion, dbOrm);
+    // 1. Monta la MicroSD, ejecuta DDL, vincula Repositorios y registra Skeletons RPC
+    ServerExampleStub::registrarStubsServidor(pila.appRpc, pila.presentacion, dbOrm, modem);
 
-    // 2. Si hay credenciales de red guardadas en /db/wifi.bin las usa; si no, usa Wokwi-GUEST
+    // 2. Lee /db/wifi.bin: si hay configuración la aplica en RAM (incluyendo puerto UDP);
+    //    si no hay nada guardado, despierta sin saber nada (Wi-Fi OFF) y continúa normal por USB.
     EsquemaFisicoDB::FilaConfiguracionConectividad cfgRed = {};
     if (dbOrm.conectividad.obtener(cfgRed) &&
         (cfgRed.SSID_STA[0] != '\0' || cfgRed.SSID_AP[0] != '\0')) {
         bool usarAp  = (cfgRed.SSID_AP[0] != '\0');
         bool usarSta = (cfgRed.SSID_STA[0] != '\0');
+        uint16_t pto = (cfgRed.puerto_udp > 0) ? cfgRed.puerto_udp : 81;
+
         modem.configurarRedes(cfgRed.SSID_AP, cfgRed.AP_password, usarAp,
-                              cfgRed.SSID_STA, cfgRed.STA_password, usarSta);
+                              cfgRed.SSID_STA, cfgRed.STA_password, usarSta, pto);
+
+        if (modem.estaStaConectado()) {
+            String msg = "STA:" + modem.obtenerIPSta();
+            DebugOLED::registrarRx(1, msg.c_str(), pto);
+        } else if (modem.estaApActiva()) {
+            String msg = "AP:" + modem.obtenerIPAp();
+            DebugOLED::registrarRx(1, msg.c_str(), pto);
+        }
     } else {
-        modem.configurarRedes("", "", false, "Wokwi-GUEST", "", true);
+        modem.inicializar();
     }
 
     // 3. Registrar tareas cooperativas

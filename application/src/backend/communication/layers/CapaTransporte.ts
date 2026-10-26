@@ -142,11 +142,29 @@ export class CapaTransporte {
     this.red.bajarPaqueteUnicast(idNodo, pktCtrl);
   }
 
-  // Inicia el Three-Way Handshake TCP con reintento periódico de SYN cada 600ms
+  public cerrarConexionTCP(idNodo: number, puerto = CapaTransporte.PUERTO_RPC): void {
+    if (idNodo < 0 || idNodo >= LimitesPila.MAX_NODOS_RED) return;
+    const ctrl = this.nodos[idNodo];
+    if (ctrl.estado === EstadoTCP.TCP_ESTABLECIDO) {
+      const seqFin = ctrl.seqLocal & 0xffff;
+      ctrl.seqLocal = (ctrl.seqLocal + 1) & 0xffff;
+      this.enviarControlTCP(
+        idNodo,
+        puerto,
+        puerto,
+        CapaTransporte.FLAG_FIN | CapaTransporte.FLAG_ACK,
+        seqFin,
+        ctrl.seqRemotaEsperada
+      );
+    }
+    this.limpiarTimerArq(ctrl, true);
+    ctrl.estado = EstadoTCP.TCP_CERRADO;
+  }
+
   public async conectarTCP(
     idNodo: number,
     puerto = CapaTransporte.PUERTO_RPC,
-    timeoutMs = 3500
+    timeoutMs = 6000
   ): Promise<void> {
     if (idNodo < 0 || idNodo >= LimitesPila.MAX_NODOS_RED) {
       throw new Error(`idNodo fuera de rango: ${idNodo}`);
@@ -163,7 +181,7 @@ export class CapaTransporte {
         if (ctrl.estado === EstadoTCP.TCP_SYN_ENVIADO) {
           this.enviarControlTCP(idNodo, puerto, puerto, CapaTransporte.FLAG_SYN, seqInicial, 0);
         }
-      }, 1200);
+      }, 800);
 
       const timer = setTimeout(() => {
         clearInterval(retrySyn);
@@ -455,4 +473,5 @@ export class CapaTransporte {
       }
     }, CapaTransporte.RTO_MS);
   }
-}
+  
+};

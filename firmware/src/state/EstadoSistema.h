@@ -8,6 +8,9 @@ struct EstadoSistema {
     uint32_t ultimoUnixTimestamp = 0;
     char zonaHoraria[24] = "SIN_SYNC";
     bool relojSincronizado = false;
+
+    bool reinicioPendiente = false;
+    unsigned long instanteSolicitudReinicioMs = 0;
     
 };
 

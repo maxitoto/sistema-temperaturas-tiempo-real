@@ -9,6 +9,7 @@
 #include "stubs/contratos.h"
 #include "database/orm/ClienteORM.h"
 #include "database/repositories/FirmwareRepositories.h"
+#include "plugins/conectividad/modem/Modem.h"
 
 namespace ServerExampleStub {
 
@@ -20,6 +21,11 @@ namespace ServerExampleStub {
 
     inline ClienteORM*& ormActivo() {
         static ClienteORM* ptr = nullptr;
+        return ptr;
+    }
+
+    inline Modem*& modemActivo() {
+        static Modem* ptr = nullptr;
         return ptr;
     }
 
@@ -139,6 +145,7 @@ namespace ServerExampleStub {
         return strcmp(comando, RPC_GUARDAR_CONFIG_SEGURA) == 0 ||
                strcmp(comando, RPC_DB_GUARDAR_SENSOR) == 0 ||
                strcmp(comando, RPC_DB_CREAR_CORREO) == 0 ||
+               strcmp(comando, RPC_REINICIAR_FIRMWARE) == 0 ||
                strcmp(comando, RPC_DB_GUARDAR_RED) == 0;
     }
 
@@ -407,9 +414,23 @@ namespace ServerExampleStub {
             desencriptarCampoSensible(in.passStaCifrada, in.lenPassSta, outRed.STA_password, sizeof(outRed.STA_password));
             strncpy(outRed.SSID_AP, in.ssidAp, sizeof(outRed.SSID_AP) - 1);
             desencriptarCampoSensible(in.passApCifrada, in.lenPassAp, outRed.AP_password, sizeof(outRed.AP_password));
+            outRed.puerto_udp = (in.puertoUdp > 0 && in.puertoUdp <= 65535) ? (uint16_t)in.puertoUdp : 81;
 
             if (!repositorios().configuraciones.guardarConectividad(outRed, ahora, sesion)) return false;
             repositorios().auditorias.registrar(sesion.idUsuario, "CAMBIO_WIFI", outRed.SSID_STA, ahora, sesion);
+            gEstadoSistema.totalLlamadasRecibidas++;
+            return true;
+        }
+
+        bool reiniciarFirmware(const UsuarioCredencialDTO& cred) override {
+            ContextoSesionSGBD sesion = construirSesionDesdeCredencial(cred);
+            if (!sesion.autenticado || sesion.rol != ROL_ADMIN) return false;
+
+            uint32_t ahora = gEstadoSistema.ultimoUnixTimestamp;
+            repositorios().auditorias.registrar(sesion.idUsuario, "REINICIO_REMOTO", "SOLICITADO_APP", ahora, sesion);
+
+            gEstadoSistema.reinicioPendiente = true;
+            gEstadoSistema.instanteSolicitudReinicioMs = millis();
             gEstadoSistema.totalLlamadasRecibidas++;
             return true;
         }
@@ -589,11 +610,26 @@ namespace ServerExampleStub {
             size_t totalNtp = 0;
             servicioFirmware()->obtenerConfigRedYNtp(auth.usuario, red, ntp, totalNtp);
 
-            if (!resp.iniciarArray(5) ||
+            uint16_t pto = (red.puerto_udp > 0) ? red.puerto_udp : (modemActivo() ? modemActivo()->obtenerPuertoUDP() : 81);
+            bool staOk   = modemActivo() ? modemActivo()->estaStaConectado() : false;
+            String ipSta = modemActivo() ? modemActivo()->obtenerIPSta() : String("0.0.0.0");
+            bool apOk    = modemActivo() ? modemActivo()->estaApActiva() : false;
+            String ipAp  = modemActivo() ? modemActivo()->obtenerIPAp() : String("0.0.0.0");
+            String mac   = modemActivo() ? modemActivo()->obtenerMAC() : String("");
+            uint8_t cli  = modemActivo() ? modemActivo()->obtenerClientesUDPActivos() : 0;
+
+            if (!resp.iniciarArray(12) ||
                 !resp.escribirTexto("OK") ||
                 !resp.escribirTexto(red.SSID_STA) ||
                 !resp.escribirTexto(red.SSID_AP) ||
+                !resp.escribirUInt(pto) ||
                 !resp.escribirUInt(red.fecha_modificacion) ||
+                !resp.escribirBool(staOk) ||
+                !resp.escribirTexto(ipSta.c_str()) ||
+                !resp.escribirBool(apOk) ||
+                !resp.escribirTexto(ipAp.c_str()) ||
+                !resp.escribirTexto(mac.c_str()) ||
+                !resp.escribirUInt(cli) ||
                 !resp.iniciarArray(totalNtp)) {
                 return false;
             }
@@ -608,21 +644,36 @@ namespace ServerExampleStub {
                                           EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             GuardarRedInputDTO in;
-            if (cantArgs < 8 || !auth.deserializar(args) || !in.deserializar(args)) return false;
+            if (cantArgs < 9 || !auth.deserializar(args) || !in.deserializar(args)) return false;
 
             FilaConfiguracionConectividad red = {};
             if (!servicioFirmware()->guardarConfigRed(auth.usuario, in, red)) return false;
-            return resp.iniciarArray(4) &&
+            return resp.iniciarArray(6) &&
                    resp.escribirTexto("OK") &&
                    resp.escribirTexto(red.SSID_STA) &&
                    resp.escribirTexto(red.SSID_AP) &&
-                   resp.escribirUInt(red.fecha_modificacion);
+                   resp.escribirUInt(red.puerto_udp) &&
+                   resp.escribirUInt(red.fecha_modificacion) &&
+                   resp.escribirBool(true); // requiereReinicio = true
+        });
+
+        appRpc.on(RPC_REINICIAR_FIRMWARE, [](size_t cantArgs, LectorMsgPack& args,
+                                             EscritorMsgPack& resp, const MetaCall&) -> bool {
+            CredencialRpcDTO auth;
+            if (cantArgs < 4 || !auth.deserializar(args)) return false;
+            if (!servicioFirmware()->reiniciarFirmware(auth.usuario)) return false;
+            return resp.iniciarArray(3) &&
+                   resp.escribirTexto("OK") &&
+                   resp.escribirBool(true) &&
+                   resp.escribirTexto("REINICIANDO_EN_400MS");
         });
     }
 
     inline void registrarStubsServidor(CapaAplicacion& appRpc,
                                        CapaPresentacion& capaPres,
-                                       ClienteORM& orm) {
+                                       ClienteORM& orm,
+                                       Modem& modem) {
+        modemActivo() = &modem;
         inicializarBaseDeDatosORM(orm);
         capaPres.configurarTransformadores(transformarMensajeCanalTLS, transformarMensajeCanalTLS);
         appRpc.establecerEvaluadorPolitica(evaluarPoliticaProcesoUsuario);

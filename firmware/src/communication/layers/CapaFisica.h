@@ -68,4 +68,10 @@ class CapaFisica {
         int indiceUDP = idMedio - 1;
         return udpServer ? udpServer->enviarBytesCliente(indiceUDP, datos, longitud) : 0;
     }
+
+    void desconectarMedio(int idMedio) {
+        if (idMedio >= 1 && udpServer) {
+            udpServer->liberarCliente(idMedio - 1);
+        }
+    }
 };

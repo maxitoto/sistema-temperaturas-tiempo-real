@@ -26,50 +26,58 @@ class Modem {
         : ap(redAp), sta(redSta), udp(servidor) {}
 
     void inicializar() {
+        if (udp) udp->detener();
+        if (ap)  ap->detener();
+        if (sta) sta->desconectar();
         WiFi.persistent(false);
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
         servidorIniciado = false;
     }
 
-    // Orquesta el levantamiento de las interfaces según las credenciales recibidas en el boot
+    // Levanta las interfaces en caliente (RAM) con los datos de la base de datos (incluyendo puerto UDP)
     void configurarRedes(const String& ssidAP, const String& passAP, bool requiereAP,
-                         const String& ssidSTA, const String& passSTA, bool requiereSTA) {
+                         const String& ssidSTA, const String& passSTA, bool requiereSTA,
+                         uint16_t puertoUdp = 81) {
         inicializar();
-        bool apValido = requiereAP && ssidAP.length() > 0;
+        if (udp && puertoUdp > 0) {
+            udp->cambiarPuerto((int)puertoUdp);
+        }
 
-        if (apValido && requiereSTA) {
+        bool apValido  = requiereAP && ssidAP.length() > 0;
+        bool staValido = requiereSTA && ssidSTA.length() > 0;
+
+        // Si no hay redes configuradas, el sistema despierta sin saber nada (Wi-Fi OFF, solo USB activo)
+        if (!apValido && !staValido) {
+            return;
+        }
+
+        if (apValido && staValido) {
             establecerModo(WIFI_AP_STA);
         } else if (apValido) {
             establecerModo(WIFI_AP);
-        } else if (requiereSTA) {
-            establecerModo(WIFI_STA);
         } else {
-            // Modo rescate si no hay configuración previa
-            establecerModo(WIFI_AP);
-            ap->iniciar("Rescate_ESP", "12345678");
+            establecerModo(WIFI_STA);
         }
 
         if (apValido) {
             ap->iniciar(ssidAP, passAP);
         }
 
-        if (requiereSTA) {
-            sta->conectar(ssidSTA, passSTA);
+        if (staValido) {
+            sta->conectar(ssidSTA, passSTA, 15); // Hasta 5s esperando DHCP del edificio
         }
 
-        if (ap->estaActiva() || sta->estaConectado()) {
+        if ((ap && ap->estaActiva()) || (sta && sta->estaConectado())) {
             udp->iniciar();
             servidorIniciado = true;
         }
 
-        // Evita disparar verificarDNS() bloqueante en el primer ciclo tras conectar
         ultimoChequeoInternet = millis();
     }
 
-    // Mantenimiento de conexiones físicas del módem (llamado en el loop de tareas)
     void mantenerRed() {
-        if (!servidorIniciado && (ap->estaActiva() || sta->estaConectado())) {
+        if (!servidorIniciado && ((ap && ap->estaActiva()) || (sta && sta->estaConectado()))) {
             udp->iniciar();
             servidorIniciado = true;
         }
@@ -78,7 +86,7 @@ class Modem {
             udp->procesarNuevasConexiones();
         }
 
-        if (sta->estaConectado()) {
+        if (sta && sta->estaConectado()) {
             unsigned long ahora = millis();
             if (ahora - ultimoChequeoInternet >= INTERVALO_CHEQUEO_INTERNET) {
                 estadoInternet = tieneGateway();
@@ -87,12 +95,26 @@ class Modem {
         }
     }
 
-    void establecerModo(WiFiMode_t modo) {
-        WiFi.mode(modo);
+    void establecerModo(WiFiMode_t modo) { WiFi.mode(modo); }
+    WiFiMode_t obtenerModo() const { return WiFi.getMode(); }
+
+    bool estaStaConectado() const { return sta ? sta->estaConectado() : false; }
+    bool estaApActiva() const     { return ap ? ap->estaActiva() : false; }
+
+    String obtenerIPSta() const {
+        return (sta && sta->estaConectado()) ? sta->obtenerIP() : String("0.0.0.0");
     }
 
-    WiFiMode_t obtenerModo() const {
-        return WiFi.getMode();
+    String obtenerIPAp() const {
+        return (ap && ap->estaActiva()) ? ap->obtenerIP() : String("0.0.0.0");
+    }
+
+    uint16_t obtenerPuertoUDP() const {
+        return udp ? (uint16_t)udp->obtenerPuerto() : 81;
+    }
+
+    uint8_t obtenerClientesUDPActivos() const {
+        return udp ? (uint8_t)udp->contarClientesActivos() : 0;
     }
 
     bool tieneGateway() const {
@@ -108,11 +130,6 @@ class Modem {
         return (err == 1 && ipTest.toString() != "0.0.0.0");
     }
 
-    bool tieneInternetReal() const {
-        return estadoInternet;
-    }
-
-    String obtenerMAC() const {
-        return WiFi.macAddress();
-    }
+    bool tieneInternetReal() const { return estadoInternet; }
+    String obtenerMAC() const      { return WiFi.macAddress(); }
 };

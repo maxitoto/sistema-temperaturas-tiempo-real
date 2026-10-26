@@ -6,6 +6,9 @@
 .vscode/ipch
 .vscode/settings.json
 
+#microSd Wokwi Se llena con las simulaciones de wokwi
+sdcard/*
+
 
 #para la IA
 migration

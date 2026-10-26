@@ -66,6 +66,7 @@ export const serviciosConectivos = {
     }
   },
   desconectarPorUSB: async (): Promise<void> => {
+    pila.transporte.cerrarConexionTCP(ID_NODO_USB);
     pila.sesion.cerrarSesionLocal(ID_NODO_USB);
     await driverUSB.desconectar();
     if (pila.fisica.estaActivo(ID_NODO_WIFI) && pila.sesion.estaAutenticada(ID_NODO_WIFI)) {
@@ -105,6 +106,7 @@ export const serviciosConectivos = {
     }
   },
   desconectarPorWiFi: async (): Promise<void> => {
+    pila.transporte.cerrarConexionTCP(ID_NODO_WIFI);
     pila.sesion.cerrarSesionLocal(ID_NODO_WIFI);
     driverWiFi.desconectar();
     if (pila.fisica.estaActivo(ID_NODO_USB) && pila.sesion.estaAutenticada(ID_NODO_USB)) {

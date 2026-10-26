@@ -8,11 +8,12 @@
   #include <ESP8266WiFi.h>
   #include <WiFiUdp.h>
 #endif
+#include "debug/DebugOLED.h"
 
 class ServidorUDP {
   public:
     static const size_t CAP_BUFFER_RX_UDP = 512;
-    static const unsigned long TIMEOUT_SLOT_UDP_MS = 60000UL;
+    static const unsigned long TIMEOUT_SLOT_UDP_MS = 15000UL;
 
     struct SlotClienteUDP {
         bool activo = false;
@@ -35,7 +36,6 @@ class ServidorUDP {
         void encolarBytes(const uint8_t* datos, size_t len) {
             for (size_t i = 0; i < len; i++) {
                 if (count >= CAP_BUFFER_RX_UDP) {
-                    // Si se llena el anillo, descartamos el byte más viejo
                     tail = (tail + 1) % CAP_BUFFER_RX_UDP;
                     count--;
                 }
@@ -76,7 +76,7 @@ class ServidorUDP {
             }
         }
 
-        // 2. Buscar un slot libre o expirado
+        // 2. Buscar un slot libre o inactivo por timeout (> 15s sin latidos)
         for (int i = 0; i < maxClientes; i++) {
             if (!clientes[i].activo || (ahora - clientes[i].ultimaActividadMs > TIMEOUT_SLOT_UDP_MS)) {
                 clientes[i].reiniciar();
@@ -88,13 +88,8 @@ class ServidorUDP {
             }
         }
 
-        // 3. Si todos están ocupados, reutilizar el slot 0 (reconexión inmediata desde nuevo puerto efímero)
-        clientes[0].reiniciar();
-        clientes[0].activo = true;
-        clientes[0].ip = ipRemota;
-        clientes[0].puerto = puertoRemoto;
-        clientes[0].ultimaActividadMs = ahora;
-        return 0;
+        // 3. Los 3 slots están ocupados y activos: rechazar la 4ta aplicación
+        return -1;
     }
 
   public:
@@ -105,6 +100,14 @@ class ServidorUDP {
 
     ~ServidorUDP() {
         delete[] clientes;
+    }
+
+    void cambiarPuerto(int nuevoPuerto) {
+        if (nuevoPuerto <= 0 || nuevoPuerto > 65535) return;
+        bool estabaEscuchando = escuchando;
+        if (estabaEscuchando) detener();
+        puertoLocal = nuevoPuerto;
+        if (estabaEscuchando) iniciar();
     }
 
     void iniciar() {
@@ -121,6 +124,12 @@ class ServidorUDP {
         }
     }
 
+    void liberarCliente(int indice) {
+        if (indice >= 0 && indice < maxClientes) {
+            clientes[indice].reiniciar();
+        }
+    }
+
     int obtenerPuerto() const {
         return puertoLocal;
     }
@@ -129,7 +138,21 @@ class ServidorUDP {
         return maxClientes;
     }
 
-    // Drena los datagramas UDP entrantes del hardware Wi-Fi y los reparte al slot correspondiente
+    int contarClientesActivos() {
+        unsigned long ahora = millis();
+        int activos = 0;
+        for (int i = 0; i < maxClientes; i++) {
+            if (clientes[i].activo) {
+                if (ahora - clientes[i].ultimaActividadMs > TIMEOUT_SLOT_UDP_MS) {
+                    clientes[i].reiniciar();
+                } else {
+                    activos++;
+                }
+            }
+        }
+        return activos;
+    }
+
     void procesarNuevasConexiones() {
         if (!escuchando) return;
 
@@ -146,6 +169,9 @@ class ServidorUDP {
                 if (slot >= 0) {
                     clientes[slot].encolarBytes(tempBuf, (size_t)leidos);
                 }
+            }
+            if (slot < 0) {
+                DebugOLED::registrarError("MAX 3 CLI UDP");
             }
             packetSize = udp.parsePacket();
         }
@@ -182,10 +208,7 @@ class ServidorUDP {
         return escritos;
     }
 
-    bool hayClientesConectados() const {
-        for (int i = 0; i < maxClientes; i++) {
-            if (clientes[i].activo) return true;
-        }
-        return false;
+    bool hayClientesConectados() {
+        return contarClientesActivos() > 0;
     }
 };

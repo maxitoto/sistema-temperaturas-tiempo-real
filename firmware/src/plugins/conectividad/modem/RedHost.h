@@ -14,15 +14,15 @@ class RedHost {
   public:
     RedHost() {}
 
-    bool conectar(const String& ssid, const String& password, int maxIntentos = 15) {
+    bool conectar(const String& ssid, const String& password, int maxIntentos = 3) {
         ssidObjetivo = ssid;
-        WiFi.begin(ssid.c_str(), password.c_str());
+        WiFi.begin(ssid.c_str(), password.c_str(), 6); // Canal 6: evita escaneo infinito en Wokwi
 
         int intentos = 0;
         while (WiFi.status() != WL_CONNECTED && intentos < maxIntentos) {
-            delay(250);
-            yield();
+            delay(500);
             intentos++;
+            yield();
         }
         return estaConectado();
     }
