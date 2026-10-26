@@ -5,7 +5,6 @@
 #include "communication/common/BufferRed.h"
 #include "communication/layers/CapaTransporte.h"
 
-// PDU que sube de la Capa de Sesión a la Capa de Presentación
 struct MensajeSesion {
     int idNodo = -1;
     uint8_t tipo = 0;
@@ -13,10 +12,13 @@ struct MensajeSesion {
     uint16_t reqId = 0;
     uint16_t payloadLen = 0;
     void* callbackPendiente = nullptr;
+    bool fiable = true; // true = llegó por PROTO_TCP (ARQ), false = llegó por PROTO_UDP (Tiempo Real)
 
     MensajeSesion() = default;
-    MensajeSesion(int nodo, uint8_t t, uint16_t sid, uint16_t rid, uint16_t len, void* cb = nullptr)
-        : idNodo(nodo), tipo(t), sessionId(sid), reqId(rid), payloadLen(len), callbackPendiente(cb) {}
+    MensajeSesion(int nodo, uint8_t t, uint16_t sid, uint16_t rid, uint16_t len,
+                  void* cb = nullptr, bool esFiable = true)
+        : idNodo(nodo), tipo(t), sessionId(sid), reqId(rid),
+          payloadLen(len), callbackPendiente(cb), fiable(esFiable) {}
 };
 
 class CapaSesion {
@@ -24,7 +26,6 @@ class CapaSesion {
     static const uint8_t VERSION_PROTOCOLO       = 0x01;
     static const size_t  MAX_PETICIONES_EN_VUELO = 4;
 
-    // Tipos de mensaje del Sobre (Envelope de 8 bytes)
     static const uint8_t TIPO_HEARTBEAT       = 0x01;
     static const uint8_t TIPO_HANDSHAKE_INIT  = 0x02;
     static const uint8_t TIPO_HANDSHAKE_CHAL  = 0x03;
@@ -36,7 +37,6 @@ class CapaSesion {
     static const uint8_t TIPO_TIMEOUT_LOCAL   = 0xFE; // Señal interna de timeout en Capa 5
     static const uint8_t TIPO_ERROR_SESION    = 0xFF;
 
-    // Códigos de error de Sesión (1 byte)
     static const uint8_t ERR_NO_AUTORIZADO    = 0x01;
     static const uint8_t ERR_AUTH_FALLIDA     = 0x02;
     static const uint8_t ERR_SOBRE_INVALIDO   = 0x03;
@@ -134,7 +134,7 @@ class CapaSesion {
             memcpy(pktCtrl.ptrPayloadApp(), datos, len);
             pktCtrl.longitud = len;
         }
-        empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pktCtrl);
+        empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pktCtrl, CapaTransporte::PROTO_TCP);
     }
 
     void cancelarPendientesNodo(int idNodo) {
@@ -193,7 +193,7 @@ class CapaSesion {
                 uint16_t sid = (exp.idNodo >= 0 && exp.idNodo < LimitesPila::MAX_NODOS_RED)
                                  ? nodos[exp.idNodo].sessionId
                                  : 0;
-                metaSalida = MensajeSesion(exp.idNodo, TIPO_TIMEOUT_LOCAL, sid, exp.reqId, 0, exp.callback);
+                metaSalida = MensajeSesion(exp.idNodo, TIPO_TIMEOUT_LOCAL, sid, exp.reqId, 0, exp.callback, true);
                 return true;
             }
         }
@@ -212,6 +212,7 @@ class CapaSesion {
         uint16_t sessionId  = ((uint16_t)sobre[2] << 8) | sobre[3];
         uint16_t reqId      = ((uint16_t)sobre[4] << 8) | sobre[5];
         uint16_t payloadLen = ((uint16_t)sobre[6] << 8) | sobre[7];
+        bool esFiable       = (seg.protocolo == CapaTransporte::PROTO_TCP);
 
         if (ver != VERSION_PROTOCOLO || payloadLen > pktSalida.longitud) {
             uint8_t codErr = ERR_SOBRE_INVALIDO;
@@ -287,18 +288,19 @@ class CapaSesion {
                     pendientes[i].reqId == reqId) {
                     void* cb = pendientes[i].callback;
                     pendientes[i].activa = false;
-                    metaSalida = MensajeSesion(id, tipo, sessionId, reqId, payloadLen, cb);
+                    metaSalida = MensajeSesion(id, tipo, sessionId, reqId, payloadLen, cb, esFiable);
                     return true;
                 }
             }
             return false;
         }
 
-        metaSalida = MensajeSesion(id, tipo, sessionId, reqId, payloadLen, nullptr);
+        metaSalida = MensajeSesion(id, tipo, sessionId, reqId, payloadLen, nullptr, esFiable);
         return true;
     }
 
-    uint16_t enviarPeticionRPC(int idNodo, BufferPaquete& pkt, void* callback, unsigned long timeoutPeticionMs = 4000) {
+    uint16_t enviarPeticionRPC(int idNodo, BufferPaquete& pkt, void* callback,
+                               unsigned long timeoutPeticionMs = 4000, bool fiable = true) {
         if (!estaAutenticado(idNodo)) return 0;
 
         int slot = -1;
@@ -310,8 +312,9 @@ class CapaSesion {
         }
         if (slot < 0) return 0;
 
+        uint8_t proto = fiable ? CapaTransporte::PROTO_TCP : CapaTransporte::PROTO_UDP;
         uint16_t reqId = siguienteTicket();
-        if (!empujarSobreYEnviar(idNodo, TIPO_RPC_REQ, nodos[idNodo].sessionId, reqId, pkt)) {
+        if (!empujarSobreYEnviar(idNodo, TIPO_RPC_REQ, nodos[idNodo].sessionId, reqId, pkt, proto)) {
             return 0;
         }
 
@@ -319,9 +322,10 @@ class CapaSesion {
         return reqId;
     }
 
-    bool bajarRespuesta(int idNodo, uint16_t reqId, BufferPaquete& pkt) {
+    bool bajarRespuesta(int idNodo, uint16_t reqId, BufferPaquete& pkt, bool fiable = true) {
         if (!estaAutenticado(idNodo)) return false;
-        return empujarSobreYEnviar(idNodo, TIPO_RPC_RES, nodos[idNodo].sessionId, reqId, pkt);
+        uint8_t proto = fiable ? CapaTransporte::PROTO_TCP : CapaTransporte::PROTO_UDP;
+        return empujarSobreYEnviar(idNodo, TIPO_RPC_RES, nodos[idNodo].sessionId, reqId, pkt, proto);
     }
 
     void bajarEventoGlobal(BufferPaquete& pktBase, bool fiable = true) {

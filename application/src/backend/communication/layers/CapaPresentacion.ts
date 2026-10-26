@@ -10,6 +10,7 @@ export interface MensajePresentacion {
   cabecera: string;
   argumentos: unknown[];
   lector: LectorMsgPack;
+  fiable: boolean;
 }
 
 export type TransformadorPayloadCapa6 = (
@@ -247,6 +248,7 @@ export class CapaPresentacion {
       cabecera: String(cabeceraRaw),
       argumentos,
       lector: new LectorMsgPack(vista),
+      fiable: meta.fiable,
     };
 
     for (const oyente of this.oyentesMensaje) {
@@ -282,10 +284,11 @@ export class CapaPresentacion {
     idNodo: number,
     comando: string,
     parametros: unknown[] = [],
-    timeoutMs = 5000
+    timeoutMs = 5000,
+    fiable = true
   ): Promise<unknown[]> {
     const pktTx = this.empaquetarEnBuffer(idNodo, comando, parametros, 0);
-    const pktRx = await this.sesion.enviarPeticionRPC(idNodo, pktTx, timeoutMs);
+    const pktRx = await this.sesion.enviarPeticionRPC(idNodo, pktTx, timeoutMs, fiable);
     const vistaRx = pktRx.vistaActual();
     if (this.transformadorRx) {
       this.transformadorRx(idNodo, 0, vistaRx);
@@ -301,10 +304,11 @@ export class CapaPresentacion {
     idNodo: number,
     reqId: number,
     estado: "OK" | "ERR",
-    datos: unknown[] = []
+    datos: unknown[] = [],
+    fiable = true
   ): boolean {
     const pktTx = this.empaquetarEnBuffer(idNodo, estado, datos, reqId);
-    return this.sesion.bajarRespuesta(idNodo, reqId, pktTx);
+    return this.sesion.bajarRespuesta(idNodo, reqId, pktTx, fiable);
   }
 
   public bajarEventoFormateado(

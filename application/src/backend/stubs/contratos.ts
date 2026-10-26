@@ -10,6 +10,11 @@ export interface CredencialRpcDTO {
 }
 
 // ---------- DTOs de Dominio del Firmware ----------
+
+export interface RespuestaDatosEnVivo {
+  numeroRandom: number;
+}
+
 export interface RespuestaCalculoFirmware {
   resultado: number;
   estado: string;
@@ -135,6 +140,7 @@ export interface RespuestaReloj {
 
 // ---------- Contrato: servicio que EXPONE el firmware (backend lo llama) ----------
 export interface IFirmware {
+  leerDatosEnVivo: (opts?: OpcionesLlamada) => Promise<RespuestaDatosEnVivo>;
   sumarYLeerEstado: (base: number, factor: number, opts?: OpcionesLlamada) => Promise<RespuestaCalculoFirmware>;
   guardarConfiguracionSegura: (dto: SolicitudConfigSeguraDTO, opts?: OpcionesLlamada) => Promise<RespuestaAuditoriaFirmwareDTO>;
 
@@ -158,6 +164,7 @@ export interface IBackend {
 
 // ---------- Nombres de procedimientos ----------
 export const RPC = {
+  DATOS_EN_VIVO: "RPC_DATOS_EN_VIVO",
   SUMAR_Y_ESTADO: "RPC_SUMAR_Y_ESTADO",
   GUARDAR_CONFIG_SEGURA: "RPC_GUARDAR_CONFIG_SEGURA",
   SYNC_RELOJ: "RPC_SYNC_RELOJ",

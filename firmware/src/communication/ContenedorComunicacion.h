@@ -18,9 +18,9 @@ class ContenedorComunicacion {
     CapaPresentacion presentacion;
     CapaAplicacion appRpc;
 
-    ContenedorComunicacion(PuertoUSB* puertoUsb, ServidorTCP* servidorTcp,
+    ContenedorComunicacion(PuertoUSB* puertoUsb, ServidorUDP* ServidorUDP,
                            const char* secretoHMAC = "SECRETO_HMAC_DEFAULT")
-        : fisica(puertoUsb, servidorTcp),
+        : fisica(puertoUsb, ServidorUDP),
           red(),
           transporte(&red),
           sesion(&transporte, secretoHMAC),

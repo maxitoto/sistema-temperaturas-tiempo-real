@@ -12,8 +12,8 @@ async function main() {
       update: {},
       create: {
         id_conexion: 1,
-        ip_dhcp: "192.168.4.1",
-        puerto_tcp: 80,
+        ip_dhcp: "127.0.0.1",
+        puerto_udp: 81,
         puerto_usb: "/tmp/virtual_serial",
         baudios_usb: 115200,
       },

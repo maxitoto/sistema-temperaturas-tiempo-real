@@ -5,6 +5,7 @@ import {
   IFirmware,
   RPC,
   CredencialRpcDTO,
+  RespuestaDatosEnVivo,
   RespuestaCalculoFirmware,
   SolicitudConfigSeguraDTO,
   RespuestaAuditoriaFirmwareDTO,
@@ -86,6 +87,20 @@ function mapearTuplaSensor(t: TuplaSensor): SensorFirmwareDTO {
 // 2. STUB CLIENTE RPC: Implementa IFirmware con propiedades enumerables
 // =========================================================================
 export class FirmwareStub implements IFirmware {
+  public readonly leerDatosEnVivo = async (
+    opts?: OpcionesLlamada
+  ): Promise<RespuestaDatosEnVivo> => {
+    const [numeroRandom] = await pila.appRpc.call<[number]>(
+      RPC.DATOS_EN_VIVO,
+      [],
+      { ...opts, fiable: false } // <-- OJO QUE ES UDP POSTA BRO!
+    );
+
+    return {
+      numeroRandom: Number(numeroRandom),
+    };
+  };
+
   public readonly sumarYLeerEstado = async (
     base: number,
     factor: number,

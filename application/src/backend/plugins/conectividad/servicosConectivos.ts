@@ -1,12 +1,12 @@
 // Archivo: ./src/backend/plugins/conectividad/servicosConectivos.ts
 import { ID_NODO_USB, ID_NODO_WIFI, pila } from "../../communication/ContenedorComunicacion";
 import { registrarStubsServidorBackend } from "../../stubs/serverExample";
-import { ClienteTCPNode } from "./modem/ClienteTCPNode";
+import { ClienteUDPNode } from "./modem/ClienteUDPNode";
 import { PuertoUSBNode, InfoPuertoSerial } from "./usb/PuertoUSBNode";
 import { activarDebugPilaOSI } from "../../debug/DebugLogger";
 
 const driverUSB = new PuertoUSBNode();
-const driverWiFi = new ClienteTCPNode("127.0.0.1", 9080);
+const driverWiFi = new ClienteUDPNode("127.0.0.1", 9081);
 
 // Vinculamos los dos descriptores físicos una sola vez en el arranque del módulo
 pila.fisica.vincularMedio(ID_NODO_USB, driverUSB);
@@ -42,10 +42,8 @@ function iniciarLoopHeartbeat(): void {
   }, 5000);
 }
 
-
 export const serviciosConectivos = {
-  // CONEXIÓN Y DESCONEXIÓN POR USB (idNodo = 0)
-  listarPuertosUSB : async (): Promise<InfoPuertoSerial[]> => {
+  listarPuertosUSB: async (): Promise<InfoPuertoSerial[]> => {
     return PuertoUSBNode.listarPuertos();
   },
   conectarPorUSB: async (pathManual?: string, baudRate = 115200) => {
@@ -74,9 +72,17 @@ export const serviciosConectivos = {
       pila.appRpc.cambiarMedioActivo(ID_NODO_WIFI);
     }
   },
-  // CONEXIÓN Y DESCONEXIÓN POR WI-FI TCP (idNodo = 1)
-  conectarPorWiFi: async (host = "192.168.4.1", puerto = 80) => {
-    driverWiFi.cambiarDestino(host, puerto);
+  // CONEXIÓN Y DESCONEXIÓN POR WI-FI (Transporte OSI sobre datagramas UDP)
+  conectarPorWiFi: async (host = "127.0.0.1", puerto = 9081) => {
+    const esLocalWokwi = host === "127.0.0.1" || host === "localhost";
+    const puertoEfectivo =
+      esLocalWokwi && (puerto === 80 || puerto === 9080)
+        ? 9081
+        : !esLocalWokwi && puerto === 80
+        ? 81
+        : puerto;
+
+    driverWiFi.cambiarDestino(host, puertoEfectivo);
     await driverWiFi.conectar(4000);
     try {
       const sessionId = await pila.sesion.iniciarSesion(ID_NODO_WIFI);
@@ -89,7 +95,7 @@ export const serviciosConectivos = {
         medio: "WIFI" as const,
         idNodo: ID_NODO_WIFI,
         host,
-        puerto,
+        puerto: puertoEfectivo,
         sessionId,
       };
     } catch (err) {
@@ -105,7 +111,6 @@ export const serviciosConectivos = {
       pila.appRpc.cambiarMedioActivo(ID_NODO_USB);
     }
   },
-  // CONSULTA DE ESTADO REAL (Capa 1 Física + Capa 5 Sesión)
   estaConectado: (idNodo?: number): boolean => {
     const nodo = typeof idNodo === "number" ? idNodo : pila.appRpc.obtenerMedioActivo();
     return pila.fisica.estaActivo(nodo) && pila.sesion.estaAutenticada(nodo);
@@ -122,5 +127,5 @@ export const serviciosConectivos = {
       idNodoActivo,
       medioActivo: idNodoActivo === ID_NODO_USB ? "USB" : "WIFI",
     };
-  }
+  },
 };

@@ -9,6 +9,7 @@ namespace Contratos {
     using namespace EsquemaFisicoDB;
 
     // ---------- Nombres de procedimientos RPC ----------
+    static const char* const RPC_DATOS_EN_VIVO           = "RPC_DATOS_EN_VIVO";
     static const char* const RPC_SUMAR_Y_ESTADO          = "RPC_SUMAR_Y_ESTADO";
     static const char* const RPC_GUARDAR_CONFIG_SEGURA   = "RPC_GUARDAR_CONFIG_SEGURA";
     static const char* const RPC_SYNC_RELOJ              = "RPC_SYNC_RELOJ";
@@ -49,6 +50,16 @@ namespace Contratos {
         UsuarioCredencialDTO usuario;
         bool deserializar(LectorMsgPack& r) {
             return cert.deserializar(r) && usuario.deserializar(r);
+        }
+    };
+
+    // --- prueba dato en vivo
+    struct RespuestaDatosEnVivoDTO {
+        float numeroRandom;
+        bool serializar(EscritorMsgPack& w) const {
+            return w.iniciarArray(2) &&
+                   w.escribirTexto("OK") &&
+                   w.escribirFloat(numeroRandom);
         }
     };
 
@@ -198,11 +209,13 @@ namespace Contratos {
                w.escribirUInt(f.estado_envio) &&
                w.escribirUInt(f.fecha_modificacion);
     }
+    
 
     // ---------- Contrato: servicio que EXPONE el firmware (backend lo llama) ----------
     class IFirmware {
       public:
         virtual ~IFirmware() = default;
+        virtual RespuestaDatosEnVivoDTO leerDatosEnVivo() = 0;
         virtual RespuestaEstado sumarYEstado(float base, float factor) = 0;
         virtual bool guardarConfig(const UsuarioCredencialDTO& cred,
                                    const ConfigHeladeraDTO& cfg,

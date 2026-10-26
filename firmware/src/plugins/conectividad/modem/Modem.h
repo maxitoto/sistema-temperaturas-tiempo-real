@@ -8,13 +8,13 @@
 #endif
 #include "RedInterna.h"
 #include "RedHost.h"
-#include "ServidorTCP.h"
+#include "ServidorUDP.h"
 
 class Modem {
   private:
     RedInterna* ap;
     RedHost* sta;
-    ServidorTCP* tcp;
+    ServidorUDP* udp;
 
     bool servidorIniciado = false;
     bool estadoInternet = false;
@@ -22,8 +22,8 @@ class Modem {
     const unsigned long INTERVALO_CHEQUEO_INTERNET = 300000UL;
 
   public:
-    Modem(RedInterna* redAp, RedHost* redSta, ServidorTCP* servidor)
-        : ap(redAp), sta(redSta), tcp(servidor) {}
+    Modem(RedInterna* redAp, RedHost* redSta, ServidorUDP* servidor)
+        : ap(redAp), sta(redSta), udp(servidor) {}
 
     void inicializar() {
         WiFi.persistent(false);
@@ -59,7 +59,7 @@ class Modem {
         }
 
         if (ap->estaActiva() || sta->estaConectado()) {
-            tcp->iniciar();
+            udp->iniciar();
             servidorIniciado = true;
         }
 
@@ -70,12 +70,12 @@ class Modem {
     // Mantenimiento de conexiones físicas del módem (llamado en el loop de tareas)
     void mantenerRed() {
         if (!servidorIniciado && (ap->estaActiva() || sta->estaConectado())) {
-            tcp->iniciar();
+            udp->iniciar();
             servidorIniciado = true;
         }
 
         if (servidorIniciado) {
-            tcp->procesarNuevasConexiones();
+            udp->procesarNuevasConexiones();
         }
 
         if (sta->estaConectado()) {

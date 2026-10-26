@@ -1,3 +1,4 @@
+// Archivo: ./src/plugins/conectividad/modem/RedHost.h
 #pragma once
 #include <Arduino.h>
 #if defined(ESP32)
@@ -13,13 +14,14 @@ class RedHost {
   public:
     RedHost() {}
 
-    bool conectar(const String& ssid, const String& password, int maxIntentos = 3) {
+    bool conectar(const String& ssid, const String& password, int maxIntentos = 15) {
         ssidObjetivo = ssid;
         WiFi.begin(ssid.c_str(), password.c_str());
-        
+
         int intentos = 0;
         while (WiFi.status() != WL_CONNECTED && intentos < maxIntentos) {
-            delay(500); // En el futuro, esto se puede reemplazar por una máquina de estados no bloqueante
+            delay(250);
+            yield();
             intentos++;
         }
         return estaConectado();

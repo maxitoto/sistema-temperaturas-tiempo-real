@@ -4,7 +4,7 @@
 #include "plugins/conectividad/usb/PuertoUSB.h"
 #include "plugins/conectividad/modem/RedInterna.h"
 #include "plugins/conectividad/modem/RedHost.h"
-#include "plugins/conectividad/modem/ServidorTCP.h"
+#include "plugins/conectividad/modem/ServidorUDP.h"
 #include "plugins/conectividad/modem/Modem.h"
 #include "plugins/microsd/MicroSD.h"
 
@@ -29,8 +29,8 @@ EstadoSistema gEstadoSistema;
 PuertoUSB puertoUsb(115200);
 RedInterna redAp;
 RedHost redSta;
-ServidorTCP servidorTcp(80, 3);
-Modem modem(&redAp, &redSta, &servidorTcp);
+ServidorUDP ServidorUDP(81, 3);
+Modem modem(&redAp, &redSta, &ServidorUDP);
 MicroSD tarjetaSd(PIN_CS_SD);
 
 // 2. Base de Datos del Firmware (SGBD + ClienteORM)
@@ -38,7 +38,7 @@ SGBD::MotorSGBD motorSgbd(&tarjetaSd);
 ORM::ClienteORM dbOrm(&motorSgbd);
 
 // 3. Pila de Comunicaciones OSI y Planificador
-ContenedorComunicacion pila(&puertoUsb, &servidorTcp, "SECRETO_HMAC_DEFAULT");
+ContenedorComunicacion pila(&puertoUsb, &ServidorUDP, "SECRETO_HMAC_DEFAULT");
 Planificador scheduler;
 
 BackendStub backendStub(pila.appRpc);

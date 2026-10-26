@@ -26,11 +26,11 @@ export const conexionFirmwareRepository = {
             create: { id_conexion: SINGLETON_ID, ip_dhcp },
         }),
 
-    setPuertoTcp: async (puerto_tcp: number): Promise<conexion_firmware> =>
+    setPuertoUdp: async (puerto_udp: number): Promise<conexion_firmware> =>
         await prisma.conexion_firmware.upsert({
             where: { id_conexion: SINGLETON_ID },
-            update: { puerto_tcp, fecha_modificacion: new Date().toISOString() },
-            create: { id_conexion: SINGLETON_ID, puerto_tcp },
+            update: { puerto_udp, fecha_modificacion: new Date().toISOString() },
+            create: { id_conexion: SINGLETON_ID, puerto_udp },
         }),
 
     setPuertoUsb: async (puerto_usb: string, baudios_usb: number): Promise<conexion_firmware> =>

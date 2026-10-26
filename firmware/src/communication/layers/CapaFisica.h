@@ -1,68 +1,71 @@
-// Archivo: ./src/communication/CapaFisica.h
+// Archivo: ./src/communication/layers/CapaFisica.h
 #pragma once
 #include <Arduino.h>
 #include "plugins/conectividad/usb/PuertoUSB.h"
-#include "plugins/conectividad/modem/ServidorTCP.h"
+#include "plugins/conectividad/modem/ServidorUDP.h"
 
 class CapaFisica {
   private:
     PuertoUSB* usb;
-    ServidorTCP* tcp;
-
-    // Medio 0: Cable USB | Medio 1..N: Clientes Wi-Fi (TCP)
-    Stream* resolverStream(int idMedio) {
-        if (idMedio == 0) {
-            return usb ? usb->obtenerStream() : nullptr;
-        }
-        int indiceTCP = idMedio - 1;
-        if (tcp && indiceTCP >= 0 && indiceTCP < tcp->obtenerMaxClientes()) {
-            WiFiClient* cliente = tcp->obtenerCliente(indiceTCP);
-            if (cliente && cliente->connected()) {
-                return cliente;
-            }
-        }
-        return nullptr;
-    }
+    ServidorUDP* udpServer;
 
   public:
-    CapaFisica(PuertoUSB* puertoUsb, ServidorTCP* servidorTcp)
-        : usb(puertoUsb), tcp(servidorTcp) {}
+    CapaFisica(PuertoUSB* puertoUsb, ServidorUDP* servidorUdp)
+        : usb(puertoUsb), udpServer(servidorUdp) {}
 
     int obtenerTotalMedios() const {
-        int redes = tcp ? tcp->obtenerMaxClientes() : 0;
+        int redes = udpServer ? udpServer->obtenerMaxClientes() : 0;
         return 1 + redes;
     }
 
     bool estaActivo(int idMedio) {
-        return resolverStream(idMedio) != nullptr;
+        if (idMedio == 0) {
+            return usb && (usb->obtenerStream() != nullptr);
+        }
+        int indiceUDP = idMedio - 1;
+        return udpServer ? udpServer->clienteActivo(indiceUDP) : false;
     }
 
     int bytesDisponibles(int idMedio) {
-        Stream* canal = resolverStream(idMedio);
-        return canal ? canal->available() : 0;
+        if (idMedio == 0) {
+            Stream* canal = usb ? usb->obtenerStream() : nullptr;
+            return canal ? canal->available() : 0;
+        }
+        int indiceUDP = idMedio - 1;
+        return udpServer ? udpServer->bytesDisponiblesCliente(indiceUDP) : 0;
     }
 
-    // CAMINO DE SUBIDA (RX): Lectura en bloque no bloqueante desde el FIFO de hardware
+    // CAMINO DE SUBIDA (RX)
     size_t recibirBytes(int idMedio, uint8_t* bufferDestino, size_t maxLongitud) {
-        Stream* canal = resolverStream(idMedio);
-        if (!canal || maxLongitud == 0) return 0;
+        if (!bufferDestino || maxLongitud == 0) return 0;
 
-        int disponibles = canal->available();
-        if (disponibles <= 0) return 0;
+        if (idMedio == 0) {
+            Stream* canal = usb ? usb->obtenerStream() : nullptr;
+            if (!canal) return 0;
+            int disponibles = canal->available();
+            if (disponibles <= 0) return 0;
+            size_t aLeer = (size_t)disponibles;
+            if (aLeer > maxLongitud) aLeer = maxLongitud;
+            return canal->readBytes(bufferDestino, aLeer);
+        }
 
-        size_t aLeer = (size_t)disponibles;
-        if (aLeer > maxLongitud) aLeer = maxLongitud;
-
-        return canal->readBytes(bufferDestino, aLeer);
+        int indiceUDP = idMedio - 1;
+        return udpServer ? udpServer->recibirBytesCliente(indiceUDP, bufferDestino, maxLongitud) : 0;
     }
 
-    // CAMINO DE BAJADA (TX): Escritura directa al buffer TX sin bloquear la CPU esperando UART
+    // CAMINO DE BAJADA (TX)
     size_t enviarBytes(int idMedio, const uint8_t* datos, size_t longitud) {
-        Stream* canal = resolverStream(idMedio);
-        if (!canal || !datos || longitud == 0) return 0;
+        if (!datos || longitud == 0) return 0;
 
-        size_t escritos = canal->write(datos, longitud);
-        yield(); // Alimenta al Watchdog del ESP8266 sin forzar flush() bloqueante
-        return escritos;
+        if (idMedio == 0) {
+            Stream* canal = usb ? usb->obtenerStream() : nullptr;
+            if (!canal) return 0;
+            size_t escritos = canal->write(datos, longitud);
+            yield();
+            return escritos;
+        }
+
+        int indiceUDP = idMedio - 1;
+        return udpServer ? udpServer->enviarBytesCliente(indiceUDP, datos, longitud) : 0;
     }
 };

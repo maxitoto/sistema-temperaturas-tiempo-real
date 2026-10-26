@@ -1,4 +1,6 @@
+// Archivo: ./src/backend/plugins/conectividad/usb/PuertoUSBNode.ts
 import * as fs from "node:fs";
+import * as dgram from "node:dgram";
 import { SerialPort } from "serialport";
 import { MedioFisico } from "../../../communication/layers/CapaFisica";
 
@@ -12,17 +14,25 @@ export interface InfoPuertoSerial {
 
 export class PuertoUSBNode implements MedioFisico {
   private puerto: SerialPort | null = null;
+  private socketUdp: dgram.Socket | null = null;
+  private hostUdp = "127.0.0.1";
+  private portUdp = 0;
+  private rinfoCliente: { address: string; port: number } | null = null;
+
   private oyentesDatos: Array<(datos: Uint8Array) => void> = [];
   private conectado = false;
 
-  // VIDs típicos de placas ESP8266 / ESP32:
-  // 10C4 = Silicon Labs (CP2102/CP2104)
-  // 1A86 = QinHeng Electronics (CH340/CH341/CH9102)
-  // 0403 = FTDI
-  // 303A = Espressif Systems (USB nativo ESP32-S2/S3/C3)
   private static readonly VIDS_ESP = new Set(["10c4", "1a86", "0403", "303a"]);
 
-  // Lista todos los puertos y marca cuáles son placas ESP
+  private static parsearEndpointUdp(entrada: string): { host: string; port: number } | null {
+    const limpio = entrada.trim().replace(/^udp:\/\//i, "");
+    const match = /^([^:/\s]+):(\d+)$/.exec(limpio);
+    if (!match) return null;
+    const port = Number(match[2]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+    return { host: match[1], port };
+  }
+
   public static async listarPuertos(): Promise<InfoPuertoSerial[]> {
     const puertos = await SerialPort.list();
     const resultado: InfoPuertoSerial[] = puertos.map((p) => {
@@ -49,7 +59,6 @@ export class PuertoUSBNode implements MedioFisico {
       };
     });
 
-    // Soporte directo para puente virtual socat + Wokwi (/tmp/virtual_serial)
     const rutaSocat = "/tmp/virtual_serial";
     if (fs.existsSync(rutaSocat) && !resultado.some((r) => r.path === rutaSocat)) {
       resultado.unshift({
@@ -62,24 +71,59 @@ export class PuertoUSBNode implements MedioFisico {
     return resultado;
   }
 
-  // Busca automáticamente el primer puerto que coincida con un ESP8266/ESP32
   public static async detectarPuertoESP(): Promise<string | null> {
     const lista = await PuertoUSBNode.listarPuertos();
     const candidato = lista.find((p) => p.esCandidatoESP);
     return candidato ? candidato.path : null;
   }
 
-  // Conecta al puerto indicado (o lo auto-detecta si no se envía path). Baudios opcionales (default 115200)
   public async conectar(pathManual?: string, baudRate: number = 115200): Promise<string> {
     await this.desconectar();
 
     const pathFinal = pathManual?.trim() || (await PuertoUSBNode.detectarPuertoESP());
     if (!pathFinal) {
       throw new Error(
-        "No se detectó ningún dispositivo ESP por USB. Ingrese el puerto manualmente."
+        "No se detectó ningún dispositivo ESP por USB. Ingrese el puerto o endpoint UDP (ej. 127.0.0.1:4000)."
       );
     }
 
+    // MODO A: Si pathFinal es un endpoint UDP ("127.0.0.1:PORT" o "udp://127.0.0.1:PORT") para extension.js
+    const udpCfg = PuertoUSBNode.parsearEndpointUdp(pathFinal);
+    if (udpCfg) {
+      this.hostUdp = udpCfg.host;
+      this.portUdp = udpCfg.port;
+      this.rinfoCliente = null;
+
+      return new Promise((resolve, reject) => {
+        const sock = dgram.createSocket("udp4");
+        this.socketUdp = sock;
+
+        sock.on("message", (msg: Buffer, rinfo) => {
+          this.rinfoCliente = { address: rinfo.address, port: rinfo.port };
+          const bytes = new Uint8Array(msg.buffer, msg.byteOffset, msg.byteLength);
+          for (const oyente of this.oyentesDatos) {
+            oyente(bytes);
+          }
+        });
+
+        sock.on("close", () => {
+          this.conectado = false;
+        });
+
+        sock.on("error", (err) => {
+          this.conectado = false;
+          console.error("[USB-UDP-PLUGIN] Error UDP:", err.message);
+          reject(new Error(`Error en puente USB-UDP (${pathFinal}): ${err.message}`));
+        });
+
+        sock.bind(0, () => {
+          this.conectado = true;
+          resolve(`udp://${this.hostUdp}:${this.portUdp}`);
+        });
+      });
+    }
+
+    // MODO B: Dispositivo Serial o PTY (/tmp/virtual_serial)
     return new Promise((resolve, reject) => {
       this.puerto = new SerialPort({
         path: pathFinal,
@@ -120,6 +164,17 @@ export class PuertoUSBNode implements MedioFisico {
   }
 
   public async desconectar(): Promise<void> {
+    if (this.socketUdp) {
+      this.socketUdp.removeAllListeners();
+      try {
+        this.socketUdp.close();
+      } catch {
+        // Ignorar
+      }
+      this.socketUdp = null;
+      this.rinfoCliente = null;
+    }
+
     return new Promise((resolve) => {
       if (!this.puerto || !this.puerto.isOpen) {
         this.conectado = false;
@@ -133,12 +188,19 @@ export class PuertoUSBNode implements MedioFisico {
     });
   }
 
-  // ==========================================================
-  // CONTRATO DE MEDIO FÍSICO (Para CapaFisica.ts)
-  // ==========================================================
   public escribir(datos: Uint8Array): void {
-    if (!this.puerto || !this.conectado) return;
-    this.puerto.write(Buffer.from(datos));
+    if (!this.conectado || datos.length === 0) return;
+
+    if (this.socketUdp) {
+      const destHost = this.rinfoCliente?.address ?? this.hostUdp;
+      const destPort = this.rinfoCliente?.port ?? this.portUdp;
+      this.socketUdp.send(Buffer.from(datos), destPort, destHost);
+      return;
+    }
+
+    if (this.puerto && this.puerto.isOpen) {
+      this.puerto.write(Buffer.from(datos));
+    }
   }
 
   public alRecibir(callback: (datos: Uint8Array) => void): void {
@@ -146,6 +208,7 @@ export class PuertoUSBNode implements MedioFisico {
   }
 
   public estaActivo(): boolean {
+    if (this.socketUdp) return this.conectado;
     return Boolean(this.puerto && this.puerto.isOpen && this.conectado);
   }
 }

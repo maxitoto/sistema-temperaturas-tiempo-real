@@ -41,7 +41,7 @@ model auditoria {
 model conexion_firmware {
   id_conexion        Int    @id @default(1)
   ip_dhcp            String @default("192.168.4.1")
-  puerto_tcp         Int    @default(80)
+  puerto_udp         Int    @default(80)
   puerto_usb         String @default("/tmp/virtual_serial")
   baudios_usb        Int    @default(115200)
   fecha_modificacion String @default("CURRENT_TIMESTAMP")

@@ -6,11 +6,13 @@ export interface MetaCall {
   readonly idNodo: number;
   readonly reqId: number;
   readonly lector: LectorMsgPack;
+  readonly fiable: boolean;
 }
 
 export interface OpcionesLlamada {
   preferir?: "auto" | "USB" | "WIFI";
   timeoutMs?: number;
+  fiable?: boolean;
 }
 
 export type ManejadorProcedimientoRPC = (
@@ -21,7 +23,7 @@ export type ManejadorProcedimientoRPC = (
 export type ManejadorEventoRPC = (
   argumentos: unknown[],
   evento: string,
-  meta: { readonly idNodo: number; readonly lector: LectorMsgPack }
+  meta: { readonly idNodo: number; readonly lector: LectorMsgPack; readonly fiable: boolean }
 ) => void;
 
 export interface ContextoPoliticaRPC {
@@ -72,12 +74,14 @@ export class CapaAplicacion {
   ): Promise<T> {
     const idNodo = this.resolverNodo(opts.preferir ?? "auto");
     const timeoutMs = opts.timeoutMs ?? 5000;
+    const fiable = opts.fiable ?? true;
 
     const respuesta = await this.presentacion.invocarSerializado(
       idNodo,
       comando,
       parametros,
-      timeoutMs
+      timeoutMs,
+      fiable
     );
     const [estado, ...datos] = respuesta;
     if (estado !== "OK") {
@@ -95,7 +99,7 @@ export class CapaAplicacion {
   public emitirEvento(
     evento: string,
     argumentos: unknown[] = [],
-    opts: Pick<OpcionesLlamada, "preferir"> & { fiable?: boolean } = {}
+    opts: Pick<OpcionesLlamada, "preferir" | "fiable"> = {}
   ): boolean {
     const idNodo = this.resolverNodo(opts.preferir ?? "auto");
     return this.presentacion.bajarEventoFormateado(
@@ -107,13 +111,24 @@ export class CapaAplicacion {
   }
 
   private async despacharMensajeEntrante(msj: MensajePresentacion): Promise<void> {
+    const meta: MetaCall = {
+      idNodo: msj.idNodo,
+      reqId: msj.reqId,
+      lector: msj.lector,
+      fiable: msj.fiable,
+    };
+
     if (msj.tipoSesion === CapaSesion.TIPO_RPC_REQ) {
       const manejador = this.rutas.get(msj.cabecera);
       if (!manejador) {
         if (msj.reqId !== 0) {
-          this.presentacion.bajarRespuestaFormateada(msj.idNodo, msj.reqId, "ERR", [
-            "ROUTE_NOT_FOUND",
-          ]);
+          this.presentacion.bajarRespuestaFormateada(
+            msj.idNodo,
+            msj.reqId,
+            "ERR",
+            ["ROUTE_NOT_FOUND"],
+            msj.fiable
+          );
         }
         return;
       }
@@ -122,11 +137,7 @@ export class CapaAplicacion {
         const resultado = await this.evaluadorPolitica({
           comando: msj.cabecera,
           argumentos: msj.argumentos,
-          meta: {
-            idNodo: msj.idNodo,
-            reqId: msj.reqId,
-            lector: msj.lector,
-          },
+          meta,
         });
 
         if (!resultado.permitido) {
@@ -135,31 +146,35 @@ export class CapaAplicacion {
               msj.idNodo,
               msj.reqId,
               "ERR",
-              [resultado.motivo ?? "FORBIDDEN"]
+              [resultado.motivo ?? "FORBIDDEN"],
+              msj.fiable
             );
           }
-          return; // ← NO ejecutar el manejador
+          return;
         }
       }
 
       try {
-        const datosRetorno = await manejador(msj.argumentos, {
-          idNodo: msj.idNodo,
-          reqId: msj.reqId,
-          lector: msj.lector,
-        });
+        const datosRetorno = await manejador(msj.argumentos, meta);
         if (msj.reqId !== 0) {
           this.presentacion.bajarRespuestaFormateada(
             msj.idNodo,
             msj.reqId,
             "OK",
-            Array.isArray(datosRetorno) ? datosRetorno : [datosRetorno]
+            Array.isArray(datosRetorno) ? datosRetorno : [datosRetorno],
+            msj.fiable
           );
         }
       } catch (err) {
         if (msj.reqId !== 0) {
           const detalle = err instanceof Error ? err.message : "HANDLER_EXEC_ERR";
-          this.presentacion.bajarRespuestaFormateada(msj.idNodo, msj.reqId, "ERR", [detalle]);
+          this.presentacion.bajarRespuestaFormateada(
+            msj.idNodo,
+            msj.reqId,
+            "ERR",
+            [detalle],
+            msj.fiable
+          );
         }
       }
       return;
@@ -168,7 +183,7 @@ export class CapaAplicacion {
     if (msj.tipoSesion === CapaSesion.TIPO_EVENTO) {
       const oyentes = this.oyentesEventos.get(msj.cabecera) ?? [];
       for (const cb of oyentes) {
-        cb(msj.argumentos, msj.cabecera, { idNodo: msj.idNodo, lector: msj.lector });
+        cb(msj.argumentos, msj.cabecera, meta);
       }
     }
   }

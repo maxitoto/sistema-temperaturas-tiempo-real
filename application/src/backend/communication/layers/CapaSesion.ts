@@ -1,7 +1,7 @@
-// Archivo: ./src/communication/layers/CapaSesion.ts
+// Archivo: ./src/backend/communication/layers/CapaSesion.ts
 import { createHash, randomInt } from "crypto";
 import { BufferPaquete, LimitesPila } from "../common/BufferRed";
-import { CapaTransporte, EstadoTCP } from "./CapaTransporte";
+import { CapaTransporte, EstadoTCP, SegmentoTransporte } from "./CapaTransporte";
 
 export interface MensajeSesion {
   idNodo: number;
@@ -9,6 +9,7 @@ export interface MensajeSesion {
   sessionId: number;
   reqId: number;
   payloadLen: number;
+  fiable: boolean;
 }
 
 export enum EstadoAuth {
@@ -50,7 +51,6 @@ export class CapaSesion {
   private readonly nodos: EstadoNodoSesion[] = [];
   private contadorTickets = 1;
 
-  // Mapa indexado por clave compuesta: (idNodo << 16) | reqId
   private readonly pendientes: Map<number, PeticionPendiente> = new Map();
   private oyentesSubida: Array<(pkt: BufferPaquete, meta: MensajeSesion) => void> = [];
 
@@ -68,7 +68,7 @@ export class CapaSesion {
       });
     }
 
-    this.transporte.alSubirSegmento((pkt) => this.procesarSegmento(pkt));
+    this.transporte.alSubirSegmento((pkt, metaTrans) => this.procesarSegmento(pkt, metaTrans));
   }
 
   private claveTicket(idNodo: number, reqId: number): number {
@@ -143,17 +143,15 @@ export class CapaSesion {
     if (datos && datos.length > 0) {
       pkt.escribirPayloadTx(datos);
     }
-    return this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt);
+    return this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt, CapaTransporte.PROTO_TCP);
   }
 
-  // Handshake de Sesión iniciado por el Backend hacia el Firmware
   public async iniciarSesion(idNodo: number): Promise<number> {
     if (idNodo < 0 || idNodo >= LimitesPila.MAX_NODOS_RED) {
       throw new Error(`idNodo inválido: ${idNodo}`);
     }
     await this.transporte.conectarTCP(idNodo);
 
-    // 1. Pedir desafío Nonce (4 bytes)
     const pktInit = new BufferPaquete();
     pktInit.prepararParaTx(idNodo);
     const pktChal = await this.enviarConTicket(idNodo, CapaSesion.TIPO_HANDSHAKE_INIT, 0, pktInit);
@@ -165,7 +163,6 @@ export class CapaSesion {
     const nonce =
       ((nonceBytes[0] << 24) | (nonceBytes[1] << 16) | (nonceBytes[2] << 8) | nonceBytes[3]) >>> 0;
 
-    // 2. Calcular SHA-256 binario (32 bytes) y autenticar
     const hash = this.calcularHashDesafio(nonce);
     const pktAuth = new BufferPaquete();
     pktAuth.prepararParaTx(idNodo);
@@ -175,11 +172,12 @@ export class CapaSesion {
     return this.nodos[idNodo].sessionId;
   }
 
-  // Envía petición RPC (CALL) del Backend al Firmware y espera respuesta correlacionada por reqId
+  // Permite elegir fiable = true (PROTO_TCP con ARQ) o fiable = false (PROTO_UDP en tiempo real)
   public async enviarPeticionRPC(
     idNodo: number,
     pkt: BufferPaquete,
-    timeoutMs = 5000
+    timeoutMs = 5000,
+    fiable = true
   ): Promise<BufferPaquete> {
     if (!this.estaAutenticada(idNodo)) {
       throw new Error(`Nodo ${idNodo} no autenticado. Ejecute iniciarSesion(${idNodo}) primero.`);
@@ -189,23 +187,24 @@ export class CapaSesion {
       CapaSesion.TIPO_RPC_REQ,
       this.nodos[idNodo].sessionId,
       pkt,
-      timeoutMs
+      timeoutMs,
+      fiable
     );
   }
 
-  // Envía respuesta RPC (REPLY) del Backend al Firmware cuando el Firmware invocó un procedimiento
-  public bajarRespuesta(idNodo: number, reqId: number, pkt: BufferPaquete): boolean {
+  public bajarRespuesta(idNodo: number, reqId: number, pkt: BufferPaquete, fiable = true): boolean {
     if (!this.estaAutenticada(idNodo)) return false;
+    const proto = fiable ? CapaTransporte.PROTO_TCP : CapaTransporte.PROTO_UDP;
     return this.empujarSobreYEnviar(
       idNodo,
       CapaSesion.TIPO_RPC_RES,
       this.nodos[idNodo].sessionId,
       reqId,
-      pkt
+      pkt,
+      proto
     );
   }
 
-  // Envía un evento asíncrono unidireccional (reqId = 0)
   public bajarEvento(idNodo: number, pkt: BufferPaquete, fiable = true): boolean {
     if (!this.estaAutenticada(idNodo)) return false;
     const proto = fiable ? CapaTransporte.PROTO_TCP : CapaTransporte.PROTO_UDP;
@@ -231,7 +230,6 @@ export class CapaSesion {
   public async enviarLatido(idNodo: number): Promise<void> {
     if (!this.estaAutenticada(idNodo)) return;
 
-    // Si hay un RPC en vuelo o hubo tráfico hace menos de 3.5s, el enlace está vivo: no colisionar
     const inactivoMs = Date.now() - this.nodos[idNodo].ultimoLatido;
     if (this.tienePeticionesEnVuelo(idNodo) || inactivoMs < 3500) {
       return;
@@ -244,7 +242,8 @@ export class CapaSesion {
       CapaSesion.TIPO_HEARTBEAT,
       this.nodos[idNodo].sessionId,
       pkt,
-      2500
+      2500,
+      true
     );
   }
 
@@ -257,10 +256,12 @@ export class CapaSesion {
     tipo: number,
     sesId: number,
     pkt: BufferPaquete,
-    timeoutMs = 5000
+    timeoutMs = 5000,
+    fiable = true
   ): Promise<BufferPaquete> {
     const reqId = this.siguienteTicket();
     const clave = this.claveTicket(idNodo, reqId);
+    const proto = fiable ? CapaTransporte.PROTO_TCP : CapaTransporte.PROTO_UDP;
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -270,7 +271,7 @@ export class CapaSesion {
 
       this.pendientes.set(clave, { resolve, reject, timer });
 
-      if (!this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt)) {
+      if (!this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt, proto)) {
         clearTimeout(timer);
         this.pendientes.delete(clave);
         reject(new Error("Fallo al transmitir sobre en la Capa de Transporte"));
@@ -278,10 +279,7 @@ export class CapaSesion {
     });
   }
 
-  // ==========================================================
-  // CAMINO DE SUBIDA (RX): Simétrico con CapaSesion.h
-  // ==========================================================
-  private procesarSegmento(pkt: BufferPaquete): void {
+  private procesarSegmento(pkt: BufferPaquete, metaTrans: SegmentoTransporte): void {
     const id = pkt.idNodo;
     if (id < 0 || id >= LimitesPila.MAX_NODOS_RED) return;
 
@@ -293,6 +291,7 @@ export class CapaSesion {
     const sesIdRecibido = (sobre[2] << 8) | sobre[3];
     const reqId = (sobre[4] << 8) | sobre[5];
     const payloadLen = (sobre[6] << 8) | sobre[7];
+    const esFiable = metaTrans.protocolo === CapaTransporte.PROTO_TCP;
 
     if (ver !== CapaSesion.VERSION_PROTOCOLO || payloadLen > pkt.longitud) {
       return;
@@ -301,7 +300,6 @@ export class CapaSesion {
     pkt.longitud = payloadLen;
     const cli = this.nodos[id];
 
-    // Soporte simétrico si un nodo solicita iniciar handshake hacia nosotros
     if (tipo === CapaSesion.TIPO_HANDSHAKE_INIT) {
       cli.nonceActual = randomInt(100000, 0x7fffffff);
       cli.estado = EstadoAuth.ESPERANDO_DESAFIO;
@@ -347,7 +345,6 @@ export class CapaSesion {
       return;
     }
 
-    // 1. Petición RPC entrante iniciada por el Firmware (CALL) o Evento asíncrono
     if (tipo === CapaSesion.TIPO_RPC_REQ || tipo === CapaSesion.TIPO_EVENTO) {
       if (
         cli.estado !== EstadoAuth.AUTENTICADO ||
@@ -370,6 +367,7 @@ export class CapaSesion {
         sessionId: sesIdRecibido,
         reqId,
         payloadLen,
+        fiable: esFiable,
       };
       for (const oyente of this.oyentesSubida) {
         oyente(pkt, meta);
@@ -377,7 +375,6 @@ export class CapaSesion {
       return;
     }
 
-    // 2. Respuesta correlacionada a un Ticket pendiente en el Backend
     const clave = this.claveTicket(id, reqId);
     const pendiente = this.pendientes.get(clave);
     if (!pendiente) return;

@@ -424,6 +424,7 @@ struct MensajePresentacion {
     size_t cantidadArgs = 0;
     LectorMsgPack lector;
     void* callbackPendiente = nullptr;
+    bool fiable = true;
 };
 
 typedef bool (*TransformadorPayloadCapa6)(
@@ -467,6 +468,7 @@ class CapaPresentacion {
         msjSalida.cabecera[0] = '\0';
         msjSalida.cantidadArgs = 0;
         msjSalida.callbackPendiente = meta.callbackPendiente;
+        msjSalida.fiable = meta.fiable;
 
         if (meta.tipo == CapaSesion::TIPO_TIMEOUT_LOCAL) {
             strncpy(msjSalida.cabecera, "ERR_TIMEOUT", sizeof(msjSalida.cabecera));
@@ -484,7 +486,6 @@ class CapaPresentacion {
             return false;
         }
 
-        // Hook RX Capa 6: Desencripta el mensaje completo antes de decodificar MessagePack
         if (transformadorRx) {
             if (!transformadorRx(meta.idNodo, meta.reqId, bufferRx.ptrActual(), bufferRx.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
                 return false;
@@ -506,24 +507,25 @@ class CapaPresentacion {
         return true;
     }
 
-    uint16_t bajarPeticion(int idNodo, BufferPaquete& pkt, void* callback, unsigned long timeoutMs) {
+    uint16_t bajarPeticion(int idNodo, BufferPaquete& pkt, void* callback,
+                           unsigned long timeoutMs, bool fiable = true) {
         if (!sesion) return 0;
         if (transformadorTx) {
             if (!transformadorTx(idNodo, 0, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
                 return 0;
             }
         }
-        return sesion->enviarPeticionRPC(idNodo, pkt, callback, timeoutMs);
+        return sesion->enviarPeticionRPC(idNodo, pkt, callback, timeoutMs, fiable);
     }
 
-    bool bajarRespuesta(int idNodo, uint16_t reqId, BufferPaquete& pkt) {
+    bool bajarRespuesta(int idNodo, uint16_t reqId, BufferPaquete& pkt, bool fiable = true) {
         if (!sesion) return false;
         if (transformadorTx) {
             if (!transformadorTx(idNodo, reqId, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
                 return false;
             }
         }
-        return sesion->bajarRespuesta(idNodo, reqId, pkt);
+        return sesion->bajarRespuesta(idNodo, reqId, pkt, fiable);
     }
 
     void bajarEventoGlobal(BufferPaquete& pkt, bool fiable = true) {

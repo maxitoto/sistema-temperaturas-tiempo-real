@@ -8,10 +8,9 @@
 struct MetaCall {
     int idNodo;
     uint16_t reqId;
+    bool fiable; // true = modo TCP (ARQ), false = modo UDP (Tiempo Real)
 };
 
-// Hook para el Proceso de Usuario (Autorización, validación de certificados/tokens o rangos)
-// Recibe una copia por valor de LectorMsgPack para no consumir el cursor del Stub
 typedef bool (*EvaluadorPoliticaRPC)(
     const char* comando,
     size_t cantidadArgs,
@@ -74,20 +73,19 @@ class CapaAplicacion {
     EntradaEvento oyentesEventos[MAX_OYENTES_EVENTO];
     size_t totalOyentesEventos = 0;
 
-    void enviarErrorRapido(int idNodo, uint16_t reqId, const char* codigoError) {
+    void enviarErrorRapido(int idNodo, uint16_t reqId, const char* codigoError, bool fiable = true) {
         if (!presentacion || reqId == 0) return;
         bufferTx.prepararParaTx(idNodo);
         EscritorMsgPack escritor(bufferTx);
         escritor.iniciarArray(2);
         escritor.escribirTexto("ERR");
         escritor.escribirTexto(codigoError);
-        presentacion->bajarRespuesta(idNodo, reqId, bufferTx);
+        presentacion->bajarRespuesta(idNodo, reqId, bufferTx, fiable);
     }
 
   public:
     explicit CapaAplicacion(CapaPresentacion* capaPres) : presentacion(capaPres) {}
 
-    // Permite al Proceso de Usuario inyectar su motor de autorización sin acoplar la capa
     void establecerEvaluadorPolitica(EvaluadorPoliticaRPC evaluador) {
         evaluadorPolitica = evaluador;
     }
@@ -105,10 +103,11 @@ class CapaAplicacion {
         return true;
     }
 
+    // Invocación RPC desde el Firmware: permite elegir fiable = true (TCP ARQ) o fiable = false (UDP directo)
     template <typename FnBuilder>
     uint16_t call(const char* comando, uint8_t cantidadArgs, FnBuilder&& constructorArgs,
                   CallbackRespuestaRPC onRespuesta, unsigned long timeoutMs = 4000,
-                  int idNodoForzado = -1) {
+                  bool fiable = true, int idNodoForzado = -1) {
         if (!presentacion || !comando || !presentacion->puedeEnviarPeticion()) return 0;
 
         int idNodo = (idNodoForzado >= 0) ? idNodoForzado : presentacion->obtenerNodoPreferido();
@@ -128,7 +127,8 @@ class CapaAplicacion {
             idNodo,
             bufferTx,
             reinterpret_cast<void*>(onRespuesta),
-            timeoutMs
+            timeoutMs,
+            fiable
         );
     }
 
@@ -156,9 +156,10 @@ class CapaAplicacion {
 
         MensajePresentacion msj;
         if (presentacion->subirMensaje(msj)) {
-            MetaCall meta = { msj.idNodo, msj.reqId };
+            MetaCall meta = { msj.idNodo, msj.reqId, msj.fiable };
 
             // CASO A: Petición RPC entrante (CALL)
+            // Responde automáticamente en el mismo modo de transporte (TCP o UDP) en que llegó la petición
             if (msj.tipoSesion == CapaSesion::TIPO_RPC_REQ) {
                 ManejadorProcedimientoRPC manejador = nullptr;
                 for (size_t i = 0; i < totalRutas; i++) {
@@ -169,16 +170,15 @@ class CapaAplicacion {
                 }
 
                 if (!manejador) {
-                    enviarErrorRapido(msj.idNodo, msj.reqId, "ROUTE_NOT_FOUND");
+                    enviarErrorRapido(msj.idNodo, msj.reqId, "ROUTE_NOT_FOUND", msj.fiable);
                     return;
                 }
 
-                // Consulta al Proceso de Usuario (si inyectó una política de acceso)
                 if (evaluadorPolitica) {
                     char motivo[32] = "FORBIDDEN";
                     LectorMsgPack copiaCursor = msj.lector;
                     if (!evaluadorPolitica(msj.cabecera, msj.cantidadArgs, copiaCursor, meta, motivo, sizeof(motivo))) {
-                        enviarErrorRapido(msj.idNodo, msj.reqId, motivo);
+                        enviarErrorRapido(msj.idNodo, msj.reqId, motivo, msj.fiable);
                         return;
                     }
                 }
@@ -187,9 +187,9 @@ class CapaAplicacion {
                 EscritorMsgPack escritor(bufferTx);
                 bool ok = manejador(msj.cantidadArgs, msj.lector, escritor, meta);
                 if (ok && msj.reqId != 0 && bufferTx.longitud > 0) {
-                    presentacion->bajarRespuesta(msj.idNodo, msj.reqId, bufferTx);
+                    presentacion->bajarRespuesta(msj.idNodo, msj.reqId, bufferTx, msj.fiable);
                 } else if (!ok && msj.reqId != 0) {
-                    enviarErrorRapido(msj.idNodo, msj.reqId, "HANDLER_EXEC_ERR");
+                    enviarErrorRapido(msj.idNodo, msj.reqId, "HANDLER_EXEC_ERR", msj.fiable);
                 }
             }
             // CASO B: Respuesta correlacionada o Timeout desde Capa 5

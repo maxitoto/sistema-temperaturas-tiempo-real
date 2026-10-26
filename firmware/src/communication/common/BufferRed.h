@@ -6,7 +6,7 @@
 #include <string.h>
 
 namespace LimitesPila {
-    static const int    MAX_NODOS_RED         = 4;   // 1 USB (0) + 3 Clientes TCP Wi-Fi (1..3)
+    static const int    MAX_NODOS_RED         = 4;   // 1 USB (0) + 3 Clientes UDP Wi-Fi (1..3)
     static const size_t TAMANO_MAX_CHUNK      = 64;  // Fragmento físico máximo por ráfaga
     static const size_t MAX_TRAMA_ENLACE      = 512; // MTU de la Capa de Enlace
 

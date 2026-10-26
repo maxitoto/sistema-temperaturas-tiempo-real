@@ -148,6 +148,11 @@ namespace ServerExampleStub {
 
         DebugOLED::registrarRx(meta.idNodo, comando, meta.reqId);
 
+        if (strcmp(comando, RPC_SUMAR_Y_ESTADO) == 0 ||
+            strcmp(comando, RPC_DATOS_EN_VIVO) == 0) {
+            return true;
+        }
+
         // RPC_SUMAR_Y_ESTADO es de prueba general; todos los demás exigen CredencialRpcDTO (4 campos iniciales)
         if (strcmp(comando, RPC_SUMAR_Y_ESTADO) == 0) {
             return true;
@@ -234,6 +239,13 @@ namespace ServerExampleStub {
     // =========================================================================
     class FirmwareImpl : public IFirmware {
       public:
+        RespuestaDatosEnVivoDTO leerDatosEnVivo() override {
+            gEstadoSistema.totalLlamadasRecibidas++;
+            // Genera una temperatura/número aleatorio entre -20.0 y -10.0 (o el rango que prefieras)
+            float valorRandom = -20.0f + ((float)random(0, 101) * 0.1f);
+            return { valorRandom };
+        }
+
         RespuestaEstado sumarYEstado(float base, float factor) override {
             float resultado = base + (factor * 1.5f);
             gEstadoSistema.ultimoResultadoCalculado = resultado;
@@ -415,6 +427,11 @@ namespace ServerExampleStub {
 
     inline void registrarSkeletonFirmware(CapaAplicacion& appRpc, IFirmware& impl) {
         servicioFirmware() = &impl;
+
+        appRpc.on(RPC_DATOS_EN_VIVO, [](size_t, LectorMsgPack&,
+                                        EscritorMsgPack& resp, const MetaCall&) -> bool {
+            return servicioFirmware()->leerDatosEnVivo().serializar(resp);
+        });
 
         appRpc.on(RPC_SUMAR_Y_ESTADO, [](size_t cantArgs, LectorMsgPack& args,
                                          EscritorMsgPack& resp, const MetaCall&) -> bool {
