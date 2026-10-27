@@ -9,11 +9,12 @@ namespace Contratos {
     using namespace EsquemaFisicoDB;
 
     // ---------- Nombres de procedimientos RPC ----------
+    static const char* const RPC_DATOS_EN_VIVO           = "RPC_DATOS_EN_VIVO";
     static const char* const RPC_SUMAR_Y_ESTADO          = "RPC_SUMAR_Y_ESTADO";
     static const char* const RPC_GUARDAR_CONFIG_SEGURA   = "RPC_GUARDAR_CONFIG_SEGURA";
     static const char* const RPC_SYNC_RELOJ              = "RPC_SYNC_RELOJ";
 
-    // Nuevos endpoints RPC de Base de Datos (DQL y DML autenticados)
+    // Endpoints RPC de Base de Datos (DQL y DML autenticados)
     static const char* const RPC_DB_LISTAR_SENSORES      = "RPC_DB_LISTAR_SENSORES";
     static const char* const RPC_DB_GUARDAR_SENSOR       = "RPC_DB_GUARDAR_SENSOR";
     static const char* const RPC_DB_ULTIMOS_SENSOS       = "RPC_DB_ULTIMOS_SENSOS";
@@ -24,6 +25,8 @@ namespace Contratos {
     static const char* const RPC_DB_OBTENER_SMTP         = "RPC_DB_OBTENER_SMTP";
     static const char* const RPC_DB_OBTENER_RED_Y_NTP    = "RPC_DB_OBTENER_RED_Y_NTP";
     static const char* const RPC_DB_GUARDAR_RED          = "RPC_DB_GUARDAR_RED";
+    static const char* const RPC_DB_LISTAR_USUARIOS      = "RPC_DB_LISTAR_USUARIOS";
+    static const char* const RPC_DB_ACTUALIZAR_USUARIO   = "RPC_DB_ACTUALIZAR_USUARIO";
 
     // ---------- Cabecera de Seguridad unificada (Certificado TLS + Credencial Usuario) ----------
     struct CertificadoLiteDTO {
@@ -37,7 +40,7 @@ namespace Contratos {
 
     struct UsuarioCredencialDTO {
         char username[20];
-        char pinHash[24];
+        char pinHash[32];
         bool deserializar(LectorMsgPack& r) {
             return r.leerTexto(username, sizeof(username)) &&
                    r.leerTexto(pinHash, sizeof(pinHash));
@@ -81,9 +84,9 @@ namespace Contratos {
     };
 
     struct CrearCorreoInputDTO {
-        char    nombre[24];
-        char    apellido[24];
-        char    email[48];
+        char     nombre[24];
+        char     apellido[24];
+        char     email[48];
         uint32_t tipoRecepcion = 0;
         bool deserializar(LectorMsgPack& r) {
             return r.leerTexto(nombre, sizeof(nombre)) &&
@@ -108,7 +111,28 @@ namespace Contratos {
         }
     };
 
+    struct ActualizarUsuarioInputDTO {
+        uint32_t idUsuarioObjetivo = 0;
+        char     nuevoUsername[20];
+        uint8_t  nuevaPasswordCifrada[32];
+        size_t   lenNuevaPassword = 0;
+        bool deserializar(LectorMsgPack& r) {
+            return r.leerUInt32(idUsuarioObjetivo) &&
+                   r.leerTexto(nuevoUsername, sizeof(nuevoUsername)) &&
+                   r.leerBinario(nuevaPasswordCifrada, sizeof(nuevaPasswordCifrada), lenNuevaPassword);
+        }
+    };
+
     // ---------- DTOs de Salida y Serializadores de Filas ----------
+    struct RespuestaDatosEnVivoDTO {
+        float numeroRandom;
+        bool serializar(EscritorMsgPack& w) const {
+            return w.iniciarArray(2) &&
+                   w.escribirTexto("OK") &&
+                   w.escribirFloat(numeroRandom);
+        }
+    };
+
     struct RespuestaEstado {
         float resultado;
         const char* estado;
@@ -199,17 +223,27 @@ namespace Contratos {
                w.escribirUInt(f.fecha_modificacion);
     }
 
+    // Serializa un usuario sin exponer jamás el campo contrasena por red
+    inline bool serializarFilaUsuarioResumen(EscritorMsgPack& w, const FilaUsuario& f) {
+        return w.iniciarArray(5) &&
+               w.escribirUInt(f.id_usuario) &&
+               w.escribirTexto(f.usuario) &&
+               w.escribirUInt(f.rol) &&
+               w.escribirUInt(f.activa) &&
+               w.escribirUInt(f.fecha_modificacion);
+    }
+
     // ---------- Contrato: servicio que EXPONE el firmware (backend lo llama) ----------
     class IFirmware {
       public:
         virtual ~IFirmware() = default;
+        virtual RespuestaDatosEnVivoDTO leerDatosEnVivo() = 0;
         virtual RespuestaEstado sumarYEstado(float base, float factor) = 0;
         virtual bool guardarConfig(const UsuarioCredencialDTO& cred,
                                    const ConfigHeladeraDTO& cfg,
                                    int idNodo,
                                    RespuestaConfigDTO& out) = 0;
 
-        // Consultas DQL y Mutaciones DML sobre los Repositorios de la MicroSD
         virtual size_t listarSensores(const UsuarioCredencialDTO& cred, FilaSensor* out, size_t maxItems) = 0;
         virtual bool   guardarSensor(const UsuarioCredencialDTO& cred, const GuardarSensorInputDTO& in, FilaSensor& out) = 0;
         virtual size_t listarUltimosSensos(const UsuarioCredencialDTO& cred, uint16_t idSensor, FilaSenso* out, size_t maxItems) = 0;
@@ -220,6 +254,10 @@ namespace Contratos {
         virtual bool   obtenerConfigSmtp(const UsuarioCredencialDTO& cred, FilaConfiguracionSMTP& out) = 0;
         virtual bool   obtenerConfigRedYNtp(const UsuarioCredencialDTO& cred, FilaConfiguracionConectividad& outRed, FilaServidorNTP* outNtp, size_t& totalNtp) = 0;
         virtual bool   guardarConfigRed(const UsuarioCredencialDTO& cred, const GuardarRedInputDTO& in, FilaConfiguracionConectividad& outRed) = 0;
+
+        // Gestión de los 3 Usuarios del Servidor
+        virtual size_t listarUsuarios(const UsuarioCredencialDTO& cred, FilaUsuario* out, size_t maxItems) = 0;
+        virtual bool   actualizarUsuario(const UsuarioCredencialDTO& cred, const ActualizarUsuarioInputDTO& in, FilaUsuario& out) = 0;
     };
 
     // ---------- Contrato: servicio que EXPONE el backend (firmware lo llama) ----------

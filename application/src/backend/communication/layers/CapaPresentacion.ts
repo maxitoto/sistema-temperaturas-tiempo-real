@@ -16,7 +16,7 @@ export type TransformadorPayloadCapa6 = (
   idNodo: number,
   reqId: number,
   vistaPayload: Uint8Array
-) => boolean;
+) => Uint8Array | null;
 
 export class LectorMsgPack {
   private pos = 0;
@@ -229,11 +229,13 @@ export class CapaPresentacion {
   }
 
   private procesarSubida(pkt: BufferPaquete, meta: MensajeSesion): void {
-    const vista = pkt.vistaActual();
+    let vista = pkt.vistaActual();
     if (vista.length === 0 || vista.length > LimitesPila.MAX_PAYLOAD_APP) return;
 
     if (this.transformadorRx) {
-      if (!this.transformadorRx(meta.idNodo, meta.reqId, vista)) return;
+      const desencriptado = this.transformadorRx(meta.idNodo, meta.reqId, vista);
+      if (!desencriptado) return;
+      vista = desencriptado;
     }
 
     const decodificado = decode(vista);
@@ -266,19 +268,23 @@ export class CapaPresentacion {
   ): BufferPaquete {
     const pkt = new BufferPaquete();
     pkt.prepararParaTx(idNodo);
-    const bytes = encode([cabecera, ...argumentos]);
+    let bytes: Uint8Array = encode([cabecera, ...argumentos]);
+    if (this.transformadorTx) {
+      const transformado = this.transformadorTx(idNodo, reqId, bytes);
+      if (!transformado) {
+        throw new Error("Fallo al encriptar payload en Capa 6 (AES-256-GCM)");
+      }
+      bytes = transformado;
+    }
     if (!pkt.escribirPayloadTx(bytes)) {
       throw new Error(
-        `Payload MessagePack (${bytes.length}B) excede MAX_PAYLOAD_APP (${LimitesPila.MAX_PAYLOAD_APP}B)`
+        `Payload Capa 6 (${bytes.length}B) excede MAX_PAYLOAD_APP (${LimitesPila.MAX_PAYLOAD_APP}B)`
       );
-    }
-    if (this.transformadorTx) {
-      this.transformadorTx(idNodo, reqId, pkt.vistaActual());
     }
     return pkt;
   }
 
-  public async invocarSerializado(
+  public async invocarRequest(
     idNodo: number,
     comando: string,
     parametros: unknown[] = [],
@@ -286,13 +292,17 @@ export class CapaPresentacion {
   ): Promise<unknown[]> {
     const pktTx = this.empaquetarEnBuffer(idNodo, comando, parametros, 0);
     const pktRx = await this.sesion.enviarPeticionRPC(idNodo, pktTx, timeoutMs);
-    const vistaRx = pktRx.vistaActual();
+    let vistaRx = pktRx.vistaActual();
     if (this.transformadorRx) {
-      this.transformadorRx(idNodo, 0, vistaRx);
+      const desencriptado = this.transformadorRx(idNodo, 0, vistaRx);
+      if (!desencriptado) {
+        throw new Error("Tag de autenticidad GCM inválido en respuesta Request");
+      }
+      vistaRx = desencriptado;
     }
     const decodificado = decode(vistaRx);
     if (!Array.isArray(decodificado) || decodificado.length === 0) {
-      throw new Error("Formato MessagePack inválido en respuesta RPC");
+      throw new Error("Formato MessagePack inválido en respuesta Request");
     }
     return decodificado;
   }
@@ -310,10 +320,52 @@ export class CapaPresentacion {
   public bajarEventoFormateado(
     idNodo: number,
     evento: string,
-    datos: unknown[] = [],
-    fiable = true
+    datos: unknown[] = []
   ): boolean {
     const pktTx = this.empaquetarEnBuffer(idNodo, evento, datos, 0);
-    return this.sesion.bajarEvento(idNodo, pktTx, fiable);
+    return this.sesion.bajarEvento(idNodo, pktTx);
+  }
+
+  // --- CAMINO 2: STREAMING TIEMPO REAL (UDP / DATAGRAMA) ---
+  public async invocarStream(
+    idNodo: number,
+    canal: string,
+    parametros: unknown[] = [],
+    timeoutMs = 1500
+  ): Promise<unknown[]> {
+    const pktTx = this.empaquetarEnBuffer(idNodo, canal, parametros, 0);
+    const pktRx = await this.sesion.consultarStream(idNodo, pktTx, timeoutMs);
+    let vistaRx = pktRx.vistaActual();
+    if (this.transformadorRx) {
+      const desencriptado = this.transformadorRx(idNodo, 0, vistaRx);
+      if (!desencriptado) {
+        throw new Error("Tag de autenticidad GCM inválido en respuesta Stream");
+      }
+      vistaRx = desencriptado;
+    }
+    const decodificado = decode(vistaRx);
+    if (!Array.isArray(decodificado) || decodificado.length === 0) {
+      throw new Error("Formato MessagePack inválido en cuadro de Stream");
+    }
+    return decodificado;
+  }
+
+  public bajarRespuestaStreamFormateada(
+    idNodo: number,
+    reqId: number,
+    estado: "OK" | "ERR",
+    datos: unknown[] = []
+  ): boolean {
+    const pktTx = this.empaquetarEnBuffer(idNodo, estado, datos, reqId);
+    return this.sesion.bajarRespuestaStream(idNodo, reqId, pktTx);
+  }
+
+  public bajarStreamFormateado(
+    idNodo: number,
+    canal: string,
+    datos: unknown[] = []
+  ): boolean {
+    const pktTx = this.empaquetarEnBuffer(idNodo, canal, datos, 0);
+    return this.sesion.bajarStream(idNodo, pktTx);
   }
 }

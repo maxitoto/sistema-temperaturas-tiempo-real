@@ -506,6 +506,7 @@ class CapaPresentacion {
         return true;
     }
 
+    // --- CAMINO 1: TRANSACCIONAL (REQUEST / REPLY / EVENTO) ---
     uint16_t bajarPeticion(int idNodo, BufferPaquete& pkt, void* callback, unsigned long timeoutMs) {
         if (!sesion) return 0;
         if (transformadorTx) {
@@ -526,17 +527,48 @@ class CapaPresentacion {
         return sesion->bajarRespuesta(idNodo, reqId, pkt);
     }
 
-    void bajarEventoGlobal(BufferPaquete& pkt, bool fiable = true) {
+    void bajarEventoGlobal(BufferPaquete& pkt) {
         if (!sesion) return;
         if (transformadorTx) {
             if (!transformadorTx(-1, 0, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
                 return;
             }
         }
-        sesion->bajarEventoGlobal(pkt, fiable);
+        sesion->bajarEventoGlobal(pkt);
     }
 
-    void mantenerSesiones() {
+    // --- CAMINO 2: STREAMING TIEMPO REAL (UDP / DATAGRAMA) ---
+    bool bajarRespuestaStream(int idNodo, uint16_t reqId, BufferPaquete& pkt) {
+        if (!sesion) return false;
+        if (transformadorTx) {
+            if (!transformadorTx(idNodo, reqId, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
+                return false;
+            }
+        }
+        return sesion->bajarRespuestaStream(idNodo, reqId, pkt);
+    }
+
+    bool bajarStreamUnicast(int idNodo, BufferPaquete& pkt) {
+        if (!sesion) return false;
+        if (transformadorTx) {
+            if (!transformadorTx(idNodo, 0, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
+                return false;
+            }
+        }
+        return sesion->bajarStreamUnicast(idNodo, pkt);
+    }
+
+    void bajarStreamGlobal(BufferPaquete& pkt) {
+        if (!sesion) return;
+        if (transformadorTx) {
+            if (!transformadorTx(-1, 0, pkt.ptrPayloadApp(), pkt.longitud, LimitesPila::MAX_PAYLOAD_APP)) {
+                return;
+            }
+        }
+        sesion->bajarStreamGlobal(pkt);
+    }
+
+void mantenerSesiones() {
         if (sesion) sesion->auditarSesiones();
     }
 

@@ -59,7 +59,9 @@ export class CapaEnlace {
     this.oyenteSubida = callback;
   }
 
-  // CAMINO DE BAJADA (TX): Fragmenta y aplica Byte-Stuffing HDLC (0x7E, 0x7D, 0xFF)
+  // ==========================================================
+  // CAMINO DE BAJADA (TX)
+  // ==========================================================
   public bajarTrama(pkt: BufferPaquete): boolean {
     if (pkt.longitud === 0 || pkt.longitud > LimitesPila.MAX_TRAMA_ENLACE) {
       return false;
@@ -67,6 +69,14 @@ export class CapaEnlace {
 
     const payload = pkt.vistaActual();
     const longitud = payload.length;
+
+    // 🟢 BYPASS CAPA 2 (Wi-Fi Nativo TCP/UDP)
+    // Si el medio físico es un socket nativo, el Sistema Operativo ya hace el framing.
+    if (this.fisica.esMedioNativo(this.idMedio)) {
+      return this.fisica.enviarBytes(this.idMedio, payload, pkt.esDatagramaNativo) === longitud;
+    }
+
+    // 🔴 CAMINO PERSONALIZADO (USB / UDP Crudo)
     const crcMensajeUnificado = calcularCRC16(payload, longitud);
     const totalChunks = Math.ceil(longitud / LimitesPila.TAMANO_MAX_CHUNK);
 
@@ -111,8 +121,28 @@ export class CapaEnlace {
     return true;
   }
 
-  // CAMINO DE SUBIDA (RX): Des-escapa 0x7D y resincroniza inmediatamente en 0x7E
-  public alimentarBytesRx(bytes: Uint8Array): void {
+  // ==========================================================
+  // CAMINO DE SUBIDA (RX)
+  // ==========================================================
+  public alimentarBytesRx(bytes: Uint8Array, esDatagrama = false): void {
+    // 🟢 BYPASS CAPA 2 (Wi-Fi Nativo TCP/UDP)
+    // Si el medio es nativo, no hay SOF, ni ESC, ni CRC. El OS entrega el paquete limpio.
+    if (this.fisica.esMedioNativo(this.idMedio)) {
+      if (bytes.length === 0 || bytes.length > LimitesPila.MAX_TRAMA_ENLACE) return;
+      
+      const pktSalida = new BufferPaquete();
+      pktSalida.prepararParaRx(this.idMedio);
+      pktSalida.raw.set(bytes, 0);
+      pktSalida.longitud = bytes.length;
+      pktSalida.esDatagramaNativo = esDatagrama;
+      
+      if (this.oyenteSubida) {
+        this.oyenteSubida(pktSalida);
+      }
+      return;
+    }
+
+    // 🔴 CAMINO PERSONALIZADO (USB / UDP Crudo) - Máquina de estados HDLC
     const ahora = Date.now();
     if (
       (this.estadoRx !== EstadoRX.ESPERANDO_SOF || this.totalChunksEsperados > 0) &&
@@ -126,6 +156,7 @@ export class CapaEnlace {
     for (let b = 0; b < bytes.length; b++) {
       const byteCrudo = bytes[b];
 
+      // 0x7E SIEMPRE indica el inicio de una nueva trama, sin importar el estado
       if (byteCrudo === CapaEnlace.SOF_BYTE) {
         this.posCabecera = 0;
         this.posDatosChunk = 0;
@@ -148,13 +179,13 @@ export class CapaEnlace {
       this.escapandoRx = false;
 
       switch (this.estadoRx) {
-        
         case EstadoRX.LEYENDO_CABECERA:
           this.cabeceraRx[this.posCabecera++] = byteLeido;
           if (this.posCabecera === 3) {
             const indice = this.cabeceraRx[0];
             const total = this.cabeceraRx[1];
             const len = this.cabeceraRx[2];
+            // Validación estricta de cabecera
             if (len === 0 || len > LimitesPila.TAMANO_MAX_CHUNK || total === 0 || indice >= total) {
               this.reiniciarEstadoTrama();
               this.reiniciarEnsamblaje();
@@ -184,6 +215,7 @@ export class CapaEnlace {
 
             this.reiniciarEstadoTrama();
 
+            // Validar CRC del Chunk
             let crcCalc = calcularCRC16(this.cabeceraRx, 3);
             crcCalc = calcularCRC16(this.bufferChunkRx.subarray(0, len), len, crcCalc);
             if (crcCalc !== crcTramaRecib) {
@@ -191,6 +223,7 @@ export class CapaEnlace {
               continue;
             }
 
+            // Ensamblaje de Chunks
             if (indice === 0) {
               this.reiniciarEnsamblaje();
               this.totalChunksEsperados = total;
@@ -210,6 +243,7 @@ export class CapaEnlace {
               continue;
             }
 
+            // Verificar CRC del Mensaje Completo (solo en el último chunk)
             if (this.chunkSiguiente === this.totalChunksEsperados) {
               const crcTotalCalc = calcularCRC16(
                 this.bufferEnsamblaje.subarray(0, this.longitudEnsamblada),
@@ -224,6 +258,7 @@ export class CapaEnlace {
               pktSalida.prepararParaRx(this.idMedio);
               pktSalida.raw.set(this.bufferEnsamblaje.subarray(0, this.longitudEnsamblada), 0);
               pktSalida.longitud = this.longitudEnsamblada;
+              pktSalida.esDatagramaNativo = false; // USB siempre es flujo de bytes
               this.reiniciarEnsamblaje();
 
               if (this.oyenteSubida) {

@@ -5,7 +5,6 @@
 #include "communication/common/BufferRed.h"
 #include "communication/layers/CapaTransporte.h"
 
-// PDU que sube de la Capa de Sesión a la Capa de Presentación
 struct MensajeSesion {
     int idNodo = -1;
     uint8_t tipo = 0;
@@ -21,25 +20,32 @@ struct MensajeSesion {
 
 class CapaSesion {
   public:
-    static const uint8_t VERSION_PROTOCOLO       = 0x01;
-    static const size_t  MAX_PETICIONES_EN_VUELO = 4;
+    static constexpr uint8_t VERSION_PROTOCOLO       = 0x01;
+    static constexpr size_t  MAX_PETICIONES_EN_VUELO = 4;
 
-    // Tipos de mensaje del Sobre (Envelope de 8 bytes)
-    static const uint8_t TIPO_HEARTBEAT       = 0x01;
-    static const uint8_t TIPO_HANDSHAKE_INIT  = 0x02;
-    static const uint8_t TIPO_HANDSHAKE_CHAL  = 0x03;
-    static const uint8_t TIPO_HANDSHAKE_AUTH  = 0x04;
-    static const uint8_t TIPO_HANDSHAKE_OK    = 0x05;
-    static const uint8_t TIPO_RPC_REQ         = 0x10; // CALL
-    static const uint8_t TIPO_RPC_RES         = 0x11; // REPLY
-    static const uint8_t TIPO_EVENTO          = 0x20; // Notificación asíncrona (reqId = 0)
-    static const uint8_t TIPO_TIMEOUT_LOCAL   = 0xFE; // Señal interna de timeout en Capa 5
-    static const uint8_t TIPO_ERROR_SESION    = 0xFF;
+    // --- Control de Sesión ---
+    static constexpr uint8_t TIPO_HEARTBEAT       = 0x01;
+    static constexpr uint8_t TIPO_HANDSHAKE_INIT  = 0x02;
+    static constexpr uint8_t TIPO_HANDSHAKE_CHAL  = 0x03;
+    static constexpr uint8_t TIPO_HANDSHAKE_AUTH  = 0x04;
+    static constexpr uint8_t TIPO_HANDSHAKE_OK    = 0x05;
 
-    // Códigos de error de Sesión (1 byte)
-    static const uint8_t ERR_NO_AUTORIZADO    = 0x01;
-    static const uint8_t ERR_AUTH_FALLIDA     = 0x02;
-    static const uint8_t ERR_SOBRE_INVALIDO   = 0x03;
+    // --- CAMINO 1: Transaccional Fiable (PROTO_TCP + PUERTO_RPC) ---
+    static constexpr uint8_t TIPO_RPC_REQ         = 0x10; // Request (CALL)
+    static constexpr uint8_t TIPO_RPC_RES         = 0x11; // Reply   (REPLY)
+    static constexpr uint8_t TIPO_EVENTO          = 0x20; // Evento fiable (reqId = 0)
+
+    // --- CAMINO 2: Streaming Tiempo Real (PROTO_UDP + PUERTO_EVENTOS) ---
+    static constexpr uint8_t TIPO_STREAM_REQ      = 0x30; // Petición rápida de Stream
+    static constexpr uint8_t TIPO_STREAM_DATA     = 0x31; // Cuadro de datos de Stream
+
+    // --- Señales de Error / Timeout ---
+    static constexpr uint8_t TIPO_TIMEOUT_LOCAL   = 0xFE;
+    static constexpr uint8_t TIPO_ERROR_SESION    = 0xFF;
+
+    static constexpr uint8_t ERR_NO_AUTORIZADO    = 0x01;
+    static constexpr uint8_t ERR_AUTH_FALLIDA     = 0x02;
+    static constexpr uint8_t ERR_SOBRE_INVALIDO   = 0x03;
 
     enum EstadoAuth {
         NO_AUTENTICADO,
@@ -79,13 +85,7 @@ class CapaSesion {
     PeticionPendiente pendientes[MAX_PETICIONES_EN_VUELO];
 
     uint32_t aleatorioHardware() const {
-        #if defined(ESP32)
-            return esp_random();
-        #elif defined(ESP8266)
-            return *(volatile uint32_t*)0x3FF20E44;
-        #else
-            return (uint32_t)random(100000, 0x7FFFFFFF);
-        #endif
+        return esp_random(); // TRNG físico nativo del ESP-WROOM-32
     }
 
     void calcularHashDesafio(uint32_t nonce, uint8_t* hashSalida32B) const {
@@ -106,8 +106,7 @@ class CapaSesion {
     }
 
     bool empujarSobreYEnviar(int idNodo, uint8_t tipo, uint16_t sesId, uint16_t reqId,
-                             BufferPaquete& pkt, uint8_t protocolo = CapaTransporte::PROTO_TCP,
-                             uint8_t puerto = CapaTransporte::PUERTO_RPC) {
+                             BufferPaquete& pkt, uint8_t protocolo, uint8_t puerto) {
         if (!transporte || pkt.longitud > LimitesPila::MAX_PAYLOAD_APP) return false;
         uint16_t lenPayload = (uint16_t)pkt.longitud;
 
@@ -134,7 +133,10 @@ class CapaSesion {
             memcpy(pktCtrl.ptrPayloadApp(), datos, len);
             pktCtrl.longitud = len;
         }
-        empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pktCtrl);
+        empujarSobreYEnviar(
+            idNodo, tipo, sesId, reqId, pktCtrl,
+            CapaTransporte::PROTO_TCP, CapaTransporte::PUERTO_RPC
+        );
     }
 
     void cancelarPendientesNodo(int idNodo) {
@@ -280,7 +282,9 @@ class CapaSesion {
             return false;
         }
 
-        if (tipo == TIPO_RPC_RES || tipo == TIPO_ERROR_SESION) {
+        // Correlación de respuestas (tanto de Request como de consulta de Stream con reqId > 0)
+        if (tipo == TIPO_RPC_RES || tipo == TIPO_ERROR_SESION ||
+            (tipo == TIPO_STREAM_DATA && reqId != 0)) {
             for (size_t i = 0; i < MAX_PETICIONES_EN_VUELO; i++) {
                 if (pendientes[i].activa &&
                     pendientes[i].idNodo == id &&
@@ -298,7 +302,11 @@ class CapaSesion {
         return true;
     }
 
-    uint16_t enviarPeticionRPC(int idNodo, BufferPaquete& pkt, void* callback, unsigned long timeoutPeticionMs = 4000) {
+    // =========================================================================
+    // CAMINO 1: TRANSACCIONAL (REQUEST / REPLY / EVENTO FIABLE -> PROTO_TCP)
+    // =========================================================================
+    uint16_t enviarPeticionRPC(int idNodo, BufferPaquete& pkt, void* callback,
+                               unsigned long timeoutPeticionMs = 4000) {
         if (!estaAutenticado(idNodo)) return 0;
 
         int slot = -1;
@@ -311,7 +319,8 @@ class CapaSesion {
         if (slot < 0) return 0;
 
         uint16_t reqId = siguienteTicket();
-        if (!empujarSobreYEnviar(idNodo, TIPO_RPC_REQ, nodos[idNodo].sessionId, reqId, pkt)) {
+        if (!empujarSobreYEnviar(idNodo, TIPO_RPC_REQ, nodos[idNodo].sessionId, reqId, pkt,
+                                 CapaTransporte::PROTO_TCP, CapaTransporte::PUERTO_RPC)) {
             return 0;
         }
 
@@ -321,22 +330,51 @@ class CapaSesion {
 
     bool bajarRespuesta(int idNodo, uint16_t reqId, BufferPaquete& pkt) {
         if (!estaAutenticado(idNodo)) return false;
-        return empujarSobreYEnviar(idNodo, TIPO_RPC_RES, nodos[idNodo].sessionId, reqId, pkt);
+        return empujarSobreYEnviar(
+            idNodo, TIPO_RPC_RES, nodos[idNodo].sessionId, reqId, pkt,
+            CapaTransporte::PROTO_TCP, CapaTransporte::PUERTO_RPC
+        );
     }
 
-    void bajarEventoGlobal(BufferPaquete& pktBase, bool fiable = true) {
-        uint8_t proto = fiable ? CapaTransporte::PROTO_TCP : CapaTransporte::PROTO_UDP;
-        uint8_t puerto = fiable ? CapaTransporte::PUERTO_RPC : CapaTransporte::PUERTO_EVENTOS;
-
-        if (nodos[0].estado == AUTENTICADO) {
-            empujarSobreYEnviar(0, TIPO_EVENTO, nodos[0].sessionId, 0, pktBase, proto, puerto);
-            return;
-        }
-
-        for (int i = 1; i < LimitesPila::MAX_NODOS_RED; i++) {
+    void bajarEventoGlobal(BufferPaquete& pktBase) {
+        for (int i = 0; i < LimitesPila::MAX_NODOS_RED; i++) {
             if (nodos[i].estado == AUTENTICADO) {
                 BufferPaquete copia = pktBase;
-                empujarSobreYEnviar(i, TIPO_EVENTO, nodos[i].sessionId, 0, copia, proto, puerto);
+                empujarSobreYEnviar(
+                    i, TIPO_EVENTO, nodos[i].sessionId, 0, copia,
+                    CapaTransporte::PROTO_TCP, CapaTransporte::PUERTO_RPC
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // CAMINO 2: STREAMING TIEMPO REAL (DATAGRAMA DIRECTO -> PROTO_UDP)
+    // =========================================================================
+    bool bajarRespuestaStream(int idNodo, uint16_t reqId, BufferPaquete& pkt) {
+        if (!estaAutenticado(idNodo)) return false;
+        return empujarSobreYEnviar(
+            idNodo, TIPO_STREAM_DATA, nodos[idNodo].sessionId, reqId, pkt,
+            CapaTransporte::PROTO_UDP, CapaTransporte::PUERTO_EVENTOS
+        );
+    }
+
+    bool bajarStreamUnicast(int idNodo, BufferPaquete& pkt) {
+        if (!estaAutenticado(idNodo)) return false;
+        return empujarSobreYEnviar(
+            idNodo, TIPO_STREAM_DATA, nodos[idNodo].sessionId, 0, pkt,
+            CapaTransporte::PROTO_UDP, CapaTransporte::PUERTO_EVENTOS
+        );
+    }
+
+    void bajarStreamGlobal(BufferPaquete& pktBase) {
+        for (int i = 0; i < LimitesPila::MAX_NODOS_RED; i++) {
+            if (nodos[i].estado == AUTENTICADO) {
+                BufferPaquete copia = pktBase;
+                empujarSobreYEnviar(
+                    i, TIPO_STREAM_DATA, nodos[i].sessionId, 0, copia,
+                    CapaTransporte::PROTO_UDP, CapaTransporte::PUERTO_EVENTOS
+                );
             }
         }
     }

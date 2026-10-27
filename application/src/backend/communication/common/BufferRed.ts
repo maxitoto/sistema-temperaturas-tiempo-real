@@ -21,12 +21,13 @@ export const LimitesPila = {
 
   TAMANO_CABECERA_RED: 2,
   TAMANO_CABECERA_TRANS: 10,
+  TAMANO_RECORD_MARKER_TCP: 4, // RFC 5531 Record Marking (Wi-Fi TCP)
   TAMANO_SOBRE_SESION: 8,
 
-  OFFSET_TRANSPORTE: 2,     // = TAMANO_CABECERA_RED
-  OFFSET_SESION: 12,        // = 2 + 10
-  OFFSET_PAYLOAD_APP: 20,   // = 2 + 10 + 8
-  MAX_PAYLOAD_APP: 492,     // = 512 - 20
+  OFFSET_TRANSPORTE: 2,
+  OFFSET_SESION: 12,
+  OFFSET_PAYLOAD_APP: 20,
+  MAX_PAYLOAD_APP: 492,
 } as const;
 
 /**
@@ -51,6 +52,8 @@ export class BufferPaquete {
   /** ID del nodo destino (TX) u origen (RX). -1 si no aplica. */
   public idNodo = -1;
 
+  public esDatagramaNativo = false;
+
   /** Buffer subyacente de tamaño fijo. Nunca se reasigna. */
   public readonly raw = new Uint8Array(LimitesPila.MAX_TRAMA_ENLACE);
 
@@ -59,6 +62,7 @@ export class BufferPaquete {
 
   /** Bytes visibles desde `inicio` (payload + cabeceras aún no consumidas). */
   public longitud = 0;
+  
 
   /**
    * Prepara el buffer para TX: posiciona `inicio` al final (offset 20) para
@@ -68,6 +72,7 @@ export class BufferPaquete {
    */
   public prepararParaTx(destino = -1): void {
     this.idNodo = destino;
+    this.esDatagramaNativo = false;
     this.inicio = LimitesPila.OFFSET_PAYLOAD_APP;
     this.longitud = 0;
   }
@@ -80,6 +85,7 @@ export class BufferPaquete {
    */
   public prepararParaRx(origen = -1): void {
     this.idNodo = origen;
+    this.esDatagramaNativo = false;
     this.inicio = 0;
     this.longitud = 0;
   }

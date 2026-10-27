@@ -1,12 +1,12 @@
 // Archivo: ./src/backend/plugins/conectividad/servicosConectivos.ts
-import { ID_NODO_USB, ID_NODO_WIFI, pila } from "../../communication/ContenedorComunicacion";
+import { ID_NODO_USB, ID_NODO_WIFI, pila } from "../ContenedorComunicacion";
 import { registrarStubsServidorBackend } from "../../stubs/serverExample";
-import { ClienteTCPNode } from "./modem/ClienteTCPNode";
+import { ClienteWiFiNode } from "./modem/ClienteWiFiNode";
 import { PuertoUSBNode, InfoPuertoSerial } from "./usb/PuertoUSBNode";
 import { activarDebugPilaOSI } from "../../debug/DebugLogger";
 
 const driverUSB = new PuertoUSBNode();
-const driverWiFi = new ClienteTCPNode("127.0.0.1", 9080);
+const driverWiFi = new ClienteWiFiNode("127.0.0.1", 9080);
 
 // Vinculamos los dos descriptores físicos una sola vez en el arranque del módulo
 pila.fisica.vincularMedio(ID_NODO_USB, driverUSB);

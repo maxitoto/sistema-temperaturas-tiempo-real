@@ -16,20 +16,20 @@ struct SegmentoTransporte {
 
 class CapaTransporte {
   public:
-    static const uint8_t PROTO_TCP = 0x06;
-    static const uint8_t PROTO_UDP = 0x11;
+    static constexpr uint8_t PROTO_TCP = 0x06;
+    static constexpr uint8_t PROTO_UDP = 0x11;
 
-    static const uint8_t FLAG_SYN = 0x01;
-    static const uint8_t FLAG_ACK = 0x02;
-    static const uint8_t FLAG_PSH = 0x04;
-    static const uint8_t FLAG_FIN = 0x08;
-    static const uint8_t FLAG_RST = 0x10;
+    static constexpr uint8_t FLAG_SYN = 0x01;
+    static constexpr uint8_t FLAG_ACK = 0x02;
+    static constexpr uint8_t FLAG_PSH = 0x04;
+    static constexpr uint8_t FLAG_FIN = 0x08;
+    static constexpr uint8_t FLAG_RST = 0x10;
 
-    static const uint8_t PUERTO_RPC     = 80;
-    static const uint8_t PUERTO_EVENTOS = 81;
+    static constexpr uint8_t PUERTO_RPC     = 80;
+    static constexpr uint8_t PUERTO_EVENTOS = 81;
 
-    static const unsigned long RTO_MS = 1000;
-    static const uint8_t MAX_REINTENTOS = 3;
+    static constexpr unsigned long RTO_MS = 1000;
+    static constexpr uint8_t MAX_REINTENTOS = 3;
 
     enum EstadoTCP {
         TCP_CERRADO,
@@ -52,14 +52,62 @@ class CapaTransporte {
         uint8_t reintentos = 0;
         BufferPaquete ultimoPaqueteTx;
 
-        // Cola estática de 1 slot para serializar envíos simultáneos (CALL + REPLY)
         bool hayPaqueteEnCola = false;
         uint8_t ptoOrigCola = PUERTO_RPC;
         uint8_t ptoDestCola = PUERTO_RPC;
         BufferPaquete paqueteEnColaTx;
     };
 
+    // Ensamblador de Record Marking (RFC 5531: 4B [LastFrag:1|Len:31]) para el stream TCP de Wi-Fi
+    struct EnsambladorRecordNativo {
+        uint8_t buffer[LimitesPila::MAX_TRAMA_ENLACE * 2];
+        size_t acumulado = 0;
+
+        void limpiar() { acumulado = 0; }
+
+        void alimentar(const uint8_t* datos, size_t len) {
+            if (!datos || len == 0) return;
+            if (acumulado + len > sizeof(buffer)) {
+                acumulado = 0; // Protección contra desborde por ruido
+            }
+            if (len <= sizeof(buffer) - acumulado) {
+                memcpy(&buffer[acumulado], datos, len);
+                acumulado += len;
+            }
+        }
+
+        bool extraerMensaje(BufferPaquete& pktSalida, int idNodo) {
+            if (acumulado < LimitesPila::TAMANO_RECORD_MARKER_TCP) return false;
+
+            uint32_t marker = ((uint32_t)buffer[0] << 24) |
+                              ((uint32_t)buffer[1] << 16) |
+                              ((uint32_t)buffer[2] << 8)  |
+                               (uint32_t)buffer[3];
+            uint32_t lenMsg = marker & 0x7FFFFFFFUL;
+
+            if (lenMsg == 0 || lenMsg > LimitesPila::MAX_TRAMA_ENLACE) {
+                acumulado = 0;
+                return false;
+            }
+
+            size_t totalFrame = LimitesPila::TAMANO_RECORD_MARKER_TCP + (size_t)lenMsg;
+            if (acumulado < totalFrame) return false; // Esperar resto del segmento TCP
+
+            pktSalida.prepararParaRx(idNodo);
+            memcpy(pktSalida.raw, &buffer[LimitesPila::TAMANO_RECORD_MARKER_TCP], lenMsg);
+            pktSalida.longitud = (size_t)lenMsg;
+
+            size_t sobrante = acumulado - totalFrame;
+            if (sobrante > 0) {
+                memmove(buffer, &buffer[totalFrame], sobrante);
+            }
+            acumulado = sobrante;
+            return true;
+        }
+    };
+
     ControlFlujoNodo nodos[LimitesPila::MAX_NODOS_RED];
+    EnsambladorRecordNativo ensambladoresNativos[LimitesPila::MAX_NODOS_RED];
     BufferPaquete bufferRx;
 
     void escribirCabeceraYCRC(BufferPaquete& pkt, uint8_t proto, uint8_t ptoOrig, uint8_t ptoDest,
@@ -118,11 +166,18 @@ class CapaTransporte {
 
     EstadoTCP obtenerEstadoTCP(int idNodo) const {
         if (idNodo < 0 || idNodo >= LimitesPila::MAX_NODOS_RED) return TCP_CERRADO;
+        if (red && red->esNodoNativo(idNodo)) {
+            return red->estaNodoActivo(idNodo) ? TCP_ESTABLECIDO : TCP_CERRADO;
+        }
         return nodos[idNodo].estado;
     }
 
     bool iniciarHandshakeTCP(int idNodo, uint8_t puerto = PUERTO_RPC) {
         if (!red || idNodo < 0 || idNodo >= LimitesPila::MAX_NODOS_RED) return false;
+        if (red->esNodoNativo(idNodo)) {
+            ensambladoresNativos[idNodo].limpiar();
+            return red->estaNodoActivo(idNodo);
+        }
         ControlFlujoNodo& ctrl = nodos[idNodo];
         ctrl.estado = TCP_SYN_ENVIADO;
         ctrl.esperandoAck = false;
@@ -137,11 +192,42 @@ class CapaTransporte {
 
         mantenerTransporte();
 
+        // 1. Si quedó un mensaje completo en el buffer de Record Marking de algún nodo Wi-Fi, subirlo
+        for (int i = 1; i < LimitesPila::MAX_NODOS_RED; i++) {
+            if (red->esNodoNativo(i) && ensambladoresNativos[i].extraerMensaje(pktSalida, i)) {
+                metaSalida = { i, PROTO_TCP, PUERTO_RPC, PUERTO_RPC, FLAG_PSH | FLAG_ACK, 0, 0 };
+                return true;
+            }
+        }
+
         if (!red->subirPaquete(bufferRx)) return false;
 
         int id = bufferRx.idNodo;
         if (id < 0 || id >= LimitesPila::MAX_NODOS_RED) return false;
 
+        // ==========================================================
+        // RAMA A: SWITCH DE CANAL PARA MEDIOS NATIVOS (Wi-Fi id >= 1)
+        // ==========================================================
+        if (red->esNodoNativo(id)) {
+            // Canal UDP Nativo (Streaming / Tiempo Real)
+            if (bufferRx.esDatagramaNativo) {
+                pktSalida = bufferRx;
+                metaSalida = { id, PROTO_UDP, PUERTO_EVENTOS, PUERTO_EVENTOS, 0, 0, 0 };
+                return true;
+            }
+
+            // Canal TCP Nativo (Request / Reply con Record Marking de 4B RFC 5531)
+            ensambladoresNativos[id].alimentar(bufferRx.ptrActual(), bufferRx.longitud);
+            if (ensambladoresNativos[id].extraerMensaje(pktSalida, id)) {
+                metaSalida = { id, PROTO_TCP, PUERTO_RPC, PUERTO_RPC, FLAG_PSH | FLAG_ACK, 0, 0 };
+                return true;
+            }
+            return false;
+        }
+
+        // ==========================================================
+        // RAMA B: LÓGICA COMPLETA DE TRANSPORTE PARA USB (id == 0)
+        // ==========================================================
         const uint8_t* hdr = bufferRx.consumirCabecera(LimitesPila::TAMANO_CABECERA_TRANS);
         if (!hdr) return false;
 
@@ -183,7 +269,6 @@ class CapaTransporte {
 
             if (flags == FLAG_SYN) {
                 uint16_t esperado = (uint16_t)(seq + 1);
-                // Si es una retransmisión del mismo SYN, no incrementamos seqLocal otra vez
                 if ((ctrl.estado == TCP_SYN_RECIBIDO || ctrl.estado == TCP_ESTABLECIDO) &&
                     ctrl.seqRemotaEsperada == esperado) {
                     uint16_t miSeqAnterior = (uint16_t)(ctrl.seqLocal - 1);
@@ -223,7 +308,6 @@ class CapaTransporte {
                     ctrl.esperandoAck = false;
                     ctrl.reintentos = 0;
 
-                    // Si había un paquete esperando turno en la cola Stop-and-Wait, enviarlo ahora
                     if (ctrl.hayPaqueteEnCola) {
                         ctrl.hayPaqueteEnCola = false;
                         BufferPaquete pktSig = ctrl.paqueteEnColaTx;
@@ -258,6 +342,36 @@ class CapaTransporte {
                               uint8_t puertoDestino, BufferPaquete& pkt) {
         if (!red || idDestino < 0 || idDestino >= LimitesPila::MAX_NODOS_RED) return false;
 
+        // ==========================================================
+        // RAMA A: SWITCH DE CANAL PARA MEDIOS NATIVOS (Wi-Fi id >= 1)
+        // ==========================================================
+        if (red->esNodoNativo(idDestino)) {
+            if (!red->estaNodoActivo(idDestino)) return false;
+
+            // Canal UDP Nativo (Streaming): envía datagrama directo sin cabecera extra
+            if (protocolo == PROTO_UDP) {
+                pkt.esDatagramaNativo = true;
+                return red->bajarPaqueteUnicast(idDestino, pkt);
+            }
+
+            // Canal TCP Nativo (Request/Reply): antepone Record Marker de 4B (RFC 5531) zero-copy
+            uint32_t lenRecord = (uint32_t)pkt.longitud;
+            uint8_t* marker = pkt.empujarCabecera(LimitesPila::TAMANO_RECORD_MARKER_TCP);
+            if (!marker) return false;
+
+            uint32_t valorMarker = 0x80000000UL | (lenRecord & 0x7FFFFFFFUL);
+            marker[0] = (uint8_t)((valorMarker >> 24) & 0xFF);
+            marker[1] = (uint8_t)((valorMarker >> 16) & 0xFF);
+            marker[2] = (uint8_t)((valorMarker >> 8)  & 0xFF);
+            marker[3] = (uint8_t)(valorMarker & 0xFF);
+
+            pkt.esDatagramaNativo = false;
+            return red->bajarPaqueteUnicast(idDestino, pkt);
+        }
+
+        // ==========================================================
+        // RAMA B: TRANSPORTE COMPLETO PARA USB (idDestino == 0)
+        // ==========================================================
         if (protocolo == PROTO_UDP) {
             escribirCabeceraYCRC(pkt, PROTO_UDP, puertoOrigen, puertoDestino, 0, 0, 0);
             return red->bajarPaqueteUnicast(idDestino, pkt);
@@ -266,9 +380,8 @@ class CapaTransporte {
         ControlFlujoNodo& ctrl = nodos[idDestino];
         if (ctrl.estado != TCP_ESTABLECIDO) return false;
 
-        // Si ya hay un segmento esperando ACK, encolamos este sin pisar el paquete en vuelo
         if (ctrl.esperandoAck) {
-            if (ctrl.hayPaqueteEnCola) return false; // Cola llena
+            if (ctrl.hayPaqueteEnCola) return false;
             ctrl.paqueteEnColaTx = pkt;
             ctrl.ptoOrigCola = puertoOrigen;
             ctrl.ptoDestCola = puertoDestino;
@@ -281,26 +394,36 @@ class CapaTransporte {
 
     void bajarDatagramaBroadcast(uint8_t puertoOrigen, uint8_t puertoDestino, BufferPaquete& pkt) {
         if (!red) return;
-        escribirCabeceraYCRC(pkt, PROTO_UDP, puertoOrigen, puertoDestino, 0, 0, 0);
-        red->bajarPaqueteBroadcast(pkt);
+        for (int i = 0; i < LimitesPila::MAX_NODOS_RED; i++) {
+            BufferPaquete copia = pkt;
+            bajarSegmentoUnicast(i, PROTO_UDP, puertoOrigen, puertoDestino, copia);
+        }
     }
 
     void mantenerTransporte() {
         unsigned long ahora = millis();
-        for (int i = 0; i < LimitesPila::MAX_NODOS_RED; i++) {
-            ControlFlujoNodo& ctrl = nodos[i];
-            if (ctrl.estado == TCP_ESTABLECIDO && ctrl.esperandoAck) {
-                if (ahora - ctrl.ultimoEnvioMs >= RTO_MS) {
-                    if (ctrl.reintentos < MAX_REINTENTOS) {
-                        ctrl.reintentos++;
-                        ctrl.ultimoEnvioMs = ahora;
-                        BufferPaquete copiaReenvio = ctrl.ultimoPaqueteTx;
-                        red->bajarPaqueteUnicast(i, copiaReenvio);
-                    } else {
-                        ctrl.esperandoAck = false;
-                        ctrl.hayPaqueteEnCola = false;
-                        ctrl.estado = TCP_CERRADO;
-                    }
+        // 1. Mantenimiento ARQ exclusivo para USB (nodo 0)
+        ControlFlujoNodo& ctrl = nodos[0];
+        if (ctrl.estado == TCP_ESTABLECIDO && ctrl.esperandoAck) {
+            if (ahora - ctrl.ultimoEnvioMs >= RTO_MS) {
+                if (ctrl.reintentos < MAX_REINTENTOS) {
+                    ctrl.reintentos++;
+                    ctrl.ultimoEnvioMs = ahora;
+                    BufferPaquete copiaReenvio = ctrl.ultimoPaqueteTx;
+                    red->bajarPaqueteUnicast(0, copiaReenvio);
+                } else {
+                    ctrl.esperandoAck = false;
+                    ctrl.hayPaqueteEnCola = false;
+                    ctrl.estado = TCP_CERRADO;
+                }
+            }
+        }
+
+        // 2. Limpiar ensambladores de Record Marking si un cliente Wi-Fi se desconectó
+        if (red) {
+            for (int i = 1; i < LimitesPila::MAX_NODOS_RED; i++) {
+                if (red->esNodoNativo(i) && !red->estaNodoActivo(i)) {
+                    ensambladoresNativos[i].limpiar();
                 }
             }
         }

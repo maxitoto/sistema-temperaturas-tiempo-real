@@ -2,6 +2,7 @@
 import { pila } from "../communication/ContenedorComunicacion";
 import { transformarMensajeCanalTLS } from "./clientExample";
 import { IBackend, RPC, RespuestaReloj } from "./contratos";
+import { encriptarCanalGCM_TX, desencriptarCanalGCM_RX } from "./clientExample";
 
 interface RegistroSyncDBBackend {
   id: number;
@@ -55,7 +56,7 @@ export function registrarStubsServidorBackend(impl: IBackend = new BackendImpl()
   if (registrado) return;
   registrado = true;
 
-  pila.presentacion.configurarTransformadores(transformarMensajeCanalTLS, transformarMensajeCanalTLS);
+  pila.presentacion.configurarTransformadores(encriptarCanalGCM_TX, desencriptarCanalGCM_RX);
 
   pila.appRpc.establecerEvaluadorPolitica(({ comando, argumentos }) => {
     if (comando === RPC.SYNC_RELOJ) {

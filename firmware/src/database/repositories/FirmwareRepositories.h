@@ -264,6 +264,68 @@ namespace Repositories {
         }
     };
 
+    class UsuarioFirmwareRepository {
+      private:
+        ClienteORM* orm;
+      public:
+        explicit UsuarioFirmwareRepository(ClienteORM* o = nullptr) : orm(o) {}
+        void vincular(ClienteORM* o) { orm = o; }
+
+        size_t listarActivos(FilaUsuario* out, size_t maxItems, const ContextoSesionSGBD& sesion) const {
+            if (!orm || !out || maxItems == 0) return 0;
+            size_t n = 0;
+            orm->usuarios.recorrerActivos([&](const FilaUsuario& f) -> bool {
+                out[n++] = f;
+                return n < maxItems;
+            }, sesion);
+            return n;
+        }
+
+        bool actualizarCredenciales(uint16_t idUsuarioObjetivo,
+                                    const char* nuevoUsername,
+                                    const char* nuevaPassword,
+                                    uint32_t ahoraSeg,
+                                    FilaUsuario& outActualizado,
+                                    const ContextoSesionSGBD& sesionSolicitante) {
+            if (!orm || !sesionSolicitante.autenticado) return false;
+            if (!nuevoUsername || nuevoUsername[0] == '\0' || !nuevaPassword || nuevaPassword[0] == '\0') {
+                return false;
+            }
+
+            // Regla de Autorización: Admin puede editar cualquiera de los 3 usuarios;
+            // un encargado solo puede editar su propio usuario y contraseña.
+            if (sesionSolicitante.rol != ROL_ADMIN && sesionSolicitante.idUsuario != idUsuarioObjetivo) {
+                return false;
+            }
+
+            ContextoSesionSGBD sys = ContextoSesionSGBD::sistemaInterno();
+            FilaUsuario actual = {};
+            if (!orm->usuarios.buscarPorId(idUsuarioObjetivo, actual, true, sys)) {
+                return false;
+            }
+
+            // Verificar que el nuevo username no esté ocupado por otro ID distinto
+            FilaUsuario colision = {};
+            if (orm->buscarUsuarioPorNombre(nuevoUsername, colision, sys) &&
+                colision.id_usuario != idUsuarioObjetivo) {
+                return false;
+            }
+
+            memset(actual.usuario, 0, sizeof(actual.usuario));
+            strncpy(actual.usuario, nuevoUsername, sizeof(actual.usuario) - 1);
+
+            memset(actual.contrasena, 0, sizeof(actual.contrasena));
+            strncpy(reinterpret_cast<char*>(actual.contrasena), nuevaPassword, sizeof(actual.contrasena) - 1);
+
+            if (!orm->usuarios.actualizarPorId(idUsuarioObjetivo, actual, ahoraSeg, sys)) {
+                return false;
+            }
+
+            outActualizado = actual;
+            return true;
+        }
+    };
+
     // Contenedor unificado de Repositorios del Firmware
     struct ContenedorRepositoriosFirmware {
         SensorFirmwareRepository        sensores;
@@ -272,6 +334,7 @@ namespace Repositories {
         AuditoriaFirmwareRepository     auditorias;
         CorreoFirmwareRepository        correos;
         ConfiguracionFirmwareRepository configuraciones;
+        UsuarioFirmwareRepository       usuarios;
 
         void vincularORM(ClienteORM& orm) {
             sensores.vincular(&orm);
@@ -280,6 +343,7 @@ namespace Repositories {
             auditorias.vincular(&orm);
             correos.vincular(&orm);
             configuraciones.vincular(&orm);
+            usuarios.vincular(&orm);
         }
     };
 

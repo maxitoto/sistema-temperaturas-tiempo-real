@@ -16,8 +16,8 @@ class MicroSD {
     static constexpr HandleSD HANDLE_INVALIDO      = -1;
     static constexpr size_t   MAX_HANDLES_ABIERTOS = 4;
     static constexpr uint32_t BYTES_POR_SECTOR     = 512;
-    static constexpr uint32_t FREC_SPI_RAPIDA_HZ   = 16000000UL; // 16 MHz nativo en VSPI ESP32
-    static constexpr uint32_t FREC_SPI_SEGURA_HZ   = 4000000UL;  // 4 MHz fallback para cables largos
+    static constexpr uint32_t FREC_SPI_RAPIDA_HZ   = 4000000UL;  // 4 MHz estable para módulos con level-shifter
+    static constexpr uint32_t FREC_SPI_SEGURA_HZ   = 400000UL;   // 400 kHz fallback de inicialización MMC/SD
 
     enum ResultadoSD : uint8_t {
         OK = 0,
@@ -91,13 +91,21 @@ class MicroSD {
     // 2.1. CICLO DE VIDA Y MONTAJE (Puro ESP-WROOM-32 VSPI)
     // =========================================================================
     bool inicializar(int maxIntentos = 3) {
+        SD.end();
+        SPI.end();
+        delay(20);
+
+        // Asegurar CS en alto y pull-up en MISO antes de iniciar VSPI
+        pinMode(pinCS, OUTPUT);
+        digitalWrite(pinCS, HIGH);
+        pinMode(Pines::PIN_SD_MISO, INPUT_PULLUP);
+        delay(20);
+
         SPI.begin(Pines::PIN_SD_SCK, Pines::PIN_SD_MISO, Pines::PIN_SD_MOSI, pinCS);
+        delay(20);
 
         for (int i = 0; i < maxIntentos; i++) {
-            // En el último intento baja a 4 MHz por si el cableado externo tiene capacitancia
-            uint32_t clk = (i == maxIntentos - 1 && frecRelojHz > FREC_SPI_SEGURA_HZ)
-                             ? FREC_SPI_SEGURA_HZ
-                             : frecRelojHz;
+            uint32_t clk = (i == maxIntentos - 1) ? FREC_SPI_SEGURA_HZ : frecRelojHz;
 
             if (SD.begin(pinCS, SPI, clk, "/sd", MAX_HANDLES_ABIERTOS)) {
                 frecRelojHz = clk;
@@ -105,7 +113,7 @@ class MicroSD {
                 codUltimoError = OK;
                 return true;
             }
-            delay(200);
+            delay(150);
             yield();
         }
         montada = false;

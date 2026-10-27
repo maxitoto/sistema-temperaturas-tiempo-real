@@ -1,4 +1,4 @@
-// Archivo: ./src/backend/communication/layers/CapaAplicacion.ts
+//./src/backend/communication/layers/CapaAplicacion.ts
 import { CapaPresentacion, LectorMsgPack, MensajePresentacion } from "./CapaPresentacion";
 import { CapaSesion } from "./CapaSesion";
 
@@ -35,8 +35,10 @@ export type EvaluadorPoliticaRPC = (
 ) => Promise<{ permitido: boolean; motivo?: string }> | { permitido: boolean; motivo?: string };
 
 export class CapaAplicacion {
-  private readonly rutas = new Map<string, ManejadorProcedimientoRPC>();
+  private readonly rutasRequest = new Map<string, ManejadorProcedimientoRPC>();
+  private readonly rutasStream = new Map<string, ManejadorProcedimientoRPC>();
   private readonly oyentesEventos = new Map<string, ManejadorEventoRPC[]>();
+  private readonly oyentesStream = new Map<string, ManejadorEventoRPC[]>();
   private evaluadorPolitica: EvaluadorPoliticaRPC | null = null;
 
   constructor(private readonly presentacion: CapaPresentacion, private idNodoPorDefecto = 0) {
@@ -61,11 +63,19 @@ export class CapaAplicacion {
     return this.idNodoPorDefecto;
   }
 
-  public on(comando: string, manejador: ManejadorProcedimientoRPC): void {
-    this.rutas.set(comando, manejador);
+  // =========================================================================
+  // CAMINO 1: TRANSACCIONAL FIABLE (REQUEST / REPLY / EVENTO)
+  // =========================================================================
+  public onRequest(comando: string, manejador: ManejadorProcedimientoRPC): void {
+    this.rutasRequest.set(comando, manejador);
   }
 
-  public async call<T = unknown[]>(
+  // Alias de compatibilidad con registrarSkeletonBackend
+  public on(comando: string, manejador: ManejadorProcedimientoRPC): void {
+    this.onRequest(comando, manejador);
+  }
+
+  public async request<T = unknown[]>(
     comando: string,
     parametros: unknown[] = [],
     opts: OpcionesLlamada = {}
@@ -73,7 +83,7 @@ export class CapaAplicacion {
     const idNodo = this.resolverNodo(opts.preferir ?? "auto");
     const timeoutMs = opts.timeoutMs ?? 5000;
 
-    const respuesta = await this.presentacion.invocarSerializado(
+    const respuesta = await this.presentacion.invocarRequest(
       idNodo,
       comando,
       parametros,
@@ -81,9 +91,18 @@ export class CapaAplicacion {
     );
     const [estado, ...datos] = respuesta;
     if (estado !== "OK") {
-      throw new Error(`RPC Error [${comando}]: ${String(datos[0] ?? estado)}`);
+      throw new Error(`RPC Request Error [${comando}]: ${String(datos[0] ?? estado)}`);
     }
     return datos as unknown as T;
+  }
+
+  // Alias de compatibilidad con métodos existentes en clientExample.ts
+  public async call<T = unknown[]>(
+    comando: string,
+    parametros: unknown[] = [],
+    opts: OpcionesLlamada = {}
+  ): Promise<T> {
+    return this.request<T>(comando, parametros, opts);
   }
 
   public onEvento(evento: string, manejador: ManejadorEventoRPC): void {
@@ -95,20 +114,68 @@ export class CapaAplicacion {
   public emitirEvento(
     evento: string,
     argumentos: unknown[] = [],
-    opts: Pick<OpcionesLlamada, "preferir"> & { fiable?: boolean } = {}
+    opts: Pick<OpcionesLlamada, "preferir"> = {}
   ): boolean {
     const idNodo = this.resolverNodo(opts.preferir ?? "auto");
-    return this.presentacion.bajarEventoFormateado(
-      idNodo,
-      evento,
-      argumentos,
-      opts.fiable ?? true
-    );
+    return this.presentacion.bajarEventoFormateado(idNodo, evento, argumentos);
   }
 
+  // =========================================================================
+  // CAMINO 2: STREAMING TIEMPO REAL (UDP / DATAGRAMA)
+  // =========================================================================
+  public onStream(canal: string, manejador: ManejadorProcedimientoRPC): void {
+    this.rutasStream.set(canal, manejador);
+  }
+
+  public async stream<T = unknown[]>(
+    canal: string,
+    parametros: unknown[] = [],
+    opts: OpcionesLlamada = {}
+  ): Promise<T> {
+    const idNodo = this.resolverNodo(opts.preferir ?? "auto");
+    const timeoutMs = opts.timeoutMs ?? 1500;
+
+    const respuesta = await this.presentacion.invocarStream(
+      idNodo,
+      canal,
+      parametros,
+      timeoutMs
+    );
+    const [estado, ...datos] = respuesta;
+    if (estado !== "OK") {
+      throw new Error(`RPC Stream Error [${canal}]: ${String(datos[0] ?? estado)}`);
+    }
+    return datos as unknown as T;
+  }
+
+  public onStreamData(canal: string, manejador: ManejadorEventoRPC): void {
+    const lista = this.oyentesStream.get(canal) ?? [];
+    lista.push(manejador);
+    this.oyentesStream.set(canal, lista);
+  }
+
+  public emitirStream(
+    canal: string,
+    argumentos: unknown[] = [],
+    opts: Pick<OpcionesLlamada, "preferir"> = {}
+  ): boolean {
+    const idNodo = this.resolverNodo(opts.preferir ?? "auto");
+    return this.presentacion.bajarStreamFormateado(idNodo, canal, argumentos);
+  }
+
+  // =========================================================================
+  // DESPACHO DE SUBIDA (RX)
+  // =========================================================================
   private async despacharMensajeEntrante(msj: MensajePresentacion): Promise<void> {
+    const meta: MetaCall = {
+      idNodo: msj.idNodo,
+      reqId: msj.reqId,
+      lector: msj.lector,
+    };
+
+    // CASO 1: Request Transaccional entrante (PROTO_TCP)
     if (msj.tipoSesion === CapaSesion.TIPO_RPC_REQ) {
-      const manejador = this.rutas.get(msj.cabecera);
+      const manejador = this.rutasRequest.get(msj.cabecera);
       if (!manejador) {
         if (msj.reqId !== 0) {
           this.presentacion.bajarRespuestaFormateada(msj.idNodo, msj.reqId, "ERR", [
@@ -122,32 +189,21 @@ export class CapaAplicacion {
         const resultado = await this.evaluadorPolitica({
           comando: msj.cabecera,
           argumentos: msj.argumentos,
-          meta: {
-            idNodo: msj.idNodo,
-            reqId: msj.reqId,
-            lector: msj.lector,
-          },
+          meta,
         });
 
         if (!resultado.permitido) {
           if (msj.reqId !== 0) {
-            this.presentacion.bajarRespuestaFormateada(
-              msj.idNodo,
-              msj.reqId,
-              "ERR",
-              [resultado.motivo ?? "FORBIDDEN"]
-            );
+            this.presentacion.bajarRespuestaFormateada(msj.idNodo, msj.reqId, "ERR", [
+              resultado.motivo ?? "FORBIDDEN",
+            ]);
           }
-          return; // ← NO ejecutar el manejador
+          return;
         }
       }
 
       try {
-        const datosRetorno = await manejador(msj.argumentos, {
-          idNodo: msj.idNodo,
-          reqId: msj.reqId,
-          lector: msj.lector,
-        });
+        const datosRetorno = await manejador(msj.argumentos, meta);
         if (msj.reqId !== 0) {
           this.presentacion.bajarRespuestaFormateada(
             msj.idNodo,
@@ -165,10 +221,50 @@ export class CapaAplicacion {
       return;
     }
 
+    // CASO 2: Petición de Stream entrante (PROTO_UDP)
+    if (msj.tipoSesion === CapaSesion.TIPO_STREAM_REQ) {
+      const manejador = this.rutasStream.get(msj.cabecera);
+      if (!manejador) {
+        if (msj.reqId !== 0) {
+          this.presentacion.bajarRespuestaStreamFormateada(msj.idNodo, msj.reqId, "ERR", [
+            "STREAM_NOT_FOUND",
+          ]);
+        }
+        return;
+      }
+
+      try {
+        const datosRetorno = await manejador(msj.argumentos, meta);
+        if (msj.reqId !== 0) {
+          this.presentacion.bajarRespuestaStreamFormateada(
+            msj.idNodo,
+            msj.reqId,
+            "OK",
+            Array.isArray(datosRetorno) ? datosRetorno : [datosRetorno]
+          );
+        }
+      } catch (err) {
+        if (msj.reqId !== 0) {
+          const detalle = err instanceof Error ? err.message : "STREAM_EXEC_ERR";
+          this.presentacion.bajarRespuestaStreamFormateada(msj.idNodo, msj.reqId, "ERR", [detalle]);
+        }
+      }
+      return;
+    }
+
+    // CASO 3: Evento asíncrono o Cuadro de Stream unidireccional
     if (msj.tipoSesion === CapaSesion.TIPO_EVENTO) {
       const oyentes = this.oyentesEventos.get(msj.cabecera) ?? [];
       for (const cb of oyentes) {
-        cb(msj.argumentos, msj.cabecera, { idNodo: msj.idNodo, lector: msj.lector });
+        cb(msj.argumentos, msj.cabecera, meta);
+      }
+      return;
+    }
+
+    if (msj.tipoSesion === CapaSesion.TIPO_STREAM_DATA) {
+      const oyentes = this.oyentesStream.get(msj.cabecera) ?? [];
+      for (const cb of oyentes) {
+        cb(msj.argumentos, msj.cabecera, meta);
       }
     }
   }

@@ -1,10 +1,7 @@
+// Archivo: ./src/communication/conectividad/modem/RedHost.h
 #pragma once
 #include <Arduino.h>
-#if defined(ESP32)
-  #include <WiFi.h>
-#else
-  #include <ESP8266WiFi.h>
-#endif
+#include <WiFi.h>
 
 class RedHost {
   private:
@@ -13,14 +10,21 @@ class RedHost {
   public:
     RedHost() {}
 
-    bool conectar(const String& ssid, const String& password, int maxIntentos = 3) {
+    bool conectar(const String& ssid, const String& password, int maxIntentos = 10) {
+        if (ssid.length() == 0) return false;
         ssidObjetivo = ssid;
-        WiFi.begin(ssid.c_str(), password.c_str());
-        
+
+        if (password.length() > 0) {
+            WiFi.begin(ssid.c_str(), password.c_str());
+        } else {
+            WiFi.begin(ssid.c_str());
+        }
+
         int intentos = 0;
         while (WiFi.status() != WL_CONNECTED && intentos < maxIntentos) {
-            delay(500); // En el futuro, esto se puede reemplazar por una máquina de estados no bloqueante
+            delay(500);
             intentos++;
+            yield();
         }
         return estaConectado();
     }
@@ -35,7 +39,7 @@ class RedHost {
     }
 
     String obtenerIP() const {
-        return WiFi.localIP().toString();
+        return estaConectado() ? WiFi.localIP().toString() : String("0.0.0.0");
     }
 
     String obtenerSSID() const {

@@ -9,10 +9,10 @@
 //                               ┌───────────────────┐
 //                          3V3  │ 1              38 │ GND
 //                   [RST]  EN   │ 2              37 │ GPIO23 (VSPI_MOSI) -> [SD_MOSI]
-//        (ADC1_0 / IN)  GPIO36  │ 3  (VP)        36 │ GPIO22 (I2C_SCL)   -> [OLED_SCL]
+//        (ADC1_0 / IN)  GPIO36  │ 3  (VP)        36 │ GPIO22 (I2C_SCL)   -> [OLED_SCL] ✓
 //        (ADC1_3 / IN)  GPIO39  │ 4  (VN)        35 │ GPIO1  (UART0_TX)  -> [USB_TX]
 //        (ADC1_6 / IN)  GPIO34  │ 5              34 │ GPIO3  (UART0_RX)  -> [USB_RX]
-//        (ADC1_7 / IN)  GPIO35  │ 6              33 │ GPIO21 (I2C_SDA)   -> [OLED_SDA]
+//        (ADC1_7 / IN)  GPIO35  │ 6              33 │ GPIO21 (I2C_SDA)   -> [OLED_SDA] ✓
 //        (ADC1_4 / IO)  GPIO32  │ 7              32 │ GND
 //        (ADC1_5 / IO)  GPIO33  │ 8              31 │ GPIO19 (VSPI_MISO) -> [SD_MISO]
 //  [LED] (DAC1   / IO)  GPIO25  │ 9              30 │ GPIO18 (VSPI_SCK)  -> [SD_SCK]

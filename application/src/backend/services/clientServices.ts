@@ -1,6 +1,6 @@
 // Archivo: ./src/backend/services/clientServices.ts
 import { firmware } from "../stubs/clientExample";
-import { serviciosConectivos } from "../plugins/conectividad/servicosConectivos";
+import { serviciosConectivos } from "../communication/conectividad/servicosConectivos";
 import { consultasMixtas } from '../database/consultas/consultasMixtas';
 import { auditoriaRepository } from '../database/consultas/repositories/auditoriaRepository';
 import { sensorRepository } from '../database/consultas/repositories/sensorRepository';

@@ -1,22 +1,21 @@
-// Archivo: ./src/communication/CapaFisica.h
+// Archivo: ./src/communication/layers/CapaFisica.h
 #pragma once
 #include <Arduino.h>
-#include "plugins/conectividad/usb/PuertoUSB.h"
-#include "plugins/conectividad/modem/ServidorTCP.h"
+#include "communication/conectividad/usb/PuertoUSB.h"
+#include "communication/conectividad/modem/ServidorWiFi.h"
 
 class CapaFisica {
   private:
     PuertoUSB* usb;
-    ServidorTCP* tcp;
+    ServidorWiFi* wifi;
 
-    // Medio 0: Cable USB | Medio 1..N: Clientes Wi-Fi (TCP)
     Stream* resolverStream(int idMedio) {
         if (idMedio == 0) {
             return usb ? usb->obtenerStream() : nullptr;
         }
-        int indiceTCP = idMedio - 1;
-        if (tcp && indiceTCP >= 0 && indiceTCP < tcp->obtenerMaxClientes()) {
-            WiFiClient* cliente = tcp->obtenerCliente(indiceTCP);
+        int indiceWiFi = idMedio - 1;
+        if (wifi && indiceWiFi >= 0 && indiceWiFi < wifi->obtenerMaxClientes()) {
+            WiFiClient* cliente = wifi->obtenerCliente(indiceWiFi);
             if (cliente && cliente->connected()) {
                 return cliente;
             }
@@ -25,12 +24,17 @@ class CapaFisica {
     }
 
   public:
-    CapaFisica(PuertoUSB* puertoUsb, ServidorTCP* servidorTcp)
-        : usb(puertoUsb), tcp(servidorTcp) {}
+    CapaFisica(PuertoUSB* puertoUsb, ServidorWiFi* servidorWifi)
+        : usb(puertoUsb), wifi(servidorWifi) {}
 
     int obtenerTotalMedios() const {
-        int redes = tcp ? tcp->obtenerMaxClientes() : 0;
+        int redes = wifi ? wifi->obtenerMaxClientes() : 0;
         return 1 + redes;
+    }
+
+    // Indica si el medio ya cuenta con MAC/IP/Transporte en el kernel (Wi-Fi / Bluetooth)
+    bool esMedioNativo(int idMedio) const {
+        return idMedio >= 1;
     }
 
     bool estaActivo(int idMedio) {
@@ -38,14 +42,26 @@ class CapaFisica {
     }
 
     int bytesDisponibles(int idMedio) {
+        if (esMedioNativo(idMedio) && wifi && wifi->hayDatagramaUDP(idMedio - 1)) {
+            return 1;
+        }
         Stream* canal = resolverStream(idMedio);
         return canal ? canal->available() : 0;
     }
 
-    // CAMINO DE SUBIDA (RX): Lectura en bloque no bloqueante desde el FIFO de hardware
-    size_t recibirBytes(int idMedio, uint8_t* bufferDestino, size_t maxLongitud) {
+    // CAMINO DE SUBIDA (RX): Soporta tanto el stream de bytes (USB/TCP) como datagramas nativos (UDP)
+    size_t recibirBytes(int idMedio, uint8_t* bufferDestino, size_t maxLongitud, bool& esDatagramaSalida) {
+        esDatagramaSalida = false;
+        if (!bufferDestino || maxLongitud == 0) return 0;
+
+        // Prioridad a datagramas en tiempo real si llegaron por el canal UDP de ese cliente Wi-Fi
+        if (esMedioNativo(idMedio) && wifi && wifi->hayDatagramaUDP(idMedio - 1)) {
+            esDatagramaSalida = true;
+            return wifi->recibirDatagramaUDP(idMedio - 1, bufferDestino, maxLongitud);
+        }
+
         Stream* canal = resolverStream(idMedio);
-        if (!canal || maxLongitud == 0) return 0;
+        if (!canal) return 0;
 
         int disponibles = canal->available();
         if (disponibles <= 0) return 0;
@@ -56,13 +72,25 @@ class CapaFisica {
         return canal->readBytes(bufferDestino, aLeer);
     }
 
-    // CAMINO DE BAJADA (TX): Escritura directa al buffer TX sin bloquear la CPU esperando UART
-    size_t enviarBytes(int idMedio, const uint8_t* datos, size_t longitud) {
+    // Sobrecarga compatible para consumidores de stream directo (CapaEnlace USB)
+    size_t recibirBytes(int idMedio, uint8_t* bufferDestino, size_t maxLongitud) {
+        bool dummy = false;
+        return recibirBytes(idMedio, bufferDestino, maxLongitud, dummy);
+    }
+
+    // CAMINO DE BAJADA (TX): Escribe en el stream (USB/TCP) o despacha un datagrama (UDP Wi-Fi)
+    size_t enviarBytes(int idMedio, const uint8_t* datos, size_t longitud, bool comoDatagrama = false) {
+        if (!datos || longitud == 0) return 0;
+
+        if (esMedioNativo(idMedio) && comoDatagrama && wifi) {
+            return wifi->enviarDatagramaUDP(idMedio - 1, datos, longitud);
+        }
+
         Stream* canal = resolverStream(idMedio);
-        if (!canal || !datos || longitud == 0) return 0;
+        if (!canal) return 0;
 
         size_t escritos = canal->write(datos, longitud);
-        yield(); // Alimenta al Watchdog del ESP8266 sin forzar flush() bloqueante
+        yield();
         return escritos;
     }
 };

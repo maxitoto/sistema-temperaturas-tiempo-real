@@ -7,10 +7,10 @@
 
 class CapaEnlace {
   public:
-    static const uint8_t SOF_BYTE = 0x7E;
-    static const uint8_t ESC_BYTE = 0x7D;
-    static const uint8_t IAC_BYTE = 0xFF; // Byte reservado por Telnet/RFC2217 en Wokwi
-    static const unsigned long TIMEOUT_TRAMA_MS = 500;
+    static constexpr uint8_t SOF_BYTE = 0x7E;
+    static constexpr uint8_t ESC_BYTE = 0x7D;
+    static constexpr uint8_t IAC_BYTE = 0xFF;
+    static constexpr unsigned long TIMEOUT_TRAMA_MS = 500;
 
   private:
     CapaFisica* fisica = nullptr;
@@ -85,7 +85,7 @@ class CapaEnlace {
     }
 
     // ==========================================================
-    // CAMINO DE BAJADA (TX): Con Byte-Stuffing HDLC (0x7E, 0x7D, 0xFF)
+    // CAMINO DE BAJADA (TX): Bypass en medios nativos / HDLC en USB
     // ==========================================================
     bool bajarTrama(const BufferPaquete& pkt) {
         if (!fisica || idMedio < 0 || pkt.longitud == 0 || pkt.longitud > LimitesPila::MAX_TRAMA_ENLACE) {
@@ -95,10 +95,15 @@ class CapaEnlace {
         const uint8_t* payload = pkt.ptrActual();
         size_t longitud = pkt.longitud;
 
+        // BYPASS CAPA 2 (Wi-Fi / Medios Nativos): La MAC 802.11 ya delimita y aplica FCS-32
+        if (fisica->esMedioNativo(idMedio)) {
+            return fisica->enviarBytes(idMedio, payload, longitud, pkt.esDatagramaNativo) == longitud;
+        }
+
+        // CAMINO USB (idMedio == 0): Fragmentación 64B + Byte-Stuffing HDLC + Doble CRC16
         uint16_t crcMensajeUnificado = calcularCRC16(payload, longitud);
         uint8_t totalChunks = (longitud + LimitesPila::TAMANO_MAX_CHUNK - 1) / LimitesPila::TAMANO_MAX_CHUNK;
 
-        // Buffer crudo para cálculo de CRC y buffer escapado para transmisión física
         uint8_t crudo[3 + LimitesPila::TAMANO_MAX_CHUNK + 4];
         uint8_t tramaFisica[1 + (3 + LimitesPila::TAMANO_MAX_CHUNK + 4) * 2];
 
@@ -124,7 +129,7 @@ class CapaEnlace {
 
             size_t totalCrudo = 7 + lenSegmento;
             size_t posTx = 0;
-            tramaFisica[posTx++] = SOF_BYTE; // Único byte 0x7E literal en el cable
+            tramaFisica[posTx++] = SOF_BYTE;
             for (size_t k = 0; k < totalCrudo; k++) {
                 escribirByteEscapado(tramaFisica, posTx, crudo[k]);
             }
@@ -138,11 +143,24 @@ class CapaEnlace {
     }
 
     // ==========================================================
-    // CAMINO DE SUBIDA (RX): Des-escapa 0x7D y resincroniza en 0x7E
+    // CAMINO DE SUBIDA (RX): Bypass en medios nativos / HDLC en USB
     // ==========================================================
     bool subirTrama(BufferPaquete& pktSalida) {
         if (!fisica || idMedio < 0) return false;
 
+        // BYPASS CAPA 2 (Wi-Fi / Medios Nativos): Entrega directa a Capa 3
+        if (fisica->esMedioNativo(idMedio)) {
+            if (fisica->bytesDisponibles(idMedio) <= 0) return false;
+            pktSalida.prepararParaRx(idMedio);
+            bool esDatagrama = false;
+            size_t leidos = fisica->recibirBytes(idMedio, pktSalida.raw, LimitesPila::MAX_TRAMA_ENLACE, esDatagrama);
+            if (leidos == 0) return false;
+            pktSalida.longitud = leidos;
+            pktSalida.esDatagramaNativo = esDatagrama;
+            return true;
+        }
+
+        // CAMINO USB (idMedio == 0): Máquina de estados HDLC
         unsigned long ahora = millis();
         if ((estadoRx != ESPERANDO_SOF || totalChunksEsperados > 0) &&
             (ahora - ultimoByteMs > TIMEOUT_TRAMA_MS)) {
@@ -162,7 +180,6 @@ class CapaEnlace {
             while (posRafagaRx < lenRafagaRx) {
                 uint8_t byteCrudo = rafagaRx[posRafagaRx++];
 
-                // Cualquier 0x7E sin escapar indica SIEMPRE el inicio de una nueva trama
                 if (byteCrudo == SOF_BYTE) {
                     posCabecera = 0;
                     posDatosChunk = 0;
@@ -172,9 +189,7 @@ class CapaEnlace {
                     continue;
                 }
 
-                if (estadoRx == ESPERANDO_SOF) {
-                    continue;
-                }
+                if (estadoRx == ESPERANDO_SOF) continue;
 
                 if (byteCrudo == ESC_BYTE) {
                     escapandoRx = true;

@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdio.h>
+#include <esp_system.h>
+#include <mbedtls/gcm.h>
 #include "communication/layers/CapaAplicacion.h"
 #include "state/EstadoSistema.h"
 #include "debug/DebugOLED.h"
@@ -29,21 +31,101 @@ namespace ServerExampleStub {
     }
 
     // =========================================================================
-    // 1. CRIPTOGRAFÍA DEL PROCESO DE USUARIO (Canal Completo y Campo Sensible)
+    // 1. CRIPTOGRAFÍA HARDWARE ESP32: AES-256-GCM (CAPA 6) + CAMPO SENSIBLE (CAPA 7)
     // =========================================================================
-    static const uint8_t CLAVE_CANAL_TLS[16] = {
-        0x4A, 0x91, 0x2C, 0xE7, 0x55, 0xB3, 0x18, 0x8F,
-        0xD2, 0x3E, 0x7A, 0xC1, 0x60, 0x09, 0xF4, 0x33
+    static constexpr size_t GCM_NONCE_LEN = 12;
+    static constexpr size_t GCM_TAG_LEN   = 16;
+    static constexpr size_t GCM_OVERHEAD  = GCM_NONCE_LEN + GCM_TAG_LEN; // 28 bytes
+
+    // Clave maestra AES-256 (32 bytes = 256 bits) persistida en /db/lts.bin
+    static const uint8_t CLAVE_DEFECTO_AES256[32] = {
+        'U','N','T','D','F','_','O','S','I','_','A','E','S','2','5','6',
+        '_','G','C','M','_','K','E','Y','_','2','0','2','6','!','!','!'
     };
+
+    static const uint8_t AAD_CANAL_OSI[16] = {
+        'U','N','T','D','F','-','O','S','I','-','G','C','M','-','V','1'
+    };
+
+    inline uint8_t* claveCanalActiva() {
+        static uint8_t clave[32] = {0};
+        static bool inicializada = false;
+        if (!inicializada) {
+            memcpy(clave, CLAVE_DEFECTO_AES256, 32);
+            inicializada = true;
+        }
+        return clave;
+    }
 
     static const uint8_t CLAVE_CAMPO_SMTP[12] = {
         0x73, 0x6D, 0x74, 0x70, 0x5F, 0x73, 0x65, 0x63, 0x5F, 0x6B, 0x65, 0x79
     };
 
-    inline bool transformarMensajeCanalTLS(int, uint16_t, uint8_t* buf, size_t& len, size_t) {
-        for (size_t i = 0; i < len; i++) {
-            buf[i] ^= (uint8_t)(CLAVE_CANAL_TLS[i & 0x0F] ^ (uint8_t)(i * 29));
+    // Hook TX Capa 6: Encripta y firma con AES-256-GCM acelerado por hardware en el ESP32
+    // Estructura resultante: [Nonce: 12B][Ciphertext: len B][Tag GCM: 16B]
+    inline bool encriptarCanalGCM_TX(int, uint16_t, uint8_t* buf, size_t& len, size_t capMax) {
+        if (!buf || len == 0 || (len + GCM_OVERHEAD) > capMax) return false;
+
+        uint8_t nonce[GCM_NONCE_LEN];
+        esp_fill_random(nonce, GCM_NONCE_LEN);
+
+        uint8_t cifrado[LimitesPila::MAX_PAYLOAD_APP];
+        uint8_t tag[GCM_TAG_LEN];
+
+        mbedtls_gcm_context ctx;
+        mbedtls_gcm_init(&ctx);
+        int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, claveCanalActiva(), 256);
+        if (ret == 0) {
+            ret = mbedtls_gcm_crypt_and_tag(
+                &ctx, MBEDTLS_GCM_ENCRYPT, len,
+                nonce, GCM_NONCE_LEN,
+                AAD_CANAL_OSI, sizeof(AAD_CANAL_OSI),
+                buf, cifrado,
+                GCM_TAG_LEN, tag
+            );
         }
+        mbedtls_gcm_free(&ctx);
+        if (ret != 0) return false;
+
+        memcpy(buf, nonce, GCM_NONCE_LEN);
+        memcpy(buf + GCM_NONCE_LEN, cifrado, len);
+        memcpy(buf + GCM_NONCE_LEN + len, tag, GCM_TAG_LEN);
+        len += GCM_OVERHEAD;
+        return true;
+    }
+
+    // Hook RX Capa 6: Verifica autenticidad (Tag 16B) y desencripta con AES-256-GCM en el ESP32
+    inline bool desencriptarCanalGCM_RX(int, uint16_t, uint8_t* buf, size_t& len, size_t capMax) {
+        if (!buf || len <= GCM_OVERHEAD || len > capMax) return false;
+
+        size_t lenCifrado = len - GCM_OVERHEAD;
+        const uint8_t* nonce   = buf;
+        const uint8_t* cifrado = buf + GCM_NONCE_LEN;
+        const uint8_t* tag     = buf + GCM_NONCE_LEN + lenCifrado;
+
+        uint8_t claro[LimitesPila::MAX_PAYLOAD_APP];
+
+        mbedtls_gcm_context ctx;
+        mbedtls_gcm_init(&ctx);
+        int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, claveCanalActiva(), 256);
+        if (ret == 0) {
+            ret = mbedtls_gcm_auth_decrypt(
+                &ctx, lenCifrado,
+                nonce, GCM_NONCE_LEN,
+                AAD_CANAL_OSI, sizeof(AAD_CANAL_OSI),
+                tag, GCM_TAG_LEN,
+                cifrado, claro
+            );
+        }
+        mbedtls_gcm_free(&ctx);
+
+        if (ret != 0) {
+            DebugOLED::registrarError("L6 GCM AUTH ERR");
+            return false;
+        }
+
+        memcpy(buf, claro, lenCifrado);
+        len = lenCifrado;
         return true;
     }
 
@@ -55,11 +137,19 @@ namespace ServerExampleStub {
         salidaTexto[maxCopy] = '\0';
     }
 
+    // Comparación en tiempo constante (previene ataques de timing sobre contraseñas)
     inline bool verificarPinHashUsuario(const FilaUsuario& usr, const char* pinRecibido) {
         if (!pinRecibido || pinRecibido[0] == '\0') return false;
-        return strncmp(reinterpret_cast<const char*>(usr.contrasena),
-                       pinRecibido,
-                       sizeof(usr.contrasena)) == 0;
+        const char* guardado = reinterpret_cast<const char*>(usr.contrasena);
+        size_t lenG = strnlen(guardado, sizeof(usr.contrasena));
+        size_t lenR = strnlen(pinRecibido, sizeof(usr.contrasena));
+        uint8_t diff = (uint8_t)(lenG ^ lenR);
+        for (size_t i = 0; i < sizeof(usr.contrasena); i++) {
+            char cG = (i < lenG) ? guardado[i] : 0;
+            char cR = (i < lenR) ? pinRecibido[i] : 0;
+            diff |= (uint8_t)(cG ^ cR);
+        }
+        return (lenG > 0) && (diff == 0);
     }
 
     inline ContextoSesionSGBD construirSesionDesdeCredencial(const UsuarioCredencialDTO& cred) {
@@ -73,7 +163,7 @@ namespace ServerExampleStub {
     }
 
     // =========================================================================
-    // 2. SEEDING INICIAL EN LA MICROSD (Si las tablas están recién creadas)
+    // 2. SEEDING INICIAL EN LA MICROSD (Certificado + 3 Usuarios + Sensor + NTP)
     // =========================================================================
     inline bool inicializarBaseDeDatosORM(ClienteORM& orm) {
         ormActivo() = &orm;
@@ -86,29 +176,31 @@ namespace ServerExampleStub {
 
         const uint32_t tsBoot = gEstadoSistema.ultimoUnixTimestamp;
 
-        // A. Semilla de Certificado LTS (/db/lts.bin)
+        // A. Semilla de Certificado LTS y Clave Privada AES-256 (/db/lts.bin)
         FilaLTS certActual = {};
-        if (!orm.lts.obtener(certActual)) {
+        if (!orm.lts.obtener(certActual) || certActual.clave_privada[0] == 0) {
             FilaLTS nuevoCert = {};
             strncpy(nuevoCert.nombre_certificado, "CERT_UNTDF_LAB", sizeof(nuevoCert.nombre_certificado) - 1);
             strncpy(nuevoCert.certificado, "CERT-TLS-UNTDF-2026-VALIDO", sizeof(nuevoCert.certificado) - 1);
+            memcpy(nuevoCert.clave_privada, CLAVE_DEFECTO_AES256, 32);
             strncpy(nuevoCert.cadena_certificados, "CA-UNTDF-ROOT", sizeof(nuevoCert.cadena_certificados) - 1);
             orm.lts.guardar(nuevoCert, tsBoot);
+            certActual = nuevoCert;
         }
+        memcpy(claveCanalActiva(), certActual.clave_privada, 32);
 
-        // B. Semilla de Usuarios (/db/usuarios.bin)
+        // B. Semilla de los 3 Usuarios requeridos (/db/usuarios.bin): admin, encargado1, encargado2
         if (orm.usuarios.contarTotal() == 0) {
-            FilaUsuario admin = {};
-            strncpy(admin.usuario, "silvana_admin", sizeof(admin.usuario) - 1);
-            strncpy(reinterpret_cast<char*>(admin.contrasena), "HASH_ADMIN_2026", sizeof(admin.contrasena) - 1);
-            admin.rol = ROL_ADMIN;
-            orm.usuarios.crear(admin, tsBoot);
-
-            FilaUsuario oper = {};
-            strncpy(oper.usuario, "juan_operador", sizeof(oper.usuario) - 1);
-            strncpy(reinterpret_cast<char*>(oper.contrasena), "HASH_OPER_2026", sizeof(oper.contrasena) - 1);
-            oper.rol = ROL_REGULAR;
-            orm.usuarios.crear(oper, tsBoot);
+            auto sembrarUsuario = [&](const char* user, const char* pass, uint8_t rol) {
+                FilaUsuario u = {};
+                strncpy(u.usuario, user, sizeof(u.usuario) - 1);
+                strncpy(reinterpret_cast<char*>(u.contrasena), pass, sizeof(u.contrasena) - 1);
+                u.rol = rol;
+                orm.usuarios.crear(u, tsBoot);
+            };
+            sembrarUsuario("admin",      "Admin1234",     ROL_ADMIN);
+            sembrarUsuario("encargado1", "Encargado1234", ROL_REGULAR);
+            sembrarUsuario("encargado2", "Encargado1234", ROL_REGULAR);
         }
 
         // C. Semilla de Sensor por defecto (/db/sensor.bin)
@@ -148,8 +240,8 @@ namespace ServerExampleStub {
 
         DebugOLED::registrarRx(meta.idNodo, comando, meta.reqId);
 
-        // RPC_SUMAR_Y_ESTADO es de prueba general; todos los demás exigen CredencialRpcDTO (4 campos iniciales)
-        if (strcmp(comando, RPC_SUMAR_Y_ESTADO) == 0) {
+        if (strcmp(comando, RPC_SUMAR_Y_ESTADO) == 0 ||
+            strcmp(comando, RPC_DATOS_EN_VIVO) == 0) {
             return true;
         }
 
@@ -194,11 +286,24 @@ namespace ServerExampleStub {
             return false;
         }
 
-        // 3. Verificar Autorización de Rol (DML exige ADMIN; DQL permite REGULAR y ADMIN)
+        // 3. Verificar Autorización de Rol (DML exige ADMIN; en ACTUALIZAR_USUARIO cada uno puede editarse a sí mismo o el ADMIN a cualquiera)
         if (requiereRolAdmin(comando) && usr.rol != ROL_ADMIN) {
             strncpy(codigoRechazo, "REQUIERE_ROL_ADMIN", capCodigo);
             DebugOLED::registrarError("P:NO_ADMIN");
             return false;
+        }
+
+        if (strcmp(comando, RPC_DB_ACTUALIZAR_USUARIO) == 0) {
+            ActualizarUsuarioInputDTO in;
+            if (!in.deserializar(argsCopia)) {
+                strncpy(codigoRechazo, "FORMATO_USUARIO_INVALIDO", capCodigo);
+                return false;
+            }
+            if (usr.rol != ROL_ADMIN && usr.id_usuario != (uint16_t)in.idUsuarioObjetivo) {
+                strncpy(codigoRechazo, "SOLO_PUEDE_EDITAR_PROPIO_USR", capCodigo);
+                DebugOLED::registrarError("P:USR_FORBID");
+                return false;
+            }
         }
 
         // 4. Validaciones de Rango de Dominio para cambios de umbrales
@@ -234,16 +339,16 @@ namespace ServerExampleStub {
     // =========================================================================
     class FirmwareImpl : public IFirmware {
       public:
+        RespuestaDatosEnVivoDTO leerDatosEnVivo() override {
+            gEstadoSistema.totalLlamadasRecibidas++;
+            float valorRandom = -20.0f + ((float)(esp_random() % 101) * 0.1f);
+            return { valorRandom };
+        }
+
         RespuestaEstado sumarYEstado(float base, float factor) override {
             float resultado = base + (factor * 1.5f);
             gEstadoSistema.ultimoResultadoCalculado = resultado;
             gEstadoSistema.totalLlamadasRecibidas++;
-
-            repositorios().sensos.registrarLectura(
-                1, base, resultado, ESTADO_OK,
-                gEstadoSistema.ultimoUnixTimestamp,
-                ContextoSesionSGBD::sistemaInterno()
-            );
 
             return {
                 resultado,
@@ -401,6 +506,40 @@ namespace ServerExampleStub {
             gEstadoSistema.totalLlamadasRecibidas++;
             return true;
         }
+
+        size_t listarUsuarios(const UsuarioCredencialDTO& cred, FilaUsuario* out, size_t maxItems) override {
+            ContextoSesionSGBD sesion = construirSesionDesdeCredencial(cred);
+            gEstadoSistema.totalLlamadasRecibidas++;
+            return repositorios().usuarios.listarActivos(out, maxItems, sesion);
+        }
+
+        bool actualizarUsuario(const UsuarioCredencialDTO& cred,
+                               const ActualizarUsuarioInputDTO& in,
+                               FilaUsuario& out) override {
+            ContextoSesionSGBD sesion = construirSesionDesdeCredencial(cred);
+            if (!sesion.autenticado) return false;
+
+            char nuevaPassPlana[32] = {0};
+            desencriptarCampoSensible(in.nuevaPasswordCifrada, in.lenNuevaPassword,
+                                      nuevaPassPlana, sizeof(nuevaPassPlana));
+
+            uint32_t ahora = gEstadoSistema.ultimoUnixTimestamp;
+            if (!repositorios().usuarios.actualizarCredenciales(
+                    (uint16_t)in.idUsuarioObjetivo,
+                    in.nuevoUsername,
+                    nuevaPassPlana,
+                    ahora,
+                    out,
+                    sesion)) {
+                return false;
+            }
+
+            char detalle[24] = {0};
+            snprintf(detalle, sizeof(detalle), "U#%u->%s", (unsigned)out.id_usuario, out.usuario);
+            repositorios().auditorias.registrar(sesion.idUsuario, "CAMBIO_CREDENCIAL", detalle, ahora, sesion);
+            gEstadoSistema.totalLlamadasRecibidas++;
+            return true;
+        }
     };
 
     static FirmwareImpl firmwareImpl;
@@ -416,15 +555,20 @@ namespace ServerExampleStub {
     inline void registrarSkeletonFirmware(CapaAplicacion& appRpc, IFirmware& impl) {
         servicioFirmware() = &impl;
 
-        appRpc.on(RPC_SUMAR_Y_ESTADO, [](size_t cantArgs, LectorMsgPack& args,
-                                         EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onStream(RPC_DATOS_EN_VIVO, [](size_t, LectorMsgPack&,
+                                              EscritorMsgPack& resp, const MetaCall&) -> bool {
+            return servicioFirmware()->leerDatosEnVivo().serializar(resp);
+        });
+
+        appRpc.onRequest(RPC_SUMAR_Y_ESTADO, [](size_t cantArgs, LectorMsgPack& args,
+                                                EscritorMsgPack& resp, const MetaCall&) -> bool {
             float base = 0.0f, factor = 0.0f;
             if (cantArgs < 2 || !args.leerFloat(base) || !args.leerFloat(factor)) return false;
             return servicioFirmware()->sumarYEstado(base, factor).serializar(resp);
         });
 
-        appRpc.on(RPC_GUARDAR_CONFIG_SEGURA, [](size_t cantArgs, LectorMsgPack& args,
-                                                EscritorMsgPack& resp, const MetaCall& meta) -> bool {
+        appRpc.onRequest(RPC_GUARDAR_CONFIG_SEGURA, [](size_t cantArgs, LectorMsgPack& args,
+                                                       EscritorMsgPack& resp, const MetaCall& meta) -> bool {
             CredencialRpcDTO auth;
             ConfigHeladeraDTO cfg;
             if (cantArgs < 7 || !auth.deserializar(args) || !cfg.deserializar(args)) return false;
@@ -434,9 +578,8 @@ namespace ServerExampleStub {
             return out.serializar(resp);
         });
 
-        // 1. DQL: Listar Sensores (Hasta 6 sensores por llamada = ~270B < 492B)
-        appRpc.on(RPC_DB_LISTAR_SENSORES, [](size_t cantArgs, LectorMsgPack& args,
-                                             EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_LISTAR_SENSORES, [](size_t cantArgs, LectorMsgPack& args,
+                                                    EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             if (cantArgs < 4 || !auth.deserializar(args)) return false;
 
@@ -449,9 +592,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 2. DML: Crear o Actualizar Sensor
-        appRpc.on(RPC_DB_GUARDAR_SENSOR, [](size_t cantArgs, LectorMsgPack& args,
-                                            EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_GUARDAR_SENSOR, [](size_t cantArgs, LectorMsgPack& args,
+                                                   EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             GuardarSensorInputDTO in;
             if (cantArgs < 9 || !auth.deserializar(args) || !in.deserializar(args)) return false;
@@ -461,9 +603,8 @@ namespace ServerExampleStub {
             return resp.iniciarArray(2) && resp.escribirTexto("OK") && serializarFilaSensor(resp, guardado);
         });
 
-        // 3. DQL: Listar Últimos Sensos (Mediciones)
-        appRpc.on(RPC_DB_ULTIMOS_SENSOS, [](size_t cantArgs, LectorMsgPack& args,
-                                            EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_ULTIMOS_SENSOS, [](size_t cantArgs, LectorMsgPack& args,
+                                                   EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             uint32_t idSensor = 0, limite = 8;
             if (cantArgs < 6 || !auth.deserializar(args) || !args.leerUInt32(idSensor) || !args.leerUInt32(limite)) {
@@ -480,9 +621,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 4. DQL: Listar Últimos Eventos de Sensor
-        appRpc.on(RPC_DB_ULTIMOS_EVENTOS, [](size_t cantArgs, LectorMsgPack& args,
-                                             EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_ULTIMOS_EVENTOS, [](size_t cantArgs, LectorMsgPack& args,
+                                                    EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             uint32_t idSensor = 0, limite = 8;
             if (cantArgs < 6 || !auth.deserializar(args) || !args.leerUInt32(idSensor) || !args.leerUInt32(limite)) {
@@ -499,9 +639,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 5. DQL: Listar Últimas Auditorías del Firmware
-        appRpc.on(RPC_DB_ULTIMAS_AUDITORIAS, [](size_t cantArgs, LectorMsgPack& args,
-                                                EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_ULTIMAS_AUDITORIAS, [](size_t cantArgs, LectorMsgPack& args,
+                                                       EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             uint32_t limite = 5;
             if (cantArgs < 5 || !auth.deserializar(args) || !args.leerUInt32(limite)) return false;
@@ -516,9 +655,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 6. DQL: Listar Destinatarios de Correo
-        appRpc.on(RPC_DB_LISTAR_CORREOS, [](size_t cantArgs, LectorMsgPack& args,
-                                            EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_LISTAR_CORREOS, [](size_t cantArgs, LectorMsgPack& args,
+                                                   EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             if (cantArgs < 4 || !auth.deserializar(args)) return false;
 
@@ -531,9 +669,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 7. DML: Crear Destinatario de Correo
-        appRpc.on(RPC_DB_CREAR_CORREO, [](size_t cantArgs, LectorMsgPack& args,
-                                          EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_CREAR_CORREO, [](size_t cantArgs, LectorMsgPack& args,
+                                                 EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             CrearCorreoInputDTO in;
             if (cantArgs < 8 || !auth.deserializar(args) || !in.deserializar(args)) return false;
@@ -543,9 +680,8 @@ namespace ServerExampleStub {
             return resp.iniciarArray(2) && resp.escribirTexto("OK") && serializarFilaCorreo(resp, creado);
         });
 
-        // 8. DQL: Obtener Configuración SMTP (Singleton PK = 1)
-        appRpc.on(RPC_DB_OBTENER_SMTP, [](size_t cantArgs, LectorMsgPack& args,
-                                          EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_OBTENER_SMTP, [](size_t cantArgs, LectorMsgPack& args,
+                                                 EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             if (cantArgs < 4 || !auth.deserializar(args)) return false;
 
@@ -561,9 +697,8 @@ namespace ServerExampleStub {
                    resp.escribirUInt(smtp.fecha_modificacion);
         });
 
-        // 9. DQL: Obtener Configuración de Conectividad WiFi + Lista de Servidores NTP
-        appRpc.on(RPC_DB_OBTENER_RED_Y_NTP, [](size_t cantArgs, LectorMsgPack& args,
-                                               EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_OBTENER_RED_Y_NTP, [](size_t cantArgs, LectorMsgPack& args,
+                                                      EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             if (cantArgs < 4 || !auth.deserializar(args)) return false;
 
@@ -586,9 +721,8 @@ namespace ServerExampleStub {
             return true;
         });
 
-        // 10. DML: Guardar Configuración de Red WiFi (STA y AP con contraseñas cifradas)
-        appRpc.on(RPC_DB_GUARDAR_RED, [](size_t cantArgs, LectorMsgPack& args,
-                                          EscritorMsgPack& resp, const MetaCall&) -> bool {
+        appRpc.onRequest(RPC_DB_GUARDAR_RED, [](size_t cantArgs, LectorMsgPack& args,
+                                                EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             GuardarRedInputDTO in;
             if (cantArgs < 8 || !auth.deserializar(args) || !in.deserializar(args)) return false;
@@ -601,13 +735,43 @@ namespace ServerExampleStub {
                    resp.escribirTexto(red.SSID_AP) &&
                    resp.escribirUInt(red.fecha_modificacion);
         });
+
+        // 11. DQL: Listar los 3 Usuarios del Servidor (sin exponer contraseñas)
+        appRpc.onRequest(RPC_DB_LISTAR_USUARIOS, [](size_t cantArgs, LectorMsgPack& args,
+                                                    EscritorMsgPack& resp, const MetaCall&) -> bool {
+            CredencialRpcDTO auth;
+            if (cantArgs < 4 || !auth.deserializar(args)) return false;
+
+            FilaUsuario lista[4];
+            size_t n = servicioFirmware()->listarUsuarios(auth.usuario, lista, 4);
+            if (!resp.iniciarArray(2) || !resp.escribirTexto("OK") || !resp.iniciarArray(n)) return false;
+            for (size_t i = 0; i < n; i++) {
+                if (!serializarFilaUsuarioResumen(resp, lista[i])) return false;
+            }
+            return true;
+        });
+
+        // 12. DML: Cambiar nombre de usuario y contraseña (propio o por Admin)
+        appRpc.onRequest(RPC_DB_ACTUALIZAR_USUARIO, [](size_t cantArgs, LectorMsgPack& args,
+                                                       EscritorMsgPack& resp, const MetaCall&) -> bool {
+            CredencialRpcDTO auth;
+            ActualizarUsuarioInputDTO in;
+            if (cantArgs < 7 || !auth.deserializar(args) || !in.deserializar(args)) return false;
+
+            FilaUsuario actualizado = {};
+            if (!servicioFirmware()->actualizarUsuario(auth.usuario, in, actualizado)) return false;
+            return resp.iniciarArray(2) &&
+                   resp.escribirTexto("OK") &&
+                   serializarFilaUsuarioResumen(resp, actualizado);
+        });
     }
 
     inline void registrarStubsServidor(CapaAplicacion& appRpc,
                                        CapaPresentacion& capaPres,
                                        ClienteORM& orm) {
         inicializarBaseDeDatosORM(orm);
-        capaPres.configurarTransformadores(transformarMensajeCanalTLS, transformarMensajeCanalTLS);
+        // Conectamos AES-256-GCM acelerado por hardware en TX (encriptar) y RX (desencriptar)
+        capaPres.configurarTransformadores(encriptarCanalGCM_TX, desencriptarCanalGCM_RX);
         appRpc.establecerEvaluadorPolitica(evaluarPoliticaProcesoUsuario);
         registrarSkeletonFirmware(appRpc, firmwareImpl);
     }

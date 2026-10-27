@@ -104,6 +104,21 @@ export interface CrearCorreoFirmwareInput {
   tipoRecepcionMensajes?: number;
 }
 
+export interface UsuarioFirmwareResumenDTO {
+  idUsuario: number;
+  usuario: string;
+  rol: number; // 0 = REGULAR, 1 = ADMIN
+  activa: number;
+  fechaModificacion: number;
+}
+
+export interface ActualizarUsuarioFirmwareInput {
+  credencial: CredencialRpcDTO;
+  idUsuarioObjetivo: number;
+  nuevoUsername: string;
+  nuevaPasswordPlana: string;
+}
+
 export interface ConfigSmtpFirmwareResumenDTO {
   configurado: boolean;
   hostSmtp: string;
@@ -133,12 +148,19 @@ export interface RespuestaReloj {
   zonaHoraria: string;
 }
 
+export interface RespuestaDatosEnVivo {
+  numeroRandom: number;
+}
+
 // ---------- Contrato: servicio que EXPONE el firmware (backend lo llama) ----------
 export interface IFirmware {
+  leerDatosEnVivo: () => Promise<RespuestaDatosEnVivo>;
   sumarYLeerEstado: (base: number, factor: number, opts?: OpcionesLlamada) => Promise<RespuestaCalculoFirmware>;
   guardarConfiguracionSegura: (dto: SolicitudConfigSeguraDTO, opts?: OpcionesLlamada) => Promise<RespuestaAuditoriaFirmwareDTO>;
 
   // Consultas DQL y Mutaciones DML hacia la MicroSD del Firmware
+  listarUsuariosFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<UsuarioFirmwareResumenDTO[]>;
+  actualizarUsuarioFirmware: (input: ActualizarUsuarioFirmwareInput, opts?: OpcionesLlamada) => Promise<UsuarioFirmwareResumenDTO>;
   listarSensoresFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<SensorFirmwareDTO[]>;
   guardarSensorFirmware: (input: GuardarSensorFirmwareInput, opts?: OpcionesLlamada) => Promise<SensorFirmwareDTO>;
   listarUltimosSensosFirmware: (cred: CredencialRpcDTO, idSensor?: number, limite?: number, opts?: OpcionesLlamada) => Promise<SensoFirmwareDTO[]>;
@@ -158,6 +180,7 @@ export interface IBackend {
 
 // ---------- Nombres de procedimientos ----------
 export const RPC = {
+  DATOS_EN_VIVO: "RPC_DATOS_EN_VIVO",
   SUMAR_Y_ESTADO: "RPC_SUMAR_Y_ESTADO",
   GUARDAR_CONFIG_SEGURA: "RPC_GUARDAR_CONFIG_SEGURA",
   SYNC_RELOJ: "RPC_SYNC_RELOJ",
@@ -171,4 +194,6 @@ export const RPC = {
   DB_OBTENER_SMTP: "RPC_DB_OBTENER_SMTP",
   DB_OBTENER_RED_Y_NTP: "RPC_DB_OBTENER_RED_Y_NTP",
   DB_GUARDAR_RED: "RPC_DB_GUARDAR_RED",
+  DB_LISTAR_USUARIOS: "RPC_DB_LISTAR_USUARIOS",
+  DB_ACTUALIZAR_USUARIO: "RPC_DB_ACTUALIZAR_USUARIO",
 } as const;

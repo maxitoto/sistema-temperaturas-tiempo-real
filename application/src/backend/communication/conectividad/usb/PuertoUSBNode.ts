@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import { SerialPort } from "serialport";
-import { MedioFisico } from "../../../communication/layers/CapaFisica";
+import { MedioFisico } from "../../layers/CapaFisica";
 
 export interface InfoPuertoSerial {
   path: string;

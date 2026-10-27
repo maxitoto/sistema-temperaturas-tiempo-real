@@ -1,4 +1,5 @@
 // Archivo: ./src/backend/stubs/clientExample.ts
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { pila } from "../communication/ContenedorComunicacion";
 import { OpcionesLlamada } from "../communication/layers/CapaAplicacion";
 import {
@@ -18,6 +19,9 @@ import {
   ConfigSmtpFirmwareResumenDTO,
   ConfigRedYNtpFirmwareDTO,
   GuardarRedFirmwareInput,
+  RespuestaDatosEnVivo,
+  ActualizarUsuarioFirmwareInput,
+  UsuarioFirmwareResumenDTO,
 } from "./contratos";
 
 // =========================================================================
@@ -32,6 +36,12 @@ const CLAVE_CAMPO_SMTP = new Uint8Array([
   0x73, 0x6d, 0x74, 0x70, 0x5f, 0x73, 0x65, 0x63, 0x5f, 0x6b, 0x65, 0x79,
 ]);
 
+const CLAVE_AES256_GCM = Buffer.from("UNTDF_OSI_AES256_GCM_KEY_2026!!!", "utf-8"); // 32 bytes
+const AAD_CANAL_OSI = Buffer.from("UNTDF-OSI-GCM-V1", "utf-8"); // 16 bytes
+const GCM_NONCE_LEN = 12;
+const GCM_TAG_LEN = 16;
+const GCM_OVERHEAD = GCM_NONCE_LEN + GCM_TAG_LEN; // 28 bytes
+
 export function transformarMensajeCanalTLS(
   _idNodo: number,
   _reqId: number,
@@ -41,6 +51,49 @@ export function transformarMensajeCanalTLS(
     vista[i] ^= (CLAVE_CANAL_TLS[i & 0x0f] ^ ((i * 29) & 0xff)) & 0xff;
   }
   return true;
+}
+
+export function desencriptarCanalGCM_RX(
+  _idNodo: number,
+  _reqId: number,
+  vistaCifrada: Uint8Array
+): Uint8Array | null {
+  if (vistaCifrada.length <= GCM_OVERHEAD) return null;
+  try {
+    const buf = Buffer.from(vistaCifrada.buffer, vistaCifrada.byteOffset, vistaCifrada.byteLength);
+    const lenCifrado = buf.length - GCM_OVERHEAD;
+    const nonce = buf.subarray(0, GCM_NONCE_LEN);
+    const cifrado = buf.subarray(GCM_NONCE_LEN, GCM_NONCE_LEN + lenCifrado);
+    const tag = buf.subarray(GCM_NONCE_LEN + lenCifrado);
+
+    const decipher = createDecipheriv("aes-256-gcm", CLAVE_AES256_GCM, nonce);
+    decipher.setAAD(AAD_CANAL_OSI);
+    decipher.setAuthTag(tag);
+    const claro = Buffer.concat([decipher.update(cifrado), decipher.final()]);
+    return new Uint8Array(claro.buffer, claro.byteOffset, claro.byteLength);
+  } catch {
+    return null;
+  }
+}
+
+type TuplaUsuarioResumen = [number, string, number, number, number];
+
+export function encriptarCanalGCM_TX(
+  _idNodo: number,
+  _reqId: number,
+  vistaClara: Uint8Array
+): Uint8Array | null {
+  try {
+    const nonce = randomBytes(GCM_NONCE_LEN);
+    const cipher = createCipheriv("aes-256-gcm", CLAVE_AES256_GCM, nonce);
+    cipher.setAAD(AAD_CANAL_OSI);
+    const cifrado = Buffer.concat([cipher.update(vistaClara), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const salida = Buffer.concat([nonce, cifrado, tag]);
+    return new Uint8Array(salida.buffer, salida.byteOffset, salida.byteLength);
+  } catch {
+    return null;
+  }
 }
 
 export function encriptarCampoSensible(textoPlano: string): Uint8Array {
@@ -86,12 +139,27 @@ function mapearTuplaSensor(t: TuplaSensor): SensorFirmwareDTO {
 // 2. STUB CLIENTE RPC: Implementa IFirmware con propiedades enumerables
 // =========================================================================
 export class FirmwareStub implements IFirmware {
+
+  public readonly leerDatosEnVivo = async (
+    opts?: OpcionesLlamada
+  ): Promise<RespuestaDatosEnVivo> => {
+    const [numeroRandom] = await pila.appRpc.stream<[number]>(
+      RPC.DATOS_EN_VIVO,
+      [],
+      opts
+    );
+
+    return {
+      numeroRandom: Number(numeroRandom),
+    };
+  };
+
   public readonly sumarYLeerEstado = async (
     base: number,
     factor: number,
     opts?: OpcionesLlamada
   ): Promise<RespuestaCalculoFirmware> => {
-    const [resultado, estado, heapLibreBytes] = await pila.appRpc.call<[number, string, number]>(
+    const [resultado, estado, heapLibreBytes] = await pila.appRpc.request<[number, string, number]>(
       RPC.SUMAR_Y_ESTADO,
       [Number(base), Number(factor)],
       opts
@@ -337,6 +405,48 @@ export class FirmwareStub implements IFirmware {
       ssidSta: String(ssidSta),
       ssidAp: String(ssidAp),
       fechaModificacion: Number(fechaModificacion),
+    };
+  };
+
+  public readonly listarUsuariosFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<UsuarioFirmwareResumenDTO[]> => {
+    const [filas] = await pila.appRpc.request<[TuplaUsuarioResumen[]]>(
+      RPC.DB_LISTAR_USUARIOS,
+      [...serializarCredencial(cred)],
+      opts
+    );
+    return (filas ?? []).map((t) => ({
+      idUsuario: Number(t[0]),
+      usuario: String(t[1]),
+      rol: Number(t[2]),
+      activa: Number(t[3]),
+      fechaModificacion: Number(t[4]),
+    }));
+  };
+
+  public readonly actualizarUsuarioFirmware = async (
+    input: ActualizarUsuarioFirmwareInput,
+    opts?: OpcionesLlamada
+  ): Promise<UsuarioFirmwareResumenDTO> => {
+    const passBin = encriptarCampoSensible(input.nuevaPasswordPlana);
+    const [t] = await pila.appRpc.request<[TuplaUsuarioResumen]>(
+      RPC.DB_ACTUALIZAR_USUARIO,
+      [
+        ...serializarCredencial(input.credencial),
+        Number(input.idUsuarioObjetivo),
+        input.nuevoUsername.trim(),
+        passBin,
+      ],
+      opts
+    );
+    return {
+      idUsuario: Number(t[0]),
+      usuario: String(t[1]),
+      rol: Number(t[2]),
+      activa: Number(t[3]),
+      fechaModificacion: Number(t[4]),
     };
   };
 }

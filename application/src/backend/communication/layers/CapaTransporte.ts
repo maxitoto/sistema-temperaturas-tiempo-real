@@ -58,6 +58,12 @@ export class CapaTransporte {
   private readonly nodos: ControlFlujoNodo[] = [];
   private oyentesSubida: Array<(pkt: BufferPaquete, meta: SegmentoTransporte) => void> = [];
 
+  // 🟢 BUFFER PARA RECORD MARKERS (WI-FI NATIVO TCP)
+  private readonly buffersRecordNativo: Buffer[] = Array.from(
+    { length: LimitesPila.MAX_NODOS_RED },
+    () => Buffer.alloc(0)
+  );
+
   constructor(private red: CapaRed) {
     for (let i = 0; i < LimitesPila.MAX_NODOS_RED; i++) {
       this.nodos.push({
@@ -80,6 +86,13 @@ export class CapaTransporte {
 
   public obtenerEstadoTCP(idNodo: number): EstadoTCP {
     if (idNodo < 0 || idNodo >= LimitesPila.MAX_NODOS_RED) return EstadoTCP.TCP_CERRADO;
+    
+    // 🟢 RAMA A: WI-FI NATIVO
+    if (this.red.esNodoNativo(idNodo)) {
+      return this.red.estaNodoActivo(idNodo) ? EstadoTCP.TCP_ESTABLECIDO : EstadoTCP.TCP_CERRADO;
+    }
+
+    // 🔴 RAMA B: USB / UDP CRUDO
     return this.nodos[idNodo].estado;
   }
 
@@ -142,7 +155,6 @@ export class CapaTransporte {
     this.red.bajarPaqueteUnicast(idNodo, pktCtrl);
   }
 
-  // Inicia el Three-Way Handshake TCP con reintento periódico de SYN cada 600ms
   public async conectarTCP(
     idNodo: number,
     puerto = CapaTransporte.PUERTO_RPC,
@@ -151,6 +163,16 @@ export class CapaTransporte {
     if (idNodo < 0 || idNodo >= LimitesPila.MAX_NODOS_RED) {
       throw new Error(`idNodo fuera de rango: ${idNodo}`);
     }
+
+    // 🟢 RAMA A: WI-FI NATIVO
+    // En Wi-Fi Nativo el handshake TCP ya lo realizó el socket del OS en ClienteTCPNode.conectar()
+    if (this.red.esNodoNativo(idNodo)) {
+      this.buffersRecordNativo[idNodo] = Buffer.alloc(0);
+      this.nodos[idNodo].estado = EstadoTCP.TCP_ESTABLECIDO;
+      return;
+    }
+
+    // 🔴 RAMA B: USB / UDP CRUDO
     const ctrl = this.nodos[idNodo];
     this.limpiarTimerArq(ctrl, true);
 
@@ -246,6 +268,71 @@ export class CapaTransporte {
     const id = pkt.idNodo;
     if (id < 0 || id >= LimitesPila.MAX_NODOS_RED) return;
 
+    // 🟢 RAMA A: SWITCH DE CANAL PARA MEDIOS NATIVOS (Wi-Fi)
+    if (this.red.esNodoNativo(id)) {
+      if (pkt.esDatagramaNativo) {
+        // UDP Nativo: Cada paquete ya viene delimitado por el OS.
+        const meta: SegmentoTransporte = {
+          idNodo: id,
+          protocolo: CapaTransporte.PROTO_UDP,
+          puertoOrigen: CapaTransporte.PUERTO_EVENTOS,
+          puertoDestino: CapaTransporte.PUERTO_EVENTOS,
+          flags: 0,
+          numSecuencia: 0,
+          numAcuse: 0,
+        };
+        for (const oyente of this.oyentesSubida) {
+          oyente(pkt, meta);
+        }
+        return;
+      }
+
+      // TCP Nativo: Usa Record Marking de 4B (RFC 5531) para delimitar mensajes
+      this.buffersRecordNativo[id] = Buffer.concat([
+        this.buffersRecordNativo[id],
+        Buffer.from(pkt.vistaActual()),
+      ]);
+
+      while (this.buffersRecordNativo[id].length >= LimitesPila.TAMANO_RECORD_MARKER_TCP) {
+        const marker = this.buffersRecordNativo[id].readUInt32BE(0);
+        const lenMsg = marker & 0x7fffffff;
+        
+        if (lenMsg === 0 || lenMsg > LimitesPila.MAX_TRAMA_ENLACE) {
+          this.buffersRecordNativo[id] = Buffer.alloc(0);
+          break;
+        }
+        
+        const totalFrame = LimitesPila.TAMANO_RECORD_MARKER_TCP + lenMsg;
+        if (this.buffersRecordNativo[id].length < totalFrame) break;
+
+        const payloadSesion = this.buffersRecordNativo[id].subarray(
+          LimitesPila.TAMANO_RECORD_MARKER_TCP,
+          totalFrame
+        );
+        this.buffersRecordNativo[id] = this.buffersRecordNativo[id].subarray(totalFrame);
+
+        const pktMsg = new BufferPaquete();
+        pktMsg.prepararParaRx(id);
+        pktMsg.raw.set(payloadSesion, 0);
+        pktMsg.longitud = payloadSesion.length;
+
+        const meta: SegmentoTransporte = {
+          idNodo: id,
+          protocolo: CapaTransporte.PROTO_TCP,
+          puertoOrigen: CapaTransporte.PUERTO_RPC,
+          puertoDestino: CapaTransporte.PUERTO_RPC,
+          flags: CapaTransporte.FLAG_PSH | CapaTransporte.FLAG_ACK,
+          numSecuencia: 0,
+          numAcuse: 0,
+        };
+        for (const oyente of this.oyentesSubida) {
+          oyente(pktMsg, meta);
+        }
+      }
+      return;
+    }
+
+    // 🔴 RAMA B: USB / UDP CRUDO (STACK OSI PERSONALIZADO)
     const hdr = pkt.consumirCabecera(LimitesPila.TAMANO_CABECERA_TRANS);
     if (!hdr) return;
 
@@ -407,6 +494,31 @@ export class CapaTransporte {
   ): boolean {
     if (idDestino < 0 || idDestino >= LimitesPila.MAX_NODOS_RED) return false;
 
+    // 🟢 RAMA A: SWITCH DE CANAL PARA MEDIOS NATIVOS (Wi-Fi)
+    if (this.red.esNodoNativo(idDestino)) {
+      if (!this.red.estaNodoActivo(idDestino)) return false;
+
+      if (protocolo === CapaTransporte.PROTO_UDP) {
+        pkt.esDatagramaNativo = true;
+        return this.red.bajarPaqueteUnicast(idDestino, pkt);
+      }
+
+      // TCP Nativo: Anteponer el Record Marker de 4B (RFC 5531)
+      const lenRecord = pkt.longitud;
+      const marker = pkt.empujarCabecera(LimitesPila.TAMANO_RECORD_MARKER_TCP);
+      if (!marker) return false;
+
+      const valorMarker = (0x80000000 | (lenRecord & 0x7fffffff)) >>> 0;
+      marker[0] = (valorMarker >>> 24) & 0xff;
+      marker[1] = (valorMarker >>> 16) & 0xff;
+      marker[2] = (valorMarker >>> 8) & 0xff;
+      marker[3] = valorMarker & 0xff;
+
+      pkt.esDatagramaNativo = false;
+      return this.red.bajarPaqueteUnicast(idDestino, pkt);
+    }
+
+    // 🔴 RAMA B: USB / UDP CRUDO (STACK OSI PERSONALIZADO)
     if (protocolo === CapaTransporte.PROTO_UDP) {
       this.escribirCabeceraYCRC(pkt, CapaTransporte.PROTO_UDP, puertoOrigen, puertoDestino, 0, 0, 0);
       return this.red.bajarPaqueteUnicast(idDestino, pkt);

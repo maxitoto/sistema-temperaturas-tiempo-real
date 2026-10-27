@@ -47,6 +47,9 @@ export class CapaSesion {
   public static readonly ERR_AUTH_FALLIDA = 0x02;
   public static readonly ERR_SOBRE_INVALIDO = 0x03;
 
+  public static readonly TIPO_STREAM_REQ = 0x30;
+  public static readonly TIPO_STREAM_DATA = 0x31;
+
   private readonly nodos: EstadoNodoSesion[] = [];
   private contadorTickets = 1;
 
@@ -175,7 +178,6 @@ export class CapaSesion {
     return this.nodos[idNodo].sessionId;
   }
 
-  // Envía petición RPC (CALL) del Backend al Firmware y espera respuesta correlacionada por reqId
   public async enviarPeticionRPC(
     idNodo: number,
     pkt: BufferPaquete,
@@ -189,11 +191,12 @@ export class CapaSesion {
       CapaSesion.TIPO_RPC_REQ,
       this.nodos[idNodo].sessionId,
       pkt,
-      timeoutMs
+      timeoutMs,
+      CapaTransporte.PROTO_TCP,
+      CapaTransporte.PUERTO_RPC
     );
   }
 
-  // Envía respuesta RPC (REPLY) del Backend al Firmware cuando el Firmware invocó un procedimiento
   public bajarRespuesta(idNodo: number, reqId: number, pkt: BufferPaquete): boolean {
     if (!this.estaAutenticada(idNodo)) return false;
     return this.empujarSobreYEnviar(
@@ -201,23 +204,67 @@ export class CapaSesion {
       CapaSesion.TIPO_RPC_RES,
       this.nodos[idNodo].sessionId,
       reqId,
-      pkt
+      pkt,
+      CapaTransporte.PROTO_TCP,
+      CapaTransporte.PUERTO_RPC
     );
   }
 
-  // Envía un evento asíncrono unidireccional (reqId = 0)
-  public bajarEvento(idNodo: number, pkt: BufferPaquete, fiable = true): boolean {
+  public bajarEvento(idNodo: number, pkt: BufferPaquete): boolean {
     if (!this.estaAutenticada(idNodo)) return false;
-    const proto = fiable ? CapaTransporte.PROTO_TCP : CapaTransporte.PROTO_UDP;
-    const puerto = fiable ? CapaTransporte.PUERTO_RPC : CapaTransporte.PUERTO_EVENTOS;
     return this.empujarSobreYEnviar(
       idNodo,
       CapaSesion.TIPO_EVENTO,
       this.nodos[idNodo].sessionId,
       0,
       pkt,
-      proto,
-      puerto
+      CapaTransporte.PROTO_TCP,
+      CapaTransporte.PUERTO_RPC
+    );
+  }
+
+  public async consultarStream(
+    idNodo: number,
+    pkt: BufferPaquete,
+    timeoutMs = 1500
+  ): Promise<BufferPaquete> {
+    if (!this.estaAutenticada(idNodo)) {
+      throw new Error(`Nodo ${idNodo} no autenticado. Ejecute iniciarSesion(${idNodo}) primero.`);
+    }
+    return this.enviarConTicket(
+      idNodo,
+      CapaSesion.TIPO_STREAM_REQ,
+      this.nodos[idNodo].sessionId,
+      pkt,
+      timeoutMs,
+      CapaTransporte.PROTO_UDP,
+      CapaTransporte.PUERTO_EVENTOS
+    );
+  }
+
+  public bajarRespuestaStream(idNodo: number, reqId: number, pkt: BufferPaquete): boolean {
+    if (!this.estaAutenticada(idNodo)) return false;
+    return this.empujarSobreYEnviar(
+      idNodo,
+      CapaSesion.TIPO_STREAM_DATA,
+      this.nodos[idNodo].sessionId,
+      reqId,
+      pkt,
+      CapaTransporte.PROTO_UDP,
+      CapaTransporte.PUERTO_EVENTOS
+    );
+  }
+
+  public bajarStream(idNodo: number, pkt: BufferPaquete): boolean {
+    if (!this.estaAutenticada(idNodo)) return false;
+    return this.empujarSobreYEnviar(
+      idNodo,
+      CapaSesion.TIPO_STREAM_DATA,
+      this.nodos[idNodo].sessionId,
+      0,
+      pkt,
+      CapaTransporte.PROTO_UDP,
+      CapaTransporte.PUERTO_EVENTOS
     );
   }
 
@@ -257,7 +304,9 @@ export class CapaSesion {
     tipo: number,
     sesId: number,
     pkt: BufferPaquete,
-    timeoutMs = 5000
+    timeoutMs = 5000,
+    protocolo = CapaTransporte.PROTO_TCP,
+    puerto = CapaTransporte.PUERTO_RPC
   ): Promise<BufferPaquete> {
     const reqId = this.siguienteTicket();
     const clave = this.claveTicket(idNodo, reqId);
@@ -270,7 +319,7 @@ export class CapaSesion {
 
       this.pendientes.set(clave, { resolve, reject, timer });
 
-      if (!this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt)) {
+      if (!this.empujarSobreYEnviar(idNodo, tipo, sesId, reqId, pkt, protocolo, puerto)) {
         clearTimeout(timer);
         this.pendientes.delete(clave);
         reject(new Error("Fallo al transmitir sobre en la Capa de Transporte"));
@@ -348,7 +397,12 @@ export class CapaSesion {
     }
 
     // 1. Petición RPC entrante iniciada por el Firmware (CALL) o Evento asíncrono
-    if (tipo === CapaSesion.TIPO_RPC_REQ || tipo === CapaSesion.TIPO_EVENTO) {
+    if (
+      tipo === CapaSesion.TIPO_RPC_REQ ||
+      tipo === CapaSesion.TIPO_STREAM_REQ ||
+      tipo === CapaSesion.TIPO_EVENTO ||
+      (tipo === CapaSesion.TIPO_STREAM_DATA && reqId === 0)
+    ) {
       if (
         cli.estado !== EstadoAuth.AUTENTICADO ||
         sesIdRecibido === 0 ||
@@ -404,6 +458,7 @@ export class CapaSesion {
       tipo === CapaSesion.TIPO_HANDSHAKE_CHAL ||
       tipo === CapaSesion.TIPO_HANDSHAKE_OK ||
       tipo === CapaSesion.TIPO_RPC_RES ||
+      tipo === CapaSesion.TIPO_STREAM_DATA ||
       tipo === CapaSesion.TIPO_HEARTBEAT;
 
     if (!esRespuestaValida) {

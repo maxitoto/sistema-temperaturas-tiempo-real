@@ -1,47 +1,49 @@
 // Archivo: ./src/communication/common/BufferRed.h
 #pragma once
+
 #include <Arduino.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <rom/crc.h> // Rutinas CRC grabadas en la ROM de silicio del ESP32
+#include <rom/crc.h>   // crc16_be() acelerado por hardware ROM del ESP32
 
 namespace LimitesPila {
-    static constexpr int    MAX_NODOS_RED         = 4;   // 1 USB (0) + 3 Clientes Wi-Fi (1..3)
-    static constexpr size_t TAMANO_MAX_CHUNK      = 64;  // Fragmento físico máximo por ráfaga en USB
-    static constexpr size_t MAX_TRAMA_ENLACE      = 512; // MTU de la Capa de Enlace
+    static constexpr int    MAX_NODOS_RED            = 4;   
+    static constexpr size_t TAMANO_MAX_CHUNK         = 64;
+    static constexpr size_t MAX_TRAMA_ENLACE         = 512;
 
-    static constexpr size_t TAMANO_CABECERA_RED   = 2;   // [origen:4|destino:4][ttl:8]
-    static constexpr size_t TAMANO_CABECERA_TRANS = 10;  // [proto][srcPort][dstPort][flags][seq:2][ack:2][crc16:2]
-    static constexpr size_t TAMANO_SOBRE_SESION   = 8;   // [ver][tipo][sesId:2][reqId:2][len:2]
+    static constexpr size_t TAMANO_CABECERA_RED      = 2;
+    static constexpr size_t TAMANO_CABECERA_TRANS    = 10;
+    static constexpr size_t TAMANO_RECORD_MARKER_TCP = 4; // RFC 5531 Record Marking (Wi-Fi TCP)
+    static constexpr size_t TAMANO_SOBRE_SESION      = 8;
 
-    static constexpr size_t OFFSET_TRANSPORTE     = TAMANO_CABECERA_RED;
-    static constexpr size_t OFFSET_SESION         = OFFSET_TRANSPORTE + TAMANO_CABECERA_TRANS;
-    static constexpr size_t OFFSET_PAYLOAD_APP    = OFFSET_SESION + TAMANO_SOBRE_SESION; // 20 bytes
-    static constexpr size_t MAX_PAYLOAD_APP       = MAX_TRAMA_ENLACE - OFFSET_PAYLOAD_APP; // 492 bytes
+    static constexpr size_t OFFSET_TRANSPORTE        = TAMANO_CABECERA_RED;
+    static constexpr size_t OFFSET_SESION            = OFFSET_TRANSPORTE + TAMANO_CABECERA_TRANS;
+    static constexpr size_t OFFSET_PAYLOAD_APP       = OFFSET_SESION + TAMANO_SOBRE_SESION; // 20 bytes
+    static constexpr size_t MAX_PAYLOAD_APP          = MAX_TRAMA_ENLACE - OFFSET_PAYLOAD_APP; // 492 bytes
 }
 
-// Estructura Zero-Copy equivalente a sk_buff (Linux) / pbuf (lwIP)
-// Alineada a 4 bytes para acceso óptimo de 32 bits y DMA en arquitectura Xtensa LX6 (ESP32)
 struct BufferPaquete {
     int idNodo = -1;
+    bool esDatagramaNativo = false;
     alignas(4) uint8_t raw[LimitesPila::MAX_TRAMA_ENLACE];
     size_t inicio = LimitesPila::OFFSET_PAYLOAD_APP;
     size_t longitud = 0;
 
-    // Prepara el buffer para que Capa 6 escriba el payload directamente en el offset 20
     void prepararParaTx(int destino = -1) {
         idNodo = destino;
+        esDatagramaNativo = false;
         inicio = LimitesPila::OFFSET_PAYLOAD_APP;
         longitud = 0;
     }
 
-    // Prepara el buffer para que Capa 2 escriba desde el byte 0 en recepción
     void prepararParaRx(int origen = -1) {
         idNodo = origen;
+        esDatagramaNativo = false;
         inicio = 0;
         longitud = 0;
     }
+    // ... resto igual ...
 
     uint8_t* ptrActual() {
         return &raw[inicio];
