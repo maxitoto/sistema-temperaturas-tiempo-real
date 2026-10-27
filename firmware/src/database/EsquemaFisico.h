@@ -1,4 +1,4 @@
-// Archivo: ./src/database/EsquemaFisicoDB.h
+// Archivo: ./src/database/EsquemaFisico.h
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -40,154 +40,169 @@ namespace EsquemaFisicoDB {
     };
 
     // =========================================================================
-    // 1. TABLA: sensor (44 bytes por fila)
-    // Definición intrínseca del sensor (sin temperatura actual ni ubicación)
+    // 1. TABLA: sensor (48 bytes por fila - Alineación nativa 32-bit FPU)
     // =========================================================================
-    struct __attribute__((packed)) FilaSensor {
-        char     hexadecimal[17];    // PK: 16 chars hex + '\0'
-        uint16_t id_sensor;          // UNIQUE, INCREMENT
-        float    error_superior;     // default: 0.0f
-        float    error_inferior;     // default: 0.0f
-        float    umbral_superior;    // default: 126.0f
-        float    umbral_inferior;    // default: -126.0f
-        uint8_t  activa;             // default: 1
-        uint32_t fecha_creacion;     // Unix timestamp (seg)
-        uint32_t fecha_modificacion; // Unix timestamp (seg)
+    struct FilaSensor {
+        char     hexadecimal[17];    // Offset 0  (17B)
+        uint8_t  _pad0[1];           // Offset 17 (1B padding explícito)
+        uint16_t id_sensor;          // Offset 18 (2B)
+        float    error_superior;     // Offset 20 (4B)
+        float    error_inferior;     // Offset 24 (4B)
+        float    umbral_superior;    // Offset 28 (4B)
+        float    umbral_inferior;    // Offset 32 (4B)
+        uint8_t  activa;             // Offset 36 (1B)
+        uint8_t  _pad1[3];           // Offset 37 (3B padding explícito)
+        uint32_t fecha_creacion;     // Offset 40 (4B)
+        uint32_t fecha_modificacion; // Offset 44 (4B)
     };
+    static_assert(sizeof(FilaSensor) == 48, "FilaSensor debe medir exactamente 48 bytes en ESP32");
 
     // =========================================================================
-    // 2. TABLA: senso (24 bytes por fila)
-    // Evaluación periódica del sensor en el tiempo (ej. cada 2 minutos)
+    // 2. TABLA: senso (28 bytes por fila - Alineación nativa 32-bit FPU)
     // =========================================================================
-    struct __attribute__((packed)) FilaSenso {
-        uint32_t id_senso;              // PK, INCREMENT
-        uint16_t id_sensor;             // FK -> FilaSensor.id_sensor
-        float    temperatura_cruda;     // NOT NULL
-        float    temperatura_corregida; // NOT NULL
-        uint8_t  estado_sensor;         // EstadoSensor (OK, -127, ruido, umbral...)
-        uint8_t  activa;                // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaSenso {
+        uint32_t id_senso;              // Offset 0  (4B)
+        uint16_t id_sensor;             // Offset 4  (2B)
+        uint8_t  _pad0[2];              // Offset 6  (2B padding explícito)
+        float    temperatura_cruda;     // Offset 8  (4B)
+        float    temperatura_corregida; // Offset 12 (4B)
+        uint8_t  estado_sensor;         // Offset 16 (1B)
+        uint8_t  activa;                // Offset 17 (1B)
+        uint8_t  _pad1[2];              // Offset 18 (2B padding explícito)
+        uint32_t fecha_creacion;        // Offset 20 (4B)
+        uint32_t fecha_modificacion;    // Offset 24 (4B)
     };
+    static_assert(sizeof(FilaSenso) == 28, "FilaSenso debe medir exactamente 28 bytes en ESP32");
 
     // =========================================================================
-    // 3. TABLA: evento_sensor (22 bytes por fila)
-    // Confirmación de cambio de estado tras período anti-falsos positivos
+    // 3. TABLA: evento_sensor (24 bytes por fila)
     // =========================================================================
-    struct __attribute__((packed)) FilaEventoSensor {
-        uint32_t id_evento_sensor;     // PK, INCREMENT
-        uint16_t id_sensor;            // FK -> FilaSensor.id_sensor
-        uint32_t id_senso;             // FK -> FilaSenso.id_senso
-        uint8_t  estado_previo_sensor; // EstadoSensor anterior
-        uint8_t  evento;               // EstadoSensor nuevo confirmado
-        uint8_t  criticidad;           // CriticidadEvento
-        uint8_t  activa;               // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaEventoSensor {
+        uint32_t id_evento_sensor;     // Offset 0  (4B)
+        uint16_t id_sensor;            // Offset 4  (2B)
+        uint8_t  _pad0[2];             // Offset 6  (2B padding explícito)
+        uint32_t id_senso;             // Offset 8  (4B)
+        uint8_t  estado_previo_sensor; // Offset 12 (1B)
+        uint8_t  evento;               // Offset 13 (1B)
+        uint8_t  criticidad;           // Offset 14 (1B)
+        uint8_t  activa;               // Offset 15 (1B)
+        uint32_t fecha_creacion;       // Offset 16 (4B)
+        uint32_t fecha_modificacion;   // Offset 20 (4B)
     };
+    static_assert(sizeof(FilaEventoSensor) == 24, "FilaEventoSensor debe medir exactamente 24 bytes en ESP32");
 
     // =========================================================================
-    // 4. TABLA: auditoria (63 bytes por fila)
-    // Registro de acciones de usuarios en el firmware (umbrales, login, reset)
+    // 4. TABLA: auditoria (64 bytes por fila)
     // =========================================================================
-    struct __attribute__((packed)) FilaAuditoria {
-        uint32_t id_auditoria;       // PK, INCREMENT
-        uint16_t id_usuario;         // FK -> FilaUsuario.id_usuario
-        char     accion[24];         // Ej: "CAMBIO_UMBRAL", "LOGIN", "REINICIO"
-        char     detalle[24];        // Ej: "Sensor #1: -18 a -20"
-        uint8_t  activa;             // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaAuditoria {
+        uint32_t id_auditoria;       // Offset 0  (4B)
+        uint16_t id_usuario;         // Offset 4  (2B)
+        char     accion[24];         // Offset 6  (24B)
+        char     detalle[24];        // Offset 30 (24B)
+        uint8_t  activa;             // Offset 54 (1B)
+        uint8_t  _pad0[1];           // Offset 55 (1B padding explícito)
+        uint32_t fecha_creacion;     // Offset 56 (4B)
+        uint32_t fecha_modificacion; // Offset 60 (4B)
     };
+    static_assert(sizeof(FilaAuditoria) == 64, "FilaAuditoria debe medir exactamente 64 bytes en ESP32");
 
     // =========================================================================
-    // 5. TABLA: correos (109 bytes por fila)
-    // Destinatarios de notificaciones por correo electrónico
+    // 5. TABLA: correos (112 bytes por fila)
     // =========================================================================
-    struct __attribute__((packed)) FilaCorreo {
-        uint16_t id_correo;               // PK, INCREMENT
-        char     nombre[24];              // NOT NULL
-        char     apellido[24];            // NULLABLE ("" si vacío)
-        char     correo_electronico[48];  // NOT NULL
-        uint8_t  tipo_recepcion_mensajes; // default: RECIBIR_TODOS (0)
-        uint8_t  estado_envio;            // default: ENVIO_PENDIENTE (0)
-        uint8_t  activa;                  // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaCorreo {
+        uint16_t id_correo;               // Offset 0   (2B)
+        char     nombre[24];              // Offset 2   (24B)
+        char     apellido[24];            // Offset 26  (24B)
+        char     correo_electronico[48];  // Offset 50  (48B)
+        uint8_t  tipo_recepcion_mensajes; // Offset 98  (1B)
+        uint8_t  estado_envio;            // Offset 99  (1B)
+        uint8_t  activa;                  // Offset 100 (1B)
+        uint8_t  _pad0[3];                // Offset 101 (3B padding explícito)
+        uint32_t fecha_creacion;          // Offset 104 (4B)
+        uint32_t fecha_modificacion;      // Offset 108 (4B)
     };
+    static_assert(sizeof(FilaCorreo) == 112, "FilaCorreo debe medir exactamente 112 bytes en ESP32");
 
     // =========================================================================
-    // 6. TABLA: usuarios (64 bytes por fila)
-    // Autenticación y autorización de acciones en el servidor del firmware
+    // 6. TABLA: usuarios (64 bytes por fila - Alineación natural exacta)
     // =========================================================================
-    struct __attribute__((packed)) FilaUsuario {
-        uint16_t id_usuario;         // PK, INCREMENT
-        char     usuario[20];        // UNIQUE, NOT NULL
-        uint8_t  contrasena[32];     // Hash SHA-256 binario
-        uint8_t  rol;                // default: ROL_REGULAR (0)
-        uint8_t  activa;             // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaUsuario {
+        uint16_t id_usuario;         // Offset 0  (2B)
+        char     usuario[20];        // Offset 2  (20B)
+        uint8_t  contrasena[32];     // Offset 22 (32B - SHA-256 binario)
+        uint8_t  rol;                // Offset 54 (1B)
+        uint8_t  activa;             // Offset 55 (1B)
+        uint32_t fecha_creacion;     // Offset 56 (4B)
+        uint32_t fecha_modificacion; // Offset 60 (4B)
     };
+    static_assert(sizeof(FilaUsuario) == 64, "FilaUsuario debe medir exactamente 64 bytes en ESP32");
 
     // =========================================================================
-    // 7. TABLA SINGLETON (PK=1): configuracion_smtp (188 bytes)
-    // Se reemplaza el registro 1 conservando fecha_creacion
+    // 7. TABLA SINGLETON (PK=1): configuracion_smtp (192 bytes)
     // =========================================================================
-    struct __attribute__((packed)) FilaConfiguracionSMTP {
-        uint8_t  id_configuracion_smtp; // PK, default: 1
-        char     host_smtp[40];         // NOT NULL
-        uint16_t puerto;                // NOT NULL (ej. 587)
-        char     usuario[40];           // NOT NULL
-        char     password[48];          // NOT NULL
-        char     email_remitente[48];   // NOT NULL
-        uint8_t  activa;                // default: 1
-        uint32_t fecha_creacion;        // Inmutable al reemplazar
-        uint32_t fecha_modificacion;
+    struct FilaConfiguracionSMTP {
+        uint8_t  id_configuracion_smtp; // Offset 0   (1B)
+        char     host_smtp[40];         // Offset 1   (40B)
+        uint8_t  _pad0[1];              // Offset 41  (1B padding explícito)
+        uint16_t puerto;                // Offset 42  (2B)
+        char     usuario[40];           // Offset 44  (40B)
+        char     password[48];          // Offset 84  (48B)
+        char     email_remitente[48];   // Offset 132 (48B)
+        uint8_t  activa;                // Offset 180 (1B)
+        uint8_t  _pad1[3];              // Offset 181 (3B padding explícito)
+        uint32_t fecha_creacion;        // Offset 184 (4B)
+        uint32_t fecha_modificacion;    // Offset 188 (4B)
     };
+    static_assert(sizeof(FilaConfiguracionSMTP) == 192, "FilaConfiguracionSMTP debe medir exactamente 192 bytes en ESP32");
 
     // =========================================================================
-    // 8. TABLA: servidores_ntp (50 bytes por fila)
-    // Lista persistente de servidores NTP
+    // 8. TABLA: servidores_ntp (52 bytes por fila)
     // =========================================================================
-    struct __attribute__((packed)) FilaServidorNTP {
-        uint8_t  id_server;          // PK, INCREMENT
-        char     server[40];         // NOT NULL (ej. "pool.ntp.org")
-        uint8_t  activa;             // default: 1
-        uint32_t fecha_creacion;
-        uint32_t fecha_modificacion;
+    struct FilaServidorNTP {
+        uint8_t  id_server;          // Offset 0  (1B)
+        char     server[40];         // Offset 1  (40B)
+        uint8_t  activa;             // Offset 41 (1B)
+        uint8_t  _pad0[2];           // Offset 42 (2B padding explícito)
+        uint32_t fecha_creacion;     // Offset 44 (4B)
+        uint32_t fecha_modificacion; // Offset 48 (4B)
     };
+    static_assert(sizeof(FilaServidorNTP) == 52, "FilaServidorNTP debe medir exactamente 52 bytes en ESP32");
 
     // =========================================================================
-    // 9. TABLA SINGLETON (PK=1): lts (202 bytes)
-    // Certificado y clave privada persistidos en el firmware
+    // 9. TABLA SINGLETON (PK=1): lts (208 bytes)
     // =========================================================================
-    struct __attribute__((packed)) FilaLTS {
-        uint8_t  id_lts;                  // PK, default: 1
-        char     nombre_certificado[24];  // NOT NULL
-        char     certificado[64];         // NOT NULL
-        uint8_t  clave_privada[32];       // NOT NULL
-        char     cadena_certificados[64]; // NULLABLE
-        uint32_t fecha_inicio_vigencia;
-        uint32_t fecha_fin_vigencia;
-        uint8_t  activa;                  // default: 1
-        uint32_t fecha_creacion;          // Inmutable al reemplazar
-        uint32_t fecha_modificacion;
+    struct FilaLTS {
+        uint8_t  id_lts;                  // Offset 0   (1B)
+        char     nombre_certificado[24];  // Offset 1   (24B)
+        char     certificado[64];         // Offset 25  (64B)
+        uint8_t  clave_privada[32];       // Offset 89  (32B - PSK AES-256)
+        char     cadena_certificados[64]; // Offset 121 (64B)
+        uint8_t  _pad0[3];                // Offset 185 (3B padding explícito)
+        uint32_t fecha_inicio_vigencia;   // Offset 188 (4B)
+        uint32_t fecha_fin_vigencia;      // Offset 192 (4B)
+        uint8_t  activa;                  // Offset 196 (1B)
+        uint8_t  _pad1[3];                // Offset 197 (3B padding explícito)
+        uint32_t fecha_creacion;          // Offset 200 (4B)
+        uint32_t fecha_modificacion;      // Offset 204 (4B)
     };
+    static_assert(sizeof(FilaLTS) == 208, "FilaLTS debe medir exactamente 208 bytes en ESP32");
 
     // =========================================================================
-    // 10. TABLA SINGLETON (PK=1): configuracion_conectividad (206 bytes)
-    // Credenciales Wi-Fi STA y AP persistidas para sobrevivir reinicios
+    // 10. TABLA SINGLETON (PK=1): configuracion_conectividad (212 bytes)
     // =========================================================================
-    struct __attribute__((packed)) FilaConfiguracionConectividad {
-        uint8_t  id_configuracion_conectividad; // PK, default: 1
-        char     SSID_STA[33];                  // default: ""
-        char     STA_password[65];              // default: ""
-        char     SSID_AP[33];                   // default: ""
-        char     AP_password[65];               // default: ""
-        uint8_t  activa;                        // default: 1
-        uint32_t fecha_creacion;                // Inmutable al reemplazar
-        uint32_t fecha_modificacion;
+    struct FilaConfiguracionConectividad {
+        uint8_t  id_configuracion_conectividad; // Offset 0   (1B)
+        char     SSID_STA[33];                  // Offset 1   (33B)
+        char     STA_password[65];              // Offset 34  (65B)
+        char     SSID_AP[33];                   // Offset 99  (33B)
+        char     AP_password[65];               // Offset 132 (65B)
+        uint8_t  _pad0[1];                      // Offset 197 (1B padding explícito)
+        uint16_t puerto_udp;                    // Offset 198 (2B)
+        uint8_t  activa;                        // Offset 200 (1B)
+        uint8_t  _pad1[3];                      // Offset 201 (3B padding explícito)
+        uint32_t fecha_creacion;                // Offset 204 (4B)
+        uint32_t fecha_modificacion;            // Offset 208 (4B)
     };
+    static_assert(sizeof(FilaConfiguracionConectividad) == 212, "FilaConfiguracionConectividad debe medir exactamente 212 bytes en ESP32");
 
 }

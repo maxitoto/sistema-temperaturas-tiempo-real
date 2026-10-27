@@ -1,4 +1,4 @@
-// ./src/plugins/microsd/MicroSD.h
+// Archivo: ./src/plugins/microsd/MicroSD.h
 #pragma once
 #include <Arduino.h>
 #include <SPI.h>
@@ -6,17 +6,19 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "const/Pines.h"
 
 // Handle opaco para operaciones de archivo (INVALID_HANDLE = -1)
 typedef int8_t HandleSD;
 
 class MicroSD {
   public:
-    static const HandleSD HANDLE_INVALIDO      = -1;
-    static const size_t   MAX_HANDLES_ABIERTOS = 4;
-    static const uint32_t BYTES_POR_SECTOR     = 512;
+    static constexpr HandleSD HANDLE_INVALIDO      = -1;
+    static constexpr size_t   MAX_HANDLES_ABIERTOS = 4;
+    static constexpr uint32_t BYTES_POR_SECTOR     = 512;
+    static constexpr uint32_t FREC_SPI_RAPIDA_HZ   = 16000000UL; // 16 MHz nativo en VSPI ESP32
+    static constexpr uint32_t FREC_SPI_SEGURA_HZ   = 4000000UL;  // 4 MHz fallback para cables largos
 
-    // 4.1. Catálogo explícito de resultados y errores de diagnóstico
     enum ResultadoSD : uint8_t {
         OK = 0,
         ERR_NO_CARD,
@@ -46,7 +48,6 @@ class MicroSD {
         ESTADO_ERROR_IO
     };
 
-    // Callback para enumerar entradas de un directorio: (nombre, esDirectorio, tamanoBytes)
     typedef bool (*CallbackDirectorio)(const char* nombre, bool esDirectorio, uint64_t tamanoBytes);
 
   private:
@@ -83,25 +84,28 @@ class MicroSD {
     }
 
   public:
-    explicit MicroSD(uint8_t cs, uint32_t relojHz = 4000000UL)
+    explicit MicroSD(uint8_t cs = Pines::PIN_SD_CS, uint32_t relojHz = FREC_SPI_RAPIDA_HZ)
         : pinCS(cs), frecRelojHz(relojHz), montada(false), codUltimoError(OK) {}
 
     // =========================================================================
-    // 2.1. CICLO DE VIDA Y MONTAJE
+    // 2.1. CICLO DE VIDA Y MONTAJE (Puro ESP-WROOM-32 VSPI)
     // =========================================================================
     bool inicializar(int maxIntentos = 3) {
+        SPI.begin(Pines::PIN_SD_SCK, Pines::PIN_SD_MISO, Pines::PIN_SD_MOSI, pinCS);
+
         for (int i = 0; i < maxIntentos; i++) {
-            #if defined(ESP32)
-                bool ok = SD.begin(pinCS, SPI, frecRelojHz);
-            #else
-                bool ok = SD.begin(pinCS);
-            #endif
-            if (ok) {
+            // En el último intento baja a 4 MHz por si el cableado externo tiene capacitancia
+            uint32_t clk = (i == maxIntentos - 1 && frecRelojHz > FREC_SPI_SEGURA_HZ)
+                             ? FREC_SPI_SEGURA_HZ
+                             : frecRelojHz;
+
+            if (SD.begin(pinCS, SPI, clk, "/sd", MAX_HANDLES_ABIERTOS)) {
+                frecRelojHz = clk;
                 montada = true;
                 codUltimoError = OK;
                 return true;
             }
-            delay(250);
+            delay(200);
             yield();
         }
         montada = false;
@@ -118,9 +122,7 @@ class MicroSD {
                 slots[i].ocupado = false;
             }
         }
-        #if defined(ESP32)
-            SD.end();
-        #endif
+        SD.end();
         montada = false;
         codUltimoError = OK;
         return true;
@@ -131,24 +133,16 @@ class MicroSD {
     }
 
     // =========================================================================
-    // 2.2. CONSULTA DE CAPACIDAD Y ESPACIO
+    // 2.2. CONSULTA DE CAPACIDAD Y ESPACIO (Nativo ESP32 FatFS)
     // =========================================================================
     uint64_t bytesTotales() {
         if (!montada) { codUltimoError = ERR_NO_MONTADO; return 0; }
-        #if defined(ESP32)
-            return SD.totalBytes();
-        #else
-            return 0; // En ESP8266 SD wrapper estándar no expone totalBytes sin FatFS directo
-        #endif
+        return SD.totalBytes();
     }
 
     uint64_t bytesOcupados() {
         if (!montada) { codUltimoError = ERR_NO_MONTADO; return 0; }
-        #if defined(ESP32)
-            return SD.usedBytes();
-        #else
-            return 0;
-        #endif
+        return SD.usedBytes();
     }
 
     uint64_t bytesLibres() {
@@ -184,7 +178,6 @@ class MicroSD {
         return idx;
     }
 
-    // Abre un archivo existente o lo crea para añadir datos al final (Append)
     HandleSD abrirEscritura(const char* path) {
         if (!montada) { codUltimoError = ERR_NO_MONTADO; return HANDLE_INVALIDO; }
         if (!path)    { codUltimoError = ERR_PARAMETRO_INVALIDO; return HANDLE_INVALIDO; }
@@ -192,12 +185,7 @@ class MicroSD {
         int8_t idx = reservarSlot();
         if (idx == HANDLE_INVALIDO) return HANDLE_INVALIDO;
 
-        #if defined(ESP8266)
-            File f = SD.open(path, FILE_WRITE);
-            if (f && f.size() > 0) f.seek(f.size());
-        #else
-            File f = SD.exists(path) ? SD.open(path, FILE_APPEND) : SD.open(path, FILE_WRITE);
-        #endif
+        File f = SD.exists(path) ? SD.open(path, FILE_APPEND) : SD.open(path, FILE_WRITE);
         if (!f) {
             codUltimoError = ERR_IO_ESCRITURA;
             return HANDLE_INVALIDO;
@@ -210,7 +198,6 @@ class MicroSD {
         return idx;
     }
 
-    // Abre en modo lectura/escritura posicional sin truncar el archivo existente
     HandleSD abrirLecturaYEscritura(const char* path) {
         if (!montada) { codUltimoError = ERR_NO_MONTADO; return HANDLE_INVALIDO; }
         if (!path)    { codUltimoError = ERR_PARAMETRO_INVALIDO; return HANDLE_INVALIDO; }
@@ -218,11 +205,7 @@ class MicroSD {
         int8_t idx = reservarSlot();
         if (idx == HANDLE_INVALIDO) return HANDLE_INVALIDO;
 
-        #if defined(ESP8266)
-            File f = SD.open(path, FILE_WRITE);
-        #else
-            File f = SD.exists(path) ? SD.open(path, "r+") : SD.open(path, "w+");
-        #endif
+        File f = SD.exists(path) ? SD.open(path, "r+") : SD.open(path, "w+");
         if (!f) {
             codUltimoError = ERR_ARCHIVO_NO_ENCONTRADO;
             return HANDLE_INVALIDO;
@@ -235,7 +218,6 @@ class MicroSD {
         return idx;
     }
 
-    // Crea un archivo nuevo en blanco (falla con ERR_YA_EXISTE si ya existía)
     HandleSD crearArchivo(const char* path) {
         if (!montada) { codUltimoError = ERR_NO_MONTADO; return HANDLE_INVALIDO; }
         if (!path)    { codUltimoError = ERR_PARAMETRO_INVALIDO; return HANDLE_INVALIDO; }
@@ -329,7 +311,6 @@ class MicroSD {
         return true;
     }
 
-    // Cierre de handle con garantía de integridad física (flush explícito + actualización FAT)
     bool cerrarSeguro(HandleSD h) {
         if (!validarHandle(h)) return false;
         if (slots[h].modoEscritura) {
@@ -433,13 +414,11 @@ class MicroSD {
     // =========================================================================
     TipoTarjeta tipoTarjeta() const {
         if (!montada) return TARJETA_NINGUNA;
-        #if defined(ESP32)
-            uint8_t t = SD.cardType();
-            if (t == CARD_MMC)  return TARJETA_MMC;
-            if (t == CARD_SD)   return TARJETA_SDSC;
-            if (t == CARD_SDHC) return TARJETA_SDHC;
-            if (t == CARD_NONE) return TARJETA_NINGUNA;
-        #endif
+        uint8_t t = SD.cardType();
+        if (t == CARD_MMC)  return TARJETA_MMC;
+        if (t == CARD_SD)   return TARJETA_SDSC;
+        if (t == CARD_SDHC) return TARJETA_SDHC;
+        if (t == CARD_NONE) return TARJETA_NINGUNA;
         return TARJETA_DESCONOCIDA;
     }
 
@@ -473,7 +452,6 @@ class MicroSD {
         return true;
     }
 
-    // Cierre global seguro: vuelca todos los handles y desmonta el sistema de archivos
     bool cerrarSeguro() {
         return desmontar();
     }
