@@ -6,6 +6,8 @@
 .vscode/ipch
 .vscode/settings.json
 
+# Wokwi microSd
+sdcard/*
 
 #para la IA
 migration
