@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <esp_system.h>
 #include <mbedtls/gcm.h>
+#include <esp_timer.h>
 #include "communication/layers/CapaAplicacion.h"
 #include "state/EstadoSistema.h"
 #include "debug/DebugOLED.h"
@@ -162,6 +163,14 @@ namespace ServerExampleStub {
         return { usr.id_usuario, usr.rol, true };
     }
 
+    static void reiniciarEnCallback(void*) {
+        Serial.println("[RPC] Reinicio remoto solicitado. Reiniciando...");
+        Serial.flush();
+        DebugOLED::registrarError("REBOOT RPC");
+        delay(50);          // margen para que el UART drene
+        esp_restart();      // no retorna
+    }
+
     // =========================================================================
     // 2. SEEDING INICIAL EN LA MICROSD (Certificado + 3 Usuarios + Sensor + NTP)
     // =========================================================================
@@ -231,7 +240,8 @@ namespace ServerExampleStub {
         return strcmp(comando, RPC_GUARDAR_CONFIG_SEGURA) == 0 ||
                strcmp(comando, RPC_DB_GUARDAR_SENSOR) == 0 ||
                strcmp(comando, RPC_DB_CREAR_CORREO) == 0 ||
-               strcmp(comando, RPC_DB_GUARDAR_RED) == 0;
+               strcmp(comando, RPC_DB_GUARDAR_RED) == 0 ||
+               strcmp(comando, RPC_REINICIAR_FIRMWARE) == 0;
     }
 
     inline bool evaluarPoliticaProcesoUsuario(
@@ -339,6 +349,35 @@ namespace ServerExampleStub {
     // =========================================================================
     class FirmwareImpl : public IFirmware {
       public:
+
+        bool reiniciarFirmware(const UsuarioCredencialDTO& cred) override {
+            ContextoSesionSGBD sesion = construirSesionDesdeCredencial(cred);
+            if (!sesion.autenticado) return false;
+
+            gEstadoSistema.totalLlamadasRecibidas++;
+
+            // Best-effort: dejar rastro en auditoría antes de apagar
+            repositorios().auditorias.registrar(
+                sesion.idUsuario, "REINICIO_RPC",
+                "Reboot remoto via RPC", gEstadoSistema.ultimoUnixTimestamp, sesion);
+
+            // Programar reinicio asíncrono a 800ms. La respuesta RPC ya salió del handler,
+            // así que cuando dispare, el frontend ya recibió ["OK", true].
+            esp_timer_handle_t timer = nullptr;
+            esp_timer_create_args_t args = {};
+            args.callback        = &reiniciarEnCallback;
+            args.arg             = nullptr;
+            args.dispatch_method = ESP_TIMER_TASK;
+            args.name            = "rpc_reboot";
+
+            if (esp_timer_create(&args, &timer) != ESP_OK) return false;
+            if (esp_timer_start_once(timer, 800ULL * 1000ULL) != ESP_OK) {
+                esp_timer_delete(timer);
+                return false;
+            }
+            return true;
+        }
+
         RespuestaDatosEnVivoDTO leerDatosEnVivo() override {
             gEstadoSistema.totalLlamadasRecibidas++;
             float valorRandom = -20.0f + ((float)(esp_random() % 101) * 0.1f);
@@ -763,6 +802,17 @@ namespace ServerExampleStub {
             return resp.iniciarArray(2) &&
                    resp.escribirTexto("OK") &&
                    serializarFilaUsuarioResumen(resp, actualizado);
+        });
+        
+        appRpc.onRequest(RPC_REINICIAR_FIRMWARE, [](size_t cantArgs, LectorMsgPack& args,
+                                            EscritorMsgPack& resp, const MetaCall&) -> bool {
+            CredencialRpcDTO auth;
+            if (cantArgs < 4 || !auth.deserializar(args)) return false;
+
+            bool ok = servicioFirmware()->reiniciarFirmware(auth.usuario);
+            return resp.iniciarArray(2) &&
+                resp.escribirTexto("OK") &&
+                resp.escribirBool(ok);
         });
     }
 

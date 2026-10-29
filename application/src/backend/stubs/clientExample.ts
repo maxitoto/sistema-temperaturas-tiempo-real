@@ -22,6 +22,7 @@ import {
   RespuestaDatosEnVivo,
   ActualizarUsuarioFirmwareInput,
   UsuarioFirmwareResumenDTO,
+  RespuestaReiniciarFirmwareDTO,
 } from "./contratos";
 
 // =========================================================================
@@ -139,6 +140,21 @@ function mapearTuplaSensor(t: TuplaSensor): SensorFirmwareDTO {
 // 2. STUB CLIENTE RPC: Implementa IFirmware con propiedades enumerables
 // =========================================================================
 export class FirmwareStub implements IFirmware {
+
+  public readonly reiniciarFirmware = async (
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
+  ): Promise<RespuestaReiniciarFirmwareDTO> => {
+    // Timeout ajustado: el firmware responde ["OK", true] inmediatamente y
+    // recién 800ms después ejecuta esp_restart(). Con 5s por defecto alcanza
+    // de sobra, pero dejamos margen explícito para redes lentas.
+    const [reiniciando] = await pila.appRpc.request<[boolean]>(
+      RPC.REINICIAR_FIRMWARE,
+      [...serializarCredencial(cred)],
+      { ...opts, timeoutMs: opts?.timeoutMs ?? 5000 }
+    );
+    return { reiniciando: Boolean(reiniciando) };
+  };
 
   public readonly leerDatosEnVivo = async (
     opts?: OpcionesLlamada

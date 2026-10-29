@@ -13,6 +13,7 @@ namespace Contratos {
     static const char* const RPC_SUMAR_Y_ESTADO          = "RPC_SUMAR_Y_ESTADO";
     static const char* const RPC_GUARDAR_CONFIG_SEGURA   = "RPC_GUARDAR_CONFIG_SEGURA";
     static const char* const RPC_SYNC_RELOJ              = "RPC_SYNC_RELOJ";
+    static const char* const RPC_REINICIAR_FIRMWARE      = "RPC_REINICIAR_FIRMWARE";
 
     // Endpoints RPC de Base de Datos (DQL y DML autenticados)
     static const char* const RPC_DB_LISTAR_SENSORES      = "RPC_DB_LISTAR_SENSORES";
@@ -237,6 +238,7 @@ namespace Contratos {
     class IFirmware {
       public:
         virtual ~IFirmware() = default;
+        virtual bool reiniciarFirmware(const UsuarioCredencialDTO& cred) = 0;
         virtual RespuestaDatosEnVivoDTO leerDatosEnVivo() = 0;
         virtual RespuestaEstado sumarYEstado(float base, float factor) = 0;
         virtual bool guardarConfig(const UsuarioCredencialDTO& cred,

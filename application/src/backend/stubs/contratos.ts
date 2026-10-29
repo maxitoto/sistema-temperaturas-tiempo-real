@@ -152,8 +152,13 @@ export interface RespuestaDatosEnVivo {
   numeroRandom: number;
 }
 
+export interface RespuestaReiniciarFirmwareDTO {
+  reiniciando: boolean;
+}
+
 // ---------- Contrato: servicio que EXPONE el firmware (backend lo llama) ----------
 export interface IFirmware {
+  reiniciarFirmware: (cred: CredencialRpcDTO, opts?: OpcionesLlamada) => Promise<RespuestaReiniciarFirmwareDTO>;
   leerDatosEnVivo: () => Promise<RespuestaDatosEnVivo>;
   sumarYLeerEstado: (base: number, factor: number, opts?: OpcionesLlamada) => Promise<RespuestaCalculoFirmware>;
   guardarConfiguracionSegura: (dto: SolicitudConfigSeguraDTO, opts?: OpcionesLlamada) => Promise<RespuestaAuditoriaFirmwareDTO>;
@@ -196,4 +201,5 @@ export const RPC = {
   DB_GUARDAR_RED: "RPC_DB_GUARDAR_RED",
   DB_LISTAR_USUARIOS: "RPC_DB_LISTAR_USUARIOS",
   DB_ACTUALIZAR_USUARIO: "RPC_DB_ACTUALIZAR_USUARIO",
+  REINICIAR_FIRMWARE: "RPC_REINICIAR_FIRMWARE",
 } as const;
