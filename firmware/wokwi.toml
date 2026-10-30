@@ -1,19 +1,18 @@
 [wokwi]
 version = 1
-firmware = '.pio/build/WokwiSimulator/firmware.bin'
-elf = '.pio/build/WokWiSimulator/firmware.elf'
-private_gateway = true
+firmware = '.pio/build/esp32s_wokwi/firmware.bin'
+elf = '.pio/build/esp32s_wokwi/firmware.elf'
 
 rfc2217ServerPort = 4000
+
+[[sdcard]]
+folder = './sdcard'
+size = '32M'
+writeable = true
 
 [net]
 gateway = "ws://127.0.0.1:9011"
 
-[[sdcard]]
-folder = 'sdcard'      # carpeta local que se copia a la tarjeta al iniciar y donde se vuelca al terminar
-writeback = true       # guarda los cambios del firmware en la carpeta local
-size = '8M'            # capacidad (por defecto 8M, máximo 256M)
-
-#[[net.forward]] #red gateway
-#from = "127.0.0.1:9081"
-#to = "target:81" 
+[[net.forward]] #red gateway
+from = "127.0.0.1:9080"
+to = "target:80" 

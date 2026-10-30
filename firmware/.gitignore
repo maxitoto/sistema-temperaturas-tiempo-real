@@ -8,6 +8,7 @@
 
 #microSd Wokwi Se llena con las simulaciones de wokwi
 sdcard/*
+!wokwi-project.txt
 
 
 #para la IA
@@ -17,4 +18,3 @@ migration/*
 *.log
 *.txt
 
-!wokwi-project.txt
