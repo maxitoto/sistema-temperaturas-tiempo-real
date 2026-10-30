@@ -87,25 +87,9 @@ export const consultasMixtas = {
         }),
 
     obtenerSensoresEnriquecidosConFirmware: async (
-        cred: CredencialRpcDTO,
-        opts?: OpcionesLlamada
+    cred: CredencialRpcDTO,
+    opts?: OpcionesLlamada
     ) => {
-        const [sensoresFisicos, metadatosLocales] = await Promise.all([
-        firmware.listarSensoresFirmware(cred, opts),
-        sensorRepository.getSensores(),
-        ]);
-
-        const mapaMeta = new Map(metadatosLocales.map((m) => [m.hexadecimal, m]));
-
-        return sensoresFisicos.map((sf) => {
-            const meta = mapaMeta.get(sf.hexadecimal);
-            return {
-                ...sf,
-                nombre: meta?.nombre ?? `Sensor ${sf.hexadecimal.slice(-4)}`,
-                descripcion: meta?.descripcion ?? null,
-                ubicacion: meta?.ubicacion ?? "Sin ubicación asignada",
-                ubicacionDescripcion: meta?.ubicacion_descripcion ?? null,
-            };
-        });
+        return await firmware.listarSensoresFirmware(cred, opts);
     }
 };

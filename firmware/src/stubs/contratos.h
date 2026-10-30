@@ -70,17 +70,46 @@ namespace Contratos {
     };
 
     struct GuardarSensorInputDTO {
-        char  hexadecimal[17];
-        float errorSuperior;
-        float errorInferior;
-        float umbralSuperior;
-        float umbralInferior;
+        char  hexadecimal[17]          = {0};
+        char  nombre[32]               = {0};
+        char  descripcion[64]          = {0};
+        char  ubicacion[32]            = {0};
+        char  ubicacionDescripcion[64] = {0};
+        float correcionSuperior        = 0.0f;
+        float correcionInferior        = 0.0f;
+        float altura                   = 0.0f;
+        float presionAtmosferica       = 1013.25f;
+        float umbralSuperior           = 126.0f;
+        float umbralInferior           = -126.0f;
+
         bool deserializar(LectorMsgPack& r) {
             return r.leerTexto(hexadecimal, sizeof(hexadecimal)) &&
-                   r.leerFloat(errorSuperior) &&
-                   r.leerFloat(errorInferior) &&
+                   r.leerTexto(nombre, sizeof(nombre)) &&
+                   r.leerTexto(descripcion, sizeof(descripcion)) &&
+                   r.leerTexto(ubicacion, sizeof(ubicacion)) &&
+                   r.leerTexto(ubicacionDescripcion, sizeof(ubicacionDescripcion)) &&
+                   r.leerFloat(correcionSuperior) &&
+                   r.leerFloat(correcionInferior) &&
+                   r.leerFloat(altura) &&
+                   r.leerFloat(presionAtmosferica) &&
                    r.leerFloat(umbralSuperior) &&
                    r.leerFloat(umbralInferior);
+        }
+
+        FilaSensor aFilaSensor() const {
+            FilaSensor f = {};
+            strncpy(f.hexadecimal, hexadecimal, sizeof(f.hexadecimal) - 1);
+            strncpy(f.nombre, nombre, sizeof(f.nombre) - 1);
+            strncpy(f.descripcion, descripcion, sizeof(f.descripcion) - 1);
+            strncpy(f.ubicacion, ubicacion, sizeof(f.ubicacion) - 1);
+            strncpy(f.ubicacion_descripcion, ubicacionDescripcion, sizeof(f.ubicacion_descripcion) - 1);
+            f.correcion_superior  = correcionSuperior;
+            f.correcion_inferior  = correcionInferior;
+            f.altura              = altura;
+            f.presion_atmosferica = presionAtmosferica;
+            f.umbral_superior     = umbralSuperior;
+            f.umbral_inferior     = umbralInferior;
+            return f;
         }
     };
 
@@ -98,17 +127,28 @@ namespace Contratos {
     };
 
     struct GuardarRedInputDTO {
-        char    ssidSta[33];
-        uint8_t passStaCifrada[64];
-        size_t  lenPassSta = 0;
-        char    ssidAp[33];
-        uint8_t passApCifrada[64];
-        size_t  lenPassAp = 0;
+        char     ssidSta[33]        = {0};
+        uint8_t  passStaCifrada[64] = {0};
+        size_t   lenPassSta         = 0;
+        char     ssidAp[33]         = {0};
+        uint8_t  passApCifrada[64]  = {0};
+        size_t   lenPassAp          = 0;
+        uint32_t puertoTcp          = 80;
+        uint32_t puertoUdp          = 81;
+        uint32_t baudiosUsb         = 115200;
+
         bool deserializar(LectorMsgPack& r) {
-            return r.leerTexto(ssidSta, sizeof(ssidSta)) &&
-                   r.leerBinario(passStaCifrada, sizeof(passStaCifrada), lenPassSta) &&
-                   r.leerTexto(ssidAp, sizeof(ssidAp)) &&
-                   r.leerBinario(passApCifrada, sizeof(passApCifrada), lenPassAp);
+            if (!r.leerTexto(ssidSta, sizeof(ssidSta)) ||
+                !r.leerBinario(passStaCifrada, sizeof(passStaCifrada), lenPassSta) ||
+                !r.leerTexto(ssidAp, sizeof(ssidAp)) ||
+                !r.leerBinario(passApCifrada, sizeof(passApCifrada), lenPassAp)) {
+                return false;
+            }
+            // Campos opcionales con fallback por defecto
+            if (r.hayDatos()) r.leerUInt32(puertoTcp);
+            if (r.hayDatos()) r.leerUInt32(puertoUdp);
+            if (r.hayDatos()) r.leerUInt32(baudiosUsb);
+            return true;
         }
     };
 
@@ -171,11 +211,17 @@ namespace Contratos {
     };
 
     inline bool serializarFilaSensor(EscritorMsgPack& w, const FilaSensor& f) {
-        return w.iniciarArray(9) &&
+        return w.iniciarArray(15) &&
                w.escribirUInt(f.id_sensor) &&
                w.escribirTexto(f.hexadecimal) &&
-               w.escribirFloat(f.error_superior) &&
-               w.escribirFloat(f.error_inferior) &&
+               w.escribirTexto(f.nombre) &&
+               w.escribirTexto(f.descripcion) &&
+               w.escribirTexto(f.ubicacion) &&
+               w.escribirTexto(f.ubicacion_descripcion) &&
+               w.escribirFloat(f.correcion_superior) &&
+               w.escribirFloat(f.correcion_inferior) &&
+               w.escribirFloat(f.altura) &&
+               w.escribirFloat(f.presion_atmosferica) &&
                w.escribirFloat(f.umbral_superior) &&
                w.escribirFloat(f.umbral_inferior) &&
                w.escribirUInt(f.activa) &&

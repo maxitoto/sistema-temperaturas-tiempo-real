@@ -20,17 +20,21 @@ const CREDENCIAL_DEFAULT: CredencialRpcDTO = {
   pinHash: 'HASH_ADMIN_2026',
 };
 
-// =========================================================================
-// HELPERS
-// =========================================================================
+// --- HELPERS (sustituye los existentes) ---
 const fmtTs = (unixSeg?: number | null): string => {
   if (!unixSeg) return '—';
   return new Date(unixSeg * 1000).toLocaleString();
 };
 
 const fmtTemp = (n?: number | null): string => {
-  if (n === undefined || n === null) return '—';
-  return `${n.toFixed(2)} °C`;
+  if (!Number.isFinite(n)) return '—';   // cubre undefined, null, NaN
+  return `${(n as number).toFixed(2)} °C`;
+};
+
+// NEW: número genérico con decimales configurables
+const fmtNum = (n?: number | null, decimals = 2): string => {
+  if (!Number.isFinite(n)) return '—';
+  return (n as number).toFixed(decimals);
 };
 
 // =========================================================================
@@ -269,10 +273,10 @@ function SensoresTab({ cred }: { cred: CredencialRpcDTO }) {
                   {s.ubicacionDescripcion && <div className="dbx-muted">{s.ubicacionDescripcion}</div>}
                 </td>
                 <td className="dbx-table__num">
-                  {s.umbralInferior.toFixed(1)} / {s.umbralSuperior.toFixed(1)}
+                  {fmtNum(s.umbralInferior, 1)} / {fmtNum(s.umbralSuperior, 1)}
                 </td>
                 <td className="dbx-table__num">
-                  {s.errorInferior.toFixed(2)} / {s.errorSuperior.toFixed(2)}
+                  {fmtNum(s.errorInferior, 2)} / {fmtNum(s.errorSuperior, 2)}
                 </td>
                 <td>
                   <span className={`dbx-pill ${s.activa ? 'dbx-pill--ok' : 'dbx-pill--off'}`}>

@@ -23,6 +23,7 @@ import {
   ActualizarUsuarioFirmwareInput,
   UsuarioFirmwareResumenDTO,
   RespuestaReiniciarFirmwareDTO,
+  ResultadoGuardarRedFirmwareDTO,
 } from "./contratos";
 
 // =========================================================================
@@ -116,23 +117,34 @@ function serializarCredencial(cred: CredencialRpcDTO): [string, string, string, 
   ];
 }
 
-type TuplaSensor = [number, string, number, number, number, number, number, number, number];
+type TuplaSensor = [
+  number, string, string, string, string, string,
+  number, number, number, number, number, number,
+  number, number, number
+];
 type TuplaSenso = [number, number, number, number, number, number];
 type TuplaEvento = [number, number, number, number, number, number, number];
 type TuplaAuditoria = [number, number, string, string, number];
 type TuplaCorreo = [number, string, string, string, number, number, number];
 
+
 function mapearTuplaSensor(t: TuplaSensor): SensorFirmwareDTO {
   return {
     idSensor: Number(t[0]),
     hexadecimal: String(t[1]),
-    errorSuperior: Number(t[2]),
-    errorInferior: Number(t[3]),
-    umbralSuperior: Number(t[4]),
-    umbralInferior: Number(t[5]),
-    activa: Number(t[6]),
-    fechaCreacion: Number(t[7]),
-    fechaModificacion: Number(t[8]),
+    nombre: String(t[2] ?? ""),
+    descripcion: String(t[3] ?? ""),
+    ubicacion: String(t[4] ?? ""),
+    ubicacionDescripcion: String(t[5] ?? ""),
+    correcionSuperior: Number(t[6]),
+    correcionInferior: Number(t[7]),
+    altura: Number(t[8]),
+    presionAtmosferica: Number(t[9]),
+    umbralSuperior: Number(t[10]),
+    umbralInferior: Number(t[11]),
+    activa: Number(t[12]),
+    fechaCreacion: Number(t[13]),
+    fechaModificacion: Number(t[14]),
   };
 }
 
@@ -244,8 +256,14 @@ export class FirmwareStub implements IFirmware {
       [
         ...serializarCredencial(input.credencial),
         input.hexadecimal,
-        Number(input.errorSuperior),
-        Number(input.errorInferior),
+        input.nombre,
+        input.descripcion ?? "",
+        input.ubicacion,
+        input.ubicacionDescripcion ?? "",
+        Number(input.correcionSuperior),
+        Number(input.correcionInferior),
+        Number(input.altura),
+        Number(input.presionAtmosferica),
         Number(input.umbralSuperior),
         Number(input.umbralInferior),
       ],
@@ -386,14 +404,27 @@ export class FirmwareStub implements IFirmware {
     cred: CredencialRpcDTO,
     opts?: OpcionesLlamada
   ): Promise<ConfigRedYNtpFirmwareDTO> => {
-    const [ssidSta, ssidAp, fechaModificacion, servidoresNtp] = await pila.appRpc.call<
-      [string, string, number, string[]]
+    const [
+      ssidSta, ssidAp, puertoTcp, puertoUdp, baudiosUsb,
+      fechaModificacion, staConectado, ipSta, apActivo,
+      ipAp, macWiFi, clientesUdpActivos, servidoresNtp,
+    ] = await pila.appRpc.call<
+      [string, string, number, number, number, number, boolean, string, boolean, string, string, number, string[]]
     >(RPC.DB_OBTENER_RED_Y_NTP, [...serializarCredencial(cred)], opts);
 
     return {
       ssidSta: String(ssidSta),
       ssidAp: String(ssidAp),
+      puertoTcp: Number(puertoTcp),
+      puertoUdp: Number(puertoUdp),
+      baudiosUsb: Number(baudiosUsb),
       fechaModificacion: Number(fechaModificacion),
+      staConectado: Boolean(staConectado),
+      ipSta: String(ipSta),
+      apActivo: Boolean(apActivo),
+      ipAp: String(ipAp),
+      macWiFi: String(macWiFi),
+      clientesUdpActivos: Number(clientesUdpActivos),
       servidoresNtp: (servidoresNtp ?? []).map(String),
     };
   };
@@ -401,26 +432,35 @@ export class FirmwareStub implements IFirmware {
   public readonly guardarConfigRedFirmware = async (
     input: GuardarRedFirmwareInput,
     opts?: OpcionesLlamada
-  ): Promise<{ ssidSta: string; ssidAp: string; fechaModificacion: number }> => {
+  ): Promise<ResultadoGuardarRedFirmwareDTO> => {
     const passStaBin = encriptarCampoSensible(input.passwordStaPlana);
     const passApBin = encriptarCampoSensible(input.passwordApPlana);
 
-    const [ssidSta, ssidAp, fechaModificacion] = await pila.appRpc.call<[string, string, number]>(
-      RPC.DB_GUARDAR_RED,
-      [
-        ...serializarCredencial(input.credencial),
-        input.ssidSta,
-        passStaBin,
-        input.ssidAp,
-        passApBin,
-      ],
-      opts
-    );
+    const [ssidSta, ssidAp, puertoTcp, puertoUdp, baudiosUsb, fechaModificacion] =
+      await pila.appRpc.call<[string, string, number, number, number, number]>(
+        RPC.DB_GUARDAR_RED,
+        [
+          ...serializarCredencial(input.credencial),
+          input.ssidSta,
+          passStaBin,
+          input.ssidAp,
+          passApBin,
+          Number(input.puertoTcp ?? 80),
+          Number(input.puertoUdp ?? 81),
+          Number(input.baudiosUsb ?? 115200),
+        ],
+        opts
+      );
 
     return {
       ssidSta: String(ssidSta),
       ssidAp: String(ssidAp),
+      puertoTcp: Number(puertoTcp),
+      puertoUdp: Number(puertoUdp),
+      baudiosUsb: Number(baudiosUsb),
       fechaModificacion: Number(fechaModificacion),
+      requiereReinicio: true,
+      mensaje: "Configuración guardada en /db/wifi.bin. Reinicie el ESP32 para aplicar los cambios de red.",
     };
   };
 

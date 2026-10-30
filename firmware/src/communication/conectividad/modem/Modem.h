@@ -125,10 +125,6 @@ class Modem {
         return (ap && ap->estaActiva()) ? ap->obtenerIP() : String("0.0.0.0");
     }
 
-    uint16_t obtenerPuertoUDP() const {
-        return tcp ? (uint16_t)tcp->obtenerPuerto() : 80;
-    }
-
     uint8_t obtenerClientesUDPActivos() const {
         return tcp ? (uint8_t)tcp->contarClientesActivos() : 0;
     }
@@ -148,4 +144,14 @@ class Modem {
 
     bool tieneInternetReal() const { return estadoInternet; }
     String obtenerMAC() const      { return WiFi.macAddress(); }
+    
+    uint16_t obtenerPuertoTCP() const {
+        return tcp ? (uint16_t)tcp->obtenerPuerto() : 80;
+    }
+
+    uint16_t obtenerPuertoUDP() const {
+        return tcp ? (uint16_t)tcp->obtenerPuertoUDP() : 81;
+    }
 };
+
+extern Modem modem;

@@ -40,25 +40,28 @@ namespace Repositories {
             return orm ? orm->buscarSensorPorHex(hex, out, sesion) : false;
         }
 
-        bool guardarSensor(const char* hex, float errSup, float errInf, float umbSup, float umbInf,
-                           uint32_t ahoraSeg, FilaSensor& outGuardado, const ContextoSesionSGBD& sesion) {
-            if (!orm || !hex) return false;
+        bool guardarSensor(const FilaSensor& datosEntrada,
+                           uint32_t ahoraSeg,
+                           FilaSensor& outGuardado,
+                           const ContextoSesionSGBD& sesion) {
+            if (!orm || datosEntrada.hexadecimal[0] == '\0') return false;
             FilaSensor existente = {};
-            if (orm->buscarSensorPorHex(hex, existente, sesion)) {
-                existente.error_superior  = errSup;
-                existente.error_inferior  = errInf;
-                existente.umbral_superior = umbSup;
-                existente.umbral_inferior = umbInf;
+            if (orm->buscarSensorPorHex(datosEntrada.hexadecimal, existente, sesion)) {
+                strncpy(existente.nombre, datosEntrada.nombre, sizeof(existente.nombre) - 1);
+                strncpy(existente.descripcion, datosEntrada.descripcion, sizeof(existente.descripcion) - 1);
+                strncpy(existente.ubicacion, datosEntrada.ubicacion, sizeof(existente.ubicacion) - 1);
+                strncpy(existente.ubicacion_descripcion, datosEntrada.ubicacion_descripcion, sizeof(existente.ubicacion_descripcion) - 1);
+                existente.correcion_superior  = datosEntrada.correcion_superior;
+                existente.correcion_inferior  = datosEntrada.correcion_inferior;
+                existente.altura              = datosEntrada.altura;
+                existente.presion_atmosferica = datosEntrada.presion_atmosferica;
+                existente.umbral_superior     = datosEntrada.umbral_superior;
+                existente.umbral_inferior     = datosEntrada.umbral_inferior;
                 if (!orm->sensor.actualizarPorId(existente.id_sensor, existente, ahoraSeg, sesion)) return false;
                 outGuardado = existente;
                 return true;
             }
-            FilaSensor nuevo = {};
-            strncpy(nuevo.hexadecimal, hex, sizeof(nuevo.hexadecimal) - 1);
-            nuevo.error_superior  = errSup;
-            nuevo.error_inferior  = errInf;
-            nuevo.umbral_superior = umbSup;
-            nuevo.umbral_inferior = umbInf;
+            FilaSensor nuevo = datosEntrada;
             if (!orm->sensor.crear(nuevo, ahoraSeg, sesion)) return false;
             outGuardado = nuevo;
             return true;

@@ -16,6 +16,17 @@ export interface RespuestaCalculoFirmware {
   heapLibreBytes: number;
 }
 
+export interface ResultadoGuardarRedFirmwareDTO {
+  ssidSta: string;
+  ssidAp: string;
+  puertoTcp: number;
+  puertoUdp: number;
+  baudiosUsb: number;
+  fechaModificacion: number;
+  requiereReinicio: boolean;
+  mensaje: string;
+}
+
 export interface SolicitudConfigSeguraDTO {
   emisorCertificado: string;
   firmaCertificado: string;
@@ -41,8 +52,14 @@ export interface RespuestaAuditoriaFirmwareDTO {
 export interface SensorFirmwareDTO {
   idSensor: number;
   hexadecimal: string;
-  errorSuperior: number;
-  errorInferior: number;
+  nombre: string;
+  descripcion: string;
+  ubicacion: string;
+  ubicacionDescripcion: string;
+  correcionSuperior: number;
+  correcionInferior: number;
+  altura: number;
+  presionAtmosferica: number;
   umbralSuperior: number;
   umbralInferior: number;
   activa: number;
@@ -53,8 +70,14 @@ export interface SensorFirmwareDTO {
 export interface GuardarSensorFirmwareInput {
   credencial: CredencialRpcDTO;
   hexadecimal: string;
-  errorSuperior: number;
-  errorInferior: number;
+  nombre: string;
+  descripcion?: string;
+  ubicacion: string;
+  ubicacionDescripcion?: string;
+  correcionSuperior: number;
+  correcionInferior: number;
+  altura: number;
+  presionAtmosferica: number;
   umbralSuperior: number;
   umbralInferior: number;
 }
@@ -131,7 +154,16 @@ export interface ConfigSmtpFirmwareResumenDTO {
 export interface ConfigRedYNtpFirmwareDTO {
   ssidSta: string;
   ssidAp: string;
+  puertoTcp: number;
+  puertoUdp: number;
+  baudiosUsb: number;
   fechaModificacion: number;
+  staConectado: boolean;
+  ipSta: string;
+  apActivo: boolean;
+  ipAp: string;
+  macWiFi: string;
+  clientesUdpActivos: number;
   servidoresNtp: string[];
 }
 
@@ -141,6 +173,9 @@ export interface GuardarRedFirmwareInput {
   passwordStaPlana: string;
   ssidAp: string;
   passwordApPlana: string;
+  puertoTcp?: number;
+  puertoUdp?: number;
+  baudiosUsb?: number;
 }
 
 export interface RespuestaReloj {

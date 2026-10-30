@@ -207,19 +207,26 @@ namespace ServerExampleStub {
                 u.rol = rol;
                 orm.usuarios.crear(u, tsBoot);
             };
-            sembrarUsuario("admin",      "Admin1234",     ROL_ADMIN);
-            sembrarUsuario("encargado1", "Encargado1234", ROL_REGULAR);
-            sembrarUsuario("encargado2", "Encargado1234", ROL_REGULAR);
+            sembrarUsuario("silvana_admin", "HASH_ADMIN_2026", ROL_ADMIN);
+            sembrarUsuario("juan_operador", "HASH_OPER_2026",  ROL_REGULAR);
+            sembrarUsuario("encargado2",    "HASH_OPER_2026",  ROL_REGULAR);
         }
 
         // C. Semilla de Sensor por defecto (/db/sensor.bin)
         if (orm.sensor.contarTotal() == 0) {
             FilaSensor sensorInicial = {};
-            strncpy(sensorInicial.hexadecimal, "28FF641E82160450", sizeof(sensorInicial.hexadecimal) - 1);
-            sensorInicial.error_inferior  = 0.0f;
-            sensorInicial.error_superior  = 0.0f;
-            sensorInicial.umbral_inferior = -18.0f;
-            sensorInicial.umbral_superior = -12.0f;
+            strncpy(sensorInicial.hexadecimal, "28FF641E82160450", sizeof(sensorInicial.hexadecimal));
+            sensorInicial.hexadecimal[sizeof(sensorInicial.hexadecimal) - 1] = '\0';
+            strncpy(sensorInicial.nombre, "Sensor Principal Heladera", sizeof(sensorInicial.nombre) - 1);
+            strncpy(sensorInicial.descripcion, "Sonda DS18B20 sumergida en glicol", sizeof(sensorInicial.descripcion) - 1);
+            strncpy(sensorInicial.ubicacion, "Laboratorio UNTDF", sizeof(sensorInicial.ubicacion) - 1);
+            strncpy(sensorInicial.ubicacion_descripcion, "Sector Biología - Heladera 01", sizeof(sensorInicial.ubicacion_descripcion) - 1);
+            sensorInicial.correcion_inferior  = 0.0f;
+            sensorInicial.correcion_superior  = 0.0f;
+            sensorInicial.altura              = 12.0f;
+            sensorInicial.presion_atmosferica = 1011.8f;
+            sensorInicial.umbral_inferior     = -18.0f;
+            sensorInicial.umbral_superior     = -12.0f;
             orm.sensor.crear(sensorInicial, tsBoot);
         }
 
@@ -413,16 +420,9 @@ namespace ServerExampleStub {
 
             FilaSensor sensorFila = {};
             if (repositorios().sensores.buscarPorId(1, sensorFila, sesionUsr)) {
-                repositorios().sensores.guardarSensor(
-                    sensorFila.hexadecimal,
-                    sensorFila.error_superior,
-                    sensorFila.error_inferior,
-                    cfg.tempMax,
-                    cfg.tempMin,
-                    ahoraSeg,
-                    sensorFila,
-                    sesionUsr
-                );
+                sensorFila.umbral_superior = cfg.tempMax;
+                sensorFila.umbral_inferior = cfg.tempMin;
+                repositorios().sensores.guardarSensor(sensorFila, ahoraSeg, sensorFila, sesionUsr);
             }
 
             FilaConfiguracionSMTP smtpFila = {};
@@ -465,12 +465,11 @@ namespace ServerExampleStub {
             return repositorios().sensores.listarActivos(out, maxItems, sesion);
         }
 
-        bool guardarSensor(const UsuarioCredencialDTO& cred, const GuardarSensorInputDTO& in, FilaSensor& out) override {
+       bool guardarSensor(const UsuarioCredencialDTO& cred, const GuardarSensorInputDTO& in, FilaSensor& out) override {
             ContextoSesionSGBD sesion = construirSesionDesdeCredencial(cred);
             uint32_t ahora = gEstadoSistema.ultimoUnixTimestamp;
-            if (!repositorios().sensores.guardarSensor(
-                    in.hexadecimal, in.errorSuperior, in.errorInferior,
-                    in.umbralSuperior, in.umbralInferior, ahora, out, sesion)) {
+            FilaSensor datos = in.aFilaSensor();
+            if (!repositorios().sensores.guardarSensor(datos, ahora, out, sesion)) {
                 return false;
             }
             char det[24] = {0};
@@ -539,6 +538,9 @@ namespace ServerExampleStub {
             desencriptarCampoSensible(in.passStaCifrada, in.lenPassSta, outRed.STA_password, sizeof(outRed.STA_password));
             strncpy(outRed.SSID_AP, in.ssidAp, sizeof(outRed.SSID_AP) - 1);
             desencriptarCampoSensible(in.passApCifrada, in.lenPassAp, outRed.AP_password, sizeof(outRed.AP_password));
+            outRed.puerto_tcp  = (uint16_t)(in.puertoTcp > 0 ? in.puertoTcp : 80);
+            outRed.puerto_udp  = (uint16_t)(in.puertoUdp > 0 ? in.puertoUdp : 81);
+            outRed.baudios_usb = in.baudiosUsb > 0 ? in.baudiosUsb : 115200;
 
             if (!repositorios().configuraciones.guardarConectividad(outRed, ahora, sesion)) return false;
             repositorios().auditorias.registrar(sesion.idUsuario, "CAMBIO_WIFI", outRed.SSID_STA, ahora, sesion);
@@ -631,11 +633,11 @@ namespace ServerExampleStub {
             return true;
         });
 
-        appRpc.onRequest(RPC_DB_GUARDAR_SENSOR, [](size_t cantArgs, LectorMsgPack& args,
+        appRpc.onRequest(RPC_DB_GUARDAR_SENSOR, [](size_t, LectorMsgPack& args,
                                                    EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             GuardarSensorInputDTO in;
-            if (cantArgs < 9 || !auth.deserializar(args) || !in.deserializar(args)) return false;
+            if (!auth.deserializar(args) || !in.deserializar(args)) return false;
 
             FilaSensor guardado = {};
             if (!servicioFirmware()->guardarSensor(auth.usuario, in, guardado)) return false;
@@ -736,21 +738,37 @@ namespace ServerExampleStub {
                    resp.escribirUInt(smtp.fecha_modificacion);
         });
 
-        appRpc.onRequest(RPC_DB_OBTENER_RED_Y_NTP, [](size_t cantArgs, LectorMsgPack& args,
+        appRpc.onRequest(RPC_DB_OBTENER_RED_Y_NTP, [](size_t, LectorMsgPack& args,
                                                       EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
-            if (cantArgs < 4 || !auth.deserializar(args)) return false;
+            if (!auth.deserializar(args)) return false;
 
             FilaConfiguracionConectividad red = {};
             FilaServidorNTP ntp[4];
             size_t totalNtp = 0;
             servicioFirmware()->obtenerConfigRedYNtp(auth.usuario, red, ntp, totalNtp);
 
-            if (!resp.iniciarArray(5) ||
+            uint16_t ptoTcp = red.puerto_tcp > 0 ? red.puerto_tcp : modem.obtenerPuertoTCP();
+            uint16_t ptoUdp = red.puerto_udp > 0 ? red.puerto_udp : modem.obtenerPuertoUDP();
+            uint32_t baudios = red.baudios_usb > 0 ? red.baudios_usb : 115200;
+            String ipSta = modem.obtenerIPSta();
+            String ipAp  = modem.obtenerIPAp();
+            String mac   = modem.obtenerMAC();
+
+            if (!resp.iniciarArray(14) ||
                 !resp.escribirTexto("OK") ||
                 !resp.escribirTexto(red.SSID_STA) ||
                 !resp.escribirTexto(red.SSID_AP) ||
+                !resp.escribirUInt(ptoTcp) ||
+                !resp.escribirUInt(ptoUdp) ||
+                !resp.escribirUInt(baudios) ||
                 !resp.escribirUInt(red.fecha_modificacion) ||
+                !resp.escribirBool(modem.estaStaConectado()) ||
+                !resp.escribirTexto(ipSta.c_str()) ||
+                !resp.escribirBool(modem.estaApActiva()) ||
+                !resp.escribirTexto(ipAp.c_str()) ||
+                !resp.escribirTexto(mac.c_str()) ||
+                !resp.escribirUInt(modem.obtenerClientesUDPActivos()) ||
                 !resp.iniciarArray(totalNtp)) {
                 return false;
             }
@@ -760,18 +778,21 @@ namespace ServerExampleStub {
             return true;
         });
 
-        appRpc.onRequest(RPC_DB_GUARDAR_RED, [](size_t cantArgs, LectorMsgPack& args,
+        appRpc.onRequest(RPC_DB_GUARDAR_RED, [](size_t, LectorMsgPack& args,
                                                 EscritorMsgPack& resp, const MetaCall&) -> bool {
             CredencialRpcDTO auth;
             GuardarRedInputDTO in;
-            if (cantArgs < 8 || !auth.deserializar(args) || !in.deserializar(args)) return false;
+            if (!auth.deserializar(args) || !in.deserializar(args)) return false;
 
             FilaConfiguracionConectividad red = {};
             if (!servicioFirmware()->guardarConfigRed(auth.usuario, in, red)) return false;
-            return resp.iniciarArray(4) &&
+            return resp.iniciarArray(7) &&
                    resp.escribirTexto("OK") &&
                    resp.escribirTexto(red.SSID_STA) &&
                    resp.escribirTexto(red.SSID_AP) &&
+                   resp.escribirUInt(red.puerto_tcp) &&
+                   resp.escribirUInt(red.puerto_udp) &&
+                   resp.escribirUInt(red.baudios_usb) &&
                    resp.escribirUInt(red.fecha_modificacion);
         });
 

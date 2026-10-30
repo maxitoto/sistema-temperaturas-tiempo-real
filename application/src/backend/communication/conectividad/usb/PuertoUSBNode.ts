@@ -15,14 +15,8 @@ export class PuertoUSBNode implements MedioFisico {
   private oyentesDatos: Array<(datos: Uint8Array) => void> = [];
   private conectado = false;
 
-  // VIDs típicos de placas ESP8266 / ESP32:
-  // 10C4 = Silicon Labs (CP2102/CP2104)
-  // 1A86 = QinHeng Electronics (CH340/CH341/CH9102)
-  // 0403 = FTDI
-  // 303A = Espressif Systems (USB nativo ESP32-S2/S3/C3)
   private static readonly VIDS_ESP = new Set(["10c4", "1a86", "0403", "303a"]);
 
-  // Lista todos los puertos y marca cuáles son placas ESP
   public static async listarPuertos(): Promise<InfoPuertoSerial[]> {
     const puertos = await SerialPort.list();
     const resultado: InfoPuertoSerial[] = puertos.map((p) => {
@@ -49,7 +43,6 @@ export class PuertoUSBNode implements MedioFisico {
       };
     });
 
-    // Soporte directo para puente virtual socat + Wokwi (/tmp/virtual_serial)
     const rutaSocat = "/tmp/virtual_serial";
     if (fs.existsSync(rutaSocat) && !resultado.some((r) => r.path === rutaSocat)) {
       resultado.unshift({
@@ -62,14 +55,12 @@ export class PuertoUSBNode implements MedioFisico {
     return resultado;
   }
 
-  // Busca automáticamente el primer puerto que coincida con un ESP8266/ESP32
   public static async detectarPuertoESP(): Promise<string | null> {
     const lista = await PuertoUSBNode.listarPuertos();
     const candidato = lista.find((p) => p.esCandidatoESP);
     return candidato ? candidato.path : null;
   }
 
-  // Conecta al puerto indicado (o lo auto-detecta si no se envía path). Baudios opcionales (default 115200)
   public async conectar(pathManual?: string, baudRate: number = 115200): Promise<string> {
     await this.desconectar();
 
@@ -85,13 +76,7 @@ export class PuertoUSBNode implements MedioFisico {
         path: pathFinal,
         baudRate,
         autoOpen: false,
-      });
-
-      this.puerto.on("open", () => {
-        this.puerto?.flush(() => {
-          this.conectado = true;
-          resolve(pathFinal);
-        });
+        hupcl: false, // 1. Evita que el sistema operativo baje DTR al cerrar o abrir
       });
 
       this.puerto.on("data", (chunk: Buffer) => {
@@ -114,7 +99,19 @@ export class PuertoUSBNode implements MedioFisico {
         if (err) {
           this.conectado = false;
           reject(new Error(`No se pudo abrir ${pathFinal} a ${baudRate} bps: ${err.message}`));
+          return;
         }
+
+        // 2. Liberar de inmediato las líneas DTR y RTS para que el ESP32 no quede trabado en Bootloader
+        this.puerto?.set({ dtr: false, rts: false }, () => {
+          // 3. Dar margen al ESP32 para que finalice setup() si sufrió un reinicio eléctrico por el driver
+          setTimeout(() => {
+            this.puerto?.flush(() => {
+              this.conectado = true;
+              resolve(pathFinal);
+            });
+          }, 1800);
+        });
       });
     });
   }
@@ -125,17 +122,18 @@ export class PuertoUSBNode implements MedioFisico {
         this.conectado = false;
         return resolve();
       }
-      this.puerto.close(() => {
-        this.conectado = false;
-        this.puerto = null;
-        resolve();
+
+      // Asegurar que DTR y RTS permanezcan inactivos antes de cerrar el descriptor
+      this.puerto.set({ dtr: false, rts: false }, () => {
+        this.puerto?.close(() => {
+          this.conectado = false;
+          this.puerto = null;
+          resolve();
+        });
       });
     });
   }
 
-  // ==========================================================
-  // CONTRATO DE MEDIO FÍSICO (Para CapaFisica.ts)
-  // ==========================================================
   public escribir(datos: Uint8Array): void {
     if (!this.puerto || !this.conectado) return;
     this.puerto.write(Buffer.from(datos));

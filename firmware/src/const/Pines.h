@@ -7,25 +7,25 @@
 // =============================================================================
 //
 //                               ┌───────────────────┐
-//                          3V3  │ 1              38 │ GND
-//                   [RST]  EN   │ 2              37 │ GPIO23 (VSPI_MOSI) -> [SD_MOSI]
+//                       ✓  3V3  │ 1              38 │ GND ✓
+//                   [RST]  EN   │ 2              37 │ GPIO23 (VSPI_MOSI) -> [SD_MOSI] ✓
 //        (ADC1_0 / IN)  GPIO36  │ 3  (VP)        36 │ GPIO22 (I2C_SCL)   -> [OLED_SCL] ✓
 //        (ADC1_3 / IN)  GPIO39  │ 4  (VN)        35 │ GPIO1  (UART0_TX)  -> [USB_TX]
 //        (ADC1_6 / IN)  GPIO34  │ 5              34 │ GPIO3  (UART0_RX)  -> [USB_RX]
 //        (ADC1_7 / IN)  GPIO35  │ 6              33 │ GPIO21 (I2C_SDA)   -> [OLED_SDA] ✓
 //        (ADC1_4 / IO)  GPIO32  │ 7              32 │ GND
-//        (ADC1_5 / IO)  GPIO33  │ 8              31 │ GPIO19 (VSPI_MISO) -> [SD_MISO]
-//  [LED] (DAC1   / IO)  GPIO25  │ 9              30 │ GPIO18 (VSPI_SCK)  -> [SD_SCK]
-//  [BUZ] (DAC2   / IO)  GPIO26  │ 10             29 │ GPIO5  (VSPI_CS0)  -> [SD_CS]
+//        (ADC1_5 / IO)  GPIO33  │ 8              31 │ GPIO19 (VSPI_MISO) -> [SD_MISO] ✓
+// ✓[LED] (DAC1   / IO)  GPIO25  │ 9              30 │ GPIO18 (VSPI_SCK)  -> [SD_SCK] ✓
+// ✓[BUZ] (DAC2   / IO)  GPIO26  │ 10             29 │ GPIO5  (VSPI_CS0)  -> [SD_CS] ✓
 //        (ADC2_7 / IO)  GPIO27  │ 11             28 │ GPIO17 (UART2_TX)
 //        (HSPI_CLK)     GPIO14  │ 12             27 │ GPIO16 (UART2_RX)
-//        (HSPI_MISO)    GPIO12* │ 13             26 │ GPIO4  (1-WIRE)    -> [SENSOR_TEMP]
+//        (HSPI_MISO)    GPIO12* │ 13             26 │ GPIO4  (1-WIRE)    -> [SENSOR_TEMP] ✓
 //                          GND  │ 14             25 │ GPIO0* (BOOT_BTN)
 //        (HSPI_MOSI)    GPIO13  │ 15             24 │ GPIO2* (LED_INTERNO)
 //        [FLASH_D2]     GPIO9 ! │ 16             23 │ GPIO15*(HSPI_CS0)
 //        [FLASH_D3]     GPIO10! │ 17             22 │ GPIO8 ! [FLASH_D1]
 //        [FLASH_CMD]    GPIO11! │ 18             21 │ GPIO7 ! [FLASH_D0]
-//                       VIN 5V  │ 19             20 │ GPIO6 ! [FLASH_CLK]
+//                     ✓ VIN 5V  │ 19             20 │ GPIO6 ! [FLASH_CLK]
 //                               └─────────┬─────────┘
 //                                     [USB-UART]
 //

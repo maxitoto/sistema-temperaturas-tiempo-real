@@ -1,4 +1,4 @@
-// Archivo: ./src/communication/conectividad/modem/ServidorTCP.h
+// Archivo: ./src/communication/conectividad/modem/ServidorWiFi.h
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
@@ -79,6 +79,19 @@ class ServidorWiFi {
         servidorActivo = false;
     }
 
+    void cambiarPuertos(int nuevoPuertoTcp, int nuevoPuertoUdp) {
+        if (nuevoPuertoTcp <= 0 || nuevoPuertoTcp > 65534) return;
+        if (nuevoPuertoUdp <= 0 || nuevoPuertoUdp > 65534) return;
+        if (nuevoPuertoTcp == puertoTcp && nuevoPuertoUdp == puertoUdp) return;
+
+        bool estabaActivo = servidorActivo;
+        if (estabaActivo) detener();
+        puertoTcp = nuevoPuertoTcp;
+        puertoUdp = nuevoPuertoUdp;
+        servidor = WiFiServer(puertoTcp);
+        if (estabaActivo) iniciar();
+    }
+
     void cambiarPuerto(int nuevoPuertoTcp) {
         if (nuevoPuertoTcp <= 0 || nuevoPuertoTcp > 65534) return;
         if (nuevoPuertoTcp == puertoTcp) return;
@@ -151,7 +164,7 @@ class ServidorWiFi {
                         datagramasRx[slot].pendiente  = true;
                     }
                 } else {
-                    udp.flush();
+                    udp.clear();
                 }
                 tam = udp.parsePacket();
             }
