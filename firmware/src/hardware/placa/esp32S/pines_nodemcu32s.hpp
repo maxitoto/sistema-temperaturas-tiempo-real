@@ -1,4 +1,4 @@
-// Archivo: ./src/hardware/placa/esp32S/pines_nodemcu32s.hpp
+// src/hardware/placa/esp32S/pines_nodemcu32s.hpp
 #pragma once
 #include <stdint.h>
 

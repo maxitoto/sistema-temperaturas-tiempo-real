@@ -1,0 +1,12 @@
+{
+  "folders": [
+    { "name": "application", "path": ".", "language": "ts" }
+  ],
+  "settings": {
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.intelliSenseMemoryLimit": 256
+  },
+  "extensions": {
+    "recommendations": []
+  }
+}
