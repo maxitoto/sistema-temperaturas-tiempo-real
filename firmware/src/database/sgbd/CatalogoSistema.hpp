@@ -1,9 +1,10 @@
+// Archivo: src/tests/SQLite/sgbd/CatalogoSistema.hpp
 #pragma once
 #include <Arduino.h>
 #include <map>
 #include <vector>
 #include "TiposSGBD.hpp"
-#include "../hardware/tarjetasd/TarjetaSD.hpp"
+#include "../../hardware/driver/tarjetasd/TarjetaSD.hpp"
 
 namespace SGBD {
 
@@ -16,7 +17,7 @@ namespace SGBD {
         bool esAutoIncrement = false;
         bool esNotNull = false;
         bool esUnique = false;
-        size_t maxVarchar = 0; // 0 = sin límite
+        size_t maxVarchar = 0;
         bool tieneDefault = false;
         String valorDefault = "";
         CheckPredicado fnCheck = nullptr;
@@ -51,27 +52,12 @@ namespace SGBD {
             }
             return nullptr;
         }
-
-        AtributoDef* obtenerAtributoMutable(const String& nombre) {
-            for (auto& a : atributos) {
-                if (a.nombre.equalsIgnoreCase(nombre)) return &a;
-            }
-            return nullptr;
-        }
-
-        String obtenerNombrePK() const {
-            for (const auto& a : atributos) {
-                if (a.esPk) return a.nombre;
-            }
-            return "id";
-        }
     };
 
     class CatalogoSistema {
     private:
         std::map<String, EsquemaTabla> esquemas;
         std::map<String, IndiceDef> indices;
-
         CatalogoSistema() = default;
 
     public:
@@ -86,34 +72,18 @@ namespace SGBD {
         String rutaTabla(const String& t) const { return "/db/" + t + ".tbl"; }
         String rutaTmp(const String& t) const   { return "/db/" + t + ".tmp"; }
         String rutaSeq(const String& t) const   { return "/db/" + t + ".seq"; }
-        String rutaIdx(const String& idx) const { return "/db/" + idx + ".idx"; }
+        String rutaIdx(const String& i) const   { return "/db/" + i + ".idx"; }
 
-        bool registrarEsquema(const EsquemaTabla& esq) {
-            esquemas[esq.nombreTabla] = esq;
-            return true;
-        }
+        void registrarEsquema(const EsquemaTabla& esq) { esquemas[esq.nombreTabla] = esq; }
+        bool existeEsquema(const String& t) const { return esquemas.find(t) != esquemas.end(); }
 
-        bool existeEsquema(const String& tabla) const {
-            return esquemas.find(tabla) != esquemas.end();
-        }
-
-        const EsquemaTabla* obtenerEsquema(const String& tabla) const {
-            auto it = esquemas.find(tabla);
+        const EsquemaTabla* obtenerEsquema(const String& t) const {
+            auto it = esquemas.find(t);
             return (it != esquemas.end()) ? &(it->second) : nullptr;
         }
 
-        EsquemaTabla* obtenerEsquemaMutable(const String& tabla) {
-            auto it = esquemas.find(tabla);
-            return (it != esquemas.end()) ? &(it->second) : nullptr;
-        }
-
-        const std::map<String, EsquemaTabla>& obtenerTodosLosEsquemas() const {
-            return esquemas;
-        }
-
-        void eliminarEsquema(const String& tabla) {
-            esquemas.erase(tabla);
-        }
+        const std::map<String, EsquemaTabla>& obtenerTodosLosEsquemas() const { return esquemas; }
+        void eliminarEsquema(const String& t) { esquemas.erase(t); }
 
         bool registrarIndice(const IndiceDef& idx) {
             indices[idx.nombreIndice] = idx;
@@ -121,17 +91,8 @@ namespace SGBD {
             return TarjetaSD::getInstance().escribirArchivo(rutaIdx(idx.nombreIndice).c_str(), meta.c_str());
         }
 
-        bool existeIndice(const String& nombreIdx) const {
-            return indices.find(nombreIdx) != indices.end();
-        }
-
-        IndiceDef* obtenerIndiceMutable(const String& nombreIdx) {
-            auto it = indices.find(nombreIdx);
-            return (it != indices.end()) ? &(it->second) : nullptr;
-        }
-
         bool eliminarIndice(const String& nombreIdx) {
-            if (!existeIndice(nombreIdx)) return false;
+            if (indices.find(nombreIdx) == indices.end()) return false;
             indices.erase(nombreIdx);
             return TarjetaSD::getInstance().eliminarArchivo(rutaIdx(nombreIdx).c_str());
         }
@@ -140,9 +101,7 @@ namespace SGBD {
             TarjetaSD& sd = TarjetaSD::getInstance();
             String rSeq = rutaSeq(tabla);
             String contenido = "0";
-            if (sd.existeArchivo(rSeq.c_str())) {
-                sd.leerArchivo(rSeq.c_str(), contenido);
-            }
+            if (sd.existeArchivo(rSeq.c_str())) sd.leerArchivo(rSeq.c_str(), contenido);
             uint32_t nuevoId = contenido.toInt() + 1;
             sd.escribirArchivo(rSeq.c_str(), String(nuevoId).c_str());
             return nuevoId;
@@ -165,9 +124,7 @@ namespace SGBD {
                 if (tab == -1) tab = linea.length();
                 String token = linea.substring(inicio, tab);
                 int eq = token.indexOf('=');
-                if (eq != -1) {
-                    fila[token.substring(0, eq)] = token.substring(eq + 1);
-                }
+                if (eq != -1) fila[token.substring(0, eq)] = token.substring(eq + 1);
                 inicio = tab + 1;
             }
             return fila;
