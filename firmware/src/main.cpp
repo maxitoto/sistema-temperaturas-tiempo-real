@@ -4,11 +4,12 @@
 #include <iostream>
 #include "database/InicializadorSGBD.hpp"
 #include "database/EsquemaFisico.hpp"
+#include "hardware/driver/oled/Oled.h"
 
 
 void setup() {
     delay(1000);
-
+    iniciarOled();
     iniciarSGBDyORM(); // 1. Inicia la base de datos (SD + SGBD) y el ORM
     iniciarEsquema();  // 2. Ejecuta el modelo físico (diccionario de datos)
 

@@ -53,12 +53,33 @@ public:
         TableBuilder& typeStr()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_STR;   return *this; }
         TableBuilder& typeSrt()   { return typeStr(); }
         TableBuilder& typeBool()  { if (auto* a = actual()) a->tipo = SGBD::TYPE_BOOL;  return *this; }
+        template <typename TEnum>
+        TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
+            if (auto* a = actual()) {
+                a->tipo = SGBD::TYPE_INT; // Se almacena como su entero subyacente
+                if (valoresPermitidos.size() > 0) {
+                    std::vector<int32_t> permitidos;
+                    for (auto v : valoresPermitidos) permitidos.push_back(static_cast<int32_t>(v));
+                    a->exprCheckTexto = "VALOR_FUERA_DE_ENUM";
+                    a->fnCheck = [permitidos](const String& valStr) -> bool {
+                        int32_t v = valStr.toInt();
+                        for (int32_t p : permitidos) if (v == p) return true;
+                        return false;
+                    };
+                }
+            }
+            return *this;
+        }
 
         TableBuilder& pk() { if (auto* a = actual()) { a->esPk = a->esNotNull = a->esUnique = true; } return *this; }
         TableBuilder& notNull() { if (auto* a = actual()) a->esNotNull = true; return *this; }
         TableBuilder& unique()  { if (auto* a = actual()) a->esUnique = true;  return *this; }
         TableBuilder& varChar(size_t len) { if (auto* a = actual()) { a->tipo = SGBD::TYPE_STR; a->maxVarchar = len; } return *this; }
         TableBuilder& valueDefault(const String& v) { if (auto* a = actual()) { a->tieneDefault = true; a->valorDefault = v; } return *this; }
+        template <typename TEnum>
+        TableBuilder& valueDefault(TEnum valorEnum) {
+            return valueDefault(String(static_cast<int32_t>(valorEnum)));
+        }
 
         TableBuilder& check(SGBD::CheckPredicado fn, const char* desc = "CHECK") {
             if (auto* a = actual()) { a->fnCheck = fn; a->exprCheckTexto = desc; }
