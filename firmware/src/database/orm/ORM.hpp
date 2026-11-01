@@ -53,12 +53,26 @@ public:
         TableBuilder& typeStr()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_STR;   return *this; }
         TableBuilder& typeSrt()   { return typeStr(); }
         TableBuilder& typeBool()  { if (auto* a = actual()) a->tipo = SGBD::TYPE_BOOL;  return *this; }
+        template <typename TEnum>
+        TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
+            if (auto* a = actual()) {
+                a->tipo = SGBD::TYPE_ENUM;
+                a->valoresEnum.clear();
+                for (auto v : valoresPermitidos) a->valoresEnum.push_back(static_cast<int32_t>(v));
+                a->exprCheckTexto = "VALOR_FUERA_DE_ENUM";
+            }
+            return *this;
+        }
 
         TableBuilder& pk() { if (auto* a = actual()) { a->esPk = a->esNotNull = a->esUnique = true; } return *this; }
         TableBuilder& notNull() { if (auto* a = actual()) a->esNotNull = true; return *this; }
         TableBuilder& unique()  { if (auto* a = actual()) a->esUnique = true;  return *this; }
         TableBuilder& varChar(size_t len) { if (auto* a = actual()) { a->tipo = SGBD::TYPE_STR; a->maxVarchar = len; } return *this; }
         TableBuilder& valueDefault(const String& v) { if (auto* a = actual()) { a->tieneDefault = true; a->valorDefault = v; } return *this; }
+        template <typename TEnum>
+        TableBuilder& valueDefault(TEnum valorEnum) {
+            return valueDefault(String(static_cast<int32_t>(valorEnum)));
+        }
 
         TableBuilder& check(SGBD::CheckPredicado fn, const char* desc = "CHECK") {
             if (auto* a = actual()) { a->fnCheck = fn; a->exprCheckTexto = desc; }

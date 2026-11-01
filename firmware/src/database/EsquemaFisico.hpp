@@ -2,6 +2,12 @@
 #pragma once
 #include "orm/ORM.hpp"
 
+enum class EstadoTarjeta : int32_t {
+    ACTIVA    = 1,
+    BLOQUEADA = 2,
+    VENCIDA   = 3
+};
+
 inline void iniciarEsquema() {
     // 1. Tabla Padre: Usuario
     db.createTable("Usuario")
@@ -16,7 +22,12 @@ inline void iniciarEsquema() {
       .addAtribute("numero").typeSrt().notNull().unique()
       .addAtribute("fecha_vencimiento").typeSrt().notNull()
       .addAtribute("cvv").typeSrt().notNull().varChar(4)
-      .addAtribute("id_usuario_fk").typeInt().notNull().FK("Usuario", "id", CASCADE);
+      .addAtribute("id_usuario_fk").typeInt().notNull().FK("Usuario", "id", CASCADE)
+      .addAtribute("estado").typeEnum({
+                                        EstadoTarjeta::ACTIVA,
+                                        EstadoTarjeta::BLOQUEADA,
+                                        EstadoTarjeta::VENCIDA
+                                      }).valueDefault(EstadoTarjeta::ACTIVA);
 
     // 3. Índice de búsqueda rápida
     db.createIndex("TarjetaUsuarioIdx")
