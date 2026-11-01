@@ -28,7 +28,7 @@ namespace SGBD {
 
     // Tipos de columna soportados por el diccionario de datos
     enum TipoDato : uint8_t {
-        TYPE_INT = 0, TYPE_FLOAT, TYPE_STR, TYPE_BOOL
+        TYPE_INT = 0, TYPE_FLOAT, TYPE_STR, TYPE_BOOL, TYPE_ENUM
     };
 
     // Niveles de rol del sistema (DCL)

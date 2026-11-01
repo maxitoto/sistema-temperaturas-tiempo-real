@@ -64,6 +64,19 @@ namespace SGBD {
                     return false;
                 }
 
+                if (attr.tipo == TYPE_ENUM && !attr.valoresEnum.empty()) {
+                    int32_t v = val.toInt();
+                    bool enRango = false;
+                    for (int32_t p : attr.valoresEnum) if (v == p) { enRango = true; break; }
+                    if (!enRango) {
+                        ConsolaSQL::getInstance().reportarError(
+                            "23514", "ENUM_VIOLATION", esq.nombreTabla + "." + attr.nombre,
+                            "El valor '" + val + "' no pertenece al enum permitido."
+                        );
+                        return false;
+                    }
+                }
+
                 if (attr.fnCheck && !attr.fnCheck(val)) {
                     ConsolaSQL::getInstance().reportarError(
                         "23514", "CHECK_VIOLATION", esq.nombreTabla + "." + attr.nombre,

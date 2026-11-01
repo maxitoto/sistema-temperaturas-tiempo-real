@@ -2,13 +2,25 @@
 #pragma once
 #include "orm/ORM.hpp"
 
+enum class EstadoTarjeta : int32_t {
+    ACTIVA    = 1,
+    BLOQUEADA = 2,
+    VENCIDA   = 3
+};
+
 inline void iniciarEsquema() {
     // 1. Tabla Padre: Usuario
     db.createTable("Usuario")
       .addAtribute("id").typeInt().pk()
       .addAtribute("nombre").typeSrt().notNull()
       .addAtribute("dni").typeSrt().unique().notNull().varChar(8)
-          .check([](const String& d) { return d.length() >= 4; }, "dni.size() >= 4");
+          .check([](const String& d) { return d.length() >= 4; }, "dni.size() >= 4").
+      addAtribute("rol").valueDefault(EstadoTarjeta::ACTIVA).
+          typeEnum({
+            EstadoTarjeta::ACTIVA,
+            EstadoTarjeta::BLOQUEADA,
+            EstadoTarjeta::VENCIDA
+          });
 
     // 2. Tabla Hija: Tarjeta (Con FK apuntando a Usuario.id y borrado en CASCADE)
     db.createTable("Tarjeta")

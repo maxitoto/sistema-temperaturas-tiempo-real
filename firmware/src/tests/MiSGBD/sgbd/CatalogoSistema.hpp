@@ -26,6 +26,7 @@ namespace SGBD {
         String fkTablaDestino = "";
         String fkColumnaDestino = "";
         AccionFK fkOnDelete = RESTRICT;
+        std::vector<int32_t> valoresEnum;
     };
 
     struct IndiceDef {

@@ -56,17 +56,10 @@ public:
         template <typename TEnum>
         TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
             if (auto* a = actual()) {
-                a->tipo = SGBD::TYPE_INT; // Se almacena como su entero subyacente
-                if (valoresPermitidos.size() > 0) {
-                    std::vector<int32_t> permitidos;
-                    for (auto v : valoresPermitidos) permitidos.push_back(static_cast<int32_t>(v));
-                    a->exprCheckTexto = "VALOR_FUERA_DE_ENUM";
-                    a->fnCheck = [permitidos](const String& valStr) -> bool {
-                        int32_t v = valStr.toInt();
-                        for (int32_t p : permitidos) if (v == p) return true;
-                        return false;
-                    };
-                }
+                a->tipo = SGBD::TYPE_ENUM;
+                a->valoresEnum.clear();
+                for (auto v : valoresPermitidos) a->valoresEnum.push_back(static_cast<int32_t>(v));
+                a->exprCheckTexto = "VALOR_FUERA_DE_ENUM";
             }
             return *this;
         }
