@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include "../../hardware/placa/esp32S/pines_nodemcu32s.hpp"
+#include "../../placa/esp32S/pines_nodemcu32s.hpp"
 
 class Oled {
 public:
