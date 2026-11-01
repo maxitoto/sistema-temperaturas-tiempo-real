@@ -1,74 +1,116 @@
-// Archivo: src/tests/hardware/gestorsensor/GestorSensores.cpp
 #include "GestorSensores.hpp"
 #include <string.h>
 #include <stdio.h>
 
 GestorSensores::GestorSensores()
-    : bus(Pin::PIN_SENSOR_1WIRE), driver(&bus) {}
-
-void GestorSensores::formatearRomHex(const DeviceAddress rom, char* salida17B) {
-    for (uint8_t i = 0; i < 8; i++) {
-        snprintf(salida17B + (i * 2), 3, "%02X", rom[i]);
+    : bus(Pin::PIN_SENSOR_1WIRE), driver(&bus) {
+    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+        sensores[i].limpiar(i);
     }
-    salida17B[16] = '\0';
+}
+
+int8_t GestorSensores::buscarSlotPorROM(const DeviceAddress rom) const {
+    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+        if (sensores[i].coincideROM(rom)) {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
 }
 
 EstadoBus GestorSensores::verificarEstadoElectricoBus() {
     pinMode(Pin::PIN_SENSOR_1WIRE, INPUT_PULLUP);
     delay(2);
     if (digitalRead(Pin::PIN_SENSOR_1WIRE) == LOW) {
-        return EstadoBus::LINEA_EN_CORTO_GND;
+        estadoBus    = EstadoBus::LINEA_EN_CORTO_GND;
+        ultimoEvento = EventoGestor::ERROR_BUS_ELECTRICO;
+        return estadoBus;
     }
     if (bus.reset() == 0) {
-        return EstadoBus::SIN_PULSO_PRESENCIA;
+        estadoBus    = EstadoBus::SIN_PULSO_PRESENCIA;
+        ultimoEvento = EventoGestor::ERROR_BUS_ELECTRICO;
+        return estadoBus;
     }
-    return EstadoBus::OK;
+    estadoBus = EstadoBus::OK;
+    return estadoBus;
 }
 
 uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool guardarEnEeprom) {
     driver.begin();
     driver.setWaitForConversion(true);
-    driver.setCheckForConversion(true);
+    driver.setCheckForConversion(false);
     driver.setAutoSaveScratchPad(guardarEnEeprom);
 
     totalDetectadosBus = driver.getDeviceCount();
-    totalAsignados = 0;
-
-    for (uint8_t s = 0; s < MAX_SENSORES; s++) {
-        slots[s] = DiagnosticoSlot{};
-        slots[s].indiceSlot = s;
+    if (totalDetectadosBus > MAX_SENSORES) {
+        estadoBus = EstadoBus::LIMITE_SENSORES_EXCEDIDO;
+    } else {
+        estadoBus = EstadoBus::OK;
     }
 
+    Sensor anteriores[MAX_SENSORES];
+    for (uint8_t s = 0; s < MAX_SENSORES; s++) {
+        anteriores[s] = sensores[s];
+        sensores[s].limpiar(s);
+    }
+
+    totalAsignados = 0;
     uint8_t tope = (totalDetectadosBus > MAX_SENSORES) ? MAX_SENSORES : totalDetectadosBus;
 
     for (uint8_t i = 0; i < tope; i++) {
-        DiagnosticoSlot& slot = slots[i];
-        if (!driver.getAddress(slot.rom, i)) {
-            slot.estado = EstadoSensor::DESCONECTADO;
+        Sensor& s = sensores[i];
+        DeviceAddress romDetectada = {0};
+
+        if (!driver.getAddress(romDetectada, i)) {
+            s.setEstado(EstadoSensor::DESCONECTADO);
             continue;
         }
 
-        formatearRomHex(slot.rom, slot.romHex);
-
-        if (!driver.validAddress(slot.rom) || OneWire::crc8(slot.rom, 7) != slot.rom[7]) {
-            slot.estado = EstadoSensor::DIRECCION_ROM_INVALIDA;
+        if (!driver.validAddress(romDetectada) || OneWire::crc8(romDetectada, 7) != romDetectada[7]) {
+            s.setEstado(EstadoSensor::DIRECCION_ROM_INVALIDA);
             continue;
         }
 
-        if (!driver.validFamily(slot.rom)) {
-            slot.estado = EstadoSensor::FAMILIA_NO_COMPATIBLE;
+        if (!driver.validFamily(romDetectada)) {
+            s.setEstado(EstadoSensor::FAMILIA_NO_COMPATIBLE);
             continue;
         }
 
-        slot.activo = true;
-        driver.setResolution(slot.rom, resolucionGlobal, true);
-        slot.resolucionBits       = driver.getResolution(slot.rom);
-        slot.alimentacionParasita = !driver.readPowerSupply(slot.rom);
-        slot.alarmaAltaC          = driver.getHighAlarmTemp(slot.rom);
-        slot.alarmaBajaC          = driver.getLowAlarmTemp(slot.rom);
-        slot.datoUsuario          = driver.getUserData(slot.rom);
-        slot.estado               = EstadoSensor::OK;
+        bool yaExistia = false;
+        for (uint8_t k = 0; k < MAX_SENSORES; k++) {
+            if (anteriores[k].coincideROM(romDetectada)) {
+                s = anteriores[k];
+                s.setIndiceSlot(i);
+                yaExistia = true;
+                break;
+            }
+        }
+
+        if (!yaExistia) {
+            s.inicializarNuevo(i, romDetectada);
+            driver.setHighAlarmTemp(romDetectada, Sensor::UMBRAL_MAX_DEFAULT);
+            driver.setLowAlarmTemp(romDetectada, Sensor::UMBRAL_MIN_DEFAULT);
+            driver.setOffsetByDeviceAddress(romDetectada, Sensor::OFFSET_DEFAULT);
+            driver.setResolution(romDetectada, resolucionGlobal, false);
+            if (guardarEnEeprom) {
+                driver.saveScratchPad(romDetectada);
+            }
+            ultimoEvento = EventoGestor::NUEVO_SENSOR_DETECTADO;
+        }
+
+        s.setResolucionBits(driver.getResolution(romDetectada));
+        s.setAlimentacionParasita(!driver.readPowerSupply(romDetectada));
+        s.setDatoUsuario(driver.getUserData(romDetectada));
+        s.setEstado(EstadoSensor::OK);
         totalAsignados++;
+    }
+
+    if (totalAsignados > 0) {
+        driver.requestTemperatures();
+    }
+
+    if (ultimoEvento == EventoGestor::NINGUNO) {
+        ultimoEvento = EventoGestor::BUS_INICIALIZADO;
     }
 
     return totalAsignados;
@@ -76,21 +118,34 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
 
 bool GestorSensores::verificarCambiosEnCaliente() {
     bool mismoConteo = driver.verifyDeviceCount();
-    totalDetectadosBus = driver.getDeviceCount();
-    return !mismoConteo;
+    uint8_t nuevoTotal = driver.getDeviceCount();
+    if (!mismoConteo || nuevoTotal != totalDetectadosBus) {
+        estadoBus = EstadoBus::TOPOLOGIA_MODIFICADA;
+        ultimoEvento = (nuevoTotal < totalDetectadosBus)
+            ? EventoGestor::SENSOR_DESCONECTADO_EN_CALIENTE
+            : EventoGestor::NUEVO_SENSOR_DETECTADO;
+        totalDetectadosBus = nuevoTotal;
+        return true;
+    }
+    return false;
 }
 
 bool GestorSensores::solicitarConversionGlobal(bool bloqueante) {
     driver.setWaitForConversion(bloqueante);
     DallasTemperature::request_t req = driver.requestTemperatures();
     tsUltimaConversion = req.timestamp;
-    return req.result;
+    if (!req.result) {
+        estadoBus = EstadoBus::FALLO_CONVERSION_GLOBAL;
+        return false;
+    }
+    ultimoEvento = EventoGestor::CONVERSION_COMPLETADA;
+    return true;
 }
 
 bool GestorSensores::solicitarConversionPorSlot(uint8_t slot, bool bloqueante) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     driver.setWaitForConversion(bloqueante);
-    DallasTemperature::request_t req = driver.requestTemperaturesByAddress(slots[slot].rom);
+    DallasTemperature::request_t req = driver.requestTemperaturesByAddress(sensores[slot].obtenerROM());
     tsUltimaConversion = req.timestamp;
     return req.result;
 }
@@ -114,7 +169,6 @@ EstadoSensor GestorSensores::traducirCodigoRaw(int32_t raw, const uint8_t* pad) 
         default: break;
     }
 
-    // Verificación explícita de glitch 85.00 °C (0x0550 en los primeros 2 bytes y 0x0C en byte 6)
     if (pad != nullptr) {
         int16_t raw16 = static_cast<int16_t>((static_cast<uint16_t>(pad[1]) << 8) | pad[0]);
         if (raw16 == 0x0550 && pad[6] == 0x0C) {
@@ -129,153 +183,169 @@ EstadoSensor GestorSensores::traducirCodigoRaw(int32_t raw, const uint8_t* pad) 
 }
 
 EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) {
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) {
         return EstadoSensor::SLOT_VACIO;
     }
 
-    DiagnosticoSlot& s = slots[slot];
+    Sensor& s = sensores[slot];
+    uint8_t* pad = s.obtenerScratchpad();
 
-    // 1. Leer y validar el Scratchpad de 9 bytes con reintentos
     bool padLeido = false;
     for (uint8_t intento = 0; intento < REINTENTOS_LECTURA; intento++) {
-        if (driver.readScratchPad(s.rom, s.ultimoScratchpad)) {
+        if (driver.readScratchPad(s.obtenerROM(), pad)) {
             padLeido = true;
             break;
         }
     }
 
     if (!padLeido) {
-        s.tempRaw     = DEVICE_DISCONNECTED_RAW;
-        s.tempCelsius = DEVICE_DISCONNECTED_C;
-        s.estado      = EstadoSensor::DESCONECTADO;
-        return s.estado;
+        s.setTempRaw(DEVICE_DISCONNECTED_RAW);
+        s.setTempCelsius(DEVICE_DISCONNECTED_C);
+        s.setEstado(EstadoSensor::DESCONECTADO);
+        return s.obtenerEstado();
     }
 
-    // 2. Comprobar que no sean todos ceros
     bool todoCeros = true;
     for (uint8_t b = 0; b < 9; b++) {
-        if (s.ultimoScratchpad[b] != 0) { todoCeros = false; break; }
+        if (pad[b] != 0) { todoCeros = false; break; }
     }
     if (todoCeros) {
-        s.estado = EstadoSensor::SCRATCHPAD_VACIO_CEROS;
-        return s.estado;
+        s.setEstado(EstadoSensor::SCRATCHPAD_VACIO_CEROS);
+        return s.obtenerEstado();
     }
 
-    // 3. Verificar CRC8 del Scratchpad
-    if (OneWire::crc8(s.ultimoScratchpad, 8) != s.ultimoScratchpad[8]) {
-        s.estado = EstadoSensor::ERROR_CRC_SCRATCHPAD;
-        return s.estado;
+    if (OneWire::crc8(pad, 8) != pad[8]) {
+        s.setEstado(EstadoSensor::ERROR_CRC_SCRATCHPAD);
+        return s.obtenerEstado();
     }
 
-    // 4. Obtener valor RAW de 32 bits desde DallasTemperature
-    s.tempRaw = driver.getTemp(s.rom, REINTENTOS_LECTURA);
-    EstadoSensor estadoEvaluado = traducirCodigoRaw(s.tempRaw, s.ultimoScratchpad);
+    int32_t raw = driver.getTemp(s.obtenerROM(), REINTENTOS_LECTURA);
+    EstadoSensor estadoEvaluado = traducirCodigoRaw(raw, pad);
+
+    if (estadoEvaluado == EstadoSensor::REINICIO_ENERGIA_85C) {
+        driver.requestTemperaturesByAddress(s.obtenerROM());
+        delay(tiempoConversionSegunResolucion(s.obtenerResolucionBits()));
+        driver.readScratchPad(s.obtenerROM(), pad);
+        raw = driver.getTemp(s.obtenerROM(), REINTENTOS_LECTURA);
+        estadoEvaluado = traducirCodigoRaw(raw, pad);
+    }
+
+    s.setTempRaw(raw);
+
     if (estadoEvaluado != EstadoSensor::OK) {
-        s.tempCelsius = static_cast<float>(static_cast<int16_t>(estadoEvaluado));
-        s.estado      = estadoEvaluado;
-        return s.estado;
+        s.setTempCelsius(static_cast<float>(static_cast<int16_t>(estadoEvaluado)));
+        s.setEstado(estadoEvaluado);
+        return s.obtenerEstado();
     }
 
-    s.tempCelsius = DallasTemperature::rawToCelsius(s.tempRaw);
+    float tempFinal = driver.getTempC(s.obtenerROM(), REINTENTOS_LECTURA);
+    s.setTempCelsius(tempFinal);
 
-    // 5. Evaluar alarmas de umbral en el chip (TH / TL)
-    s.alarmaAltaC = static_cast<int8_t>(s.ultimoScratchpad[2]);
-    s.alarmaBajaC = static_cast<int8_t>(s.ultimoScratchpad[3]);
-    s.enAlarma    = driver.hasAlarm(s.rom);
+    bool alarmaHw = driver.hasAlarm(s.obtenerROM());
+    s.setEnAlarma(alarmaHw);
 
-    if (s.tempCelsius >= static_cast<float>(s.alarmaAltaC)) {
-        s.estado = EstadoSensor::ALARMA_SUPERIOR;
-    } else if (s.tempCelsius <= static_cast<float>(s.alarmaBajaC)) {
-        s.estado = EstadoSensor::ALARMA_INFERIOR;
+    if (tempFinal >= static_cast<float>(s.obtenerUmbralSuperior())) {
+        s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
+        s.setEnAlarma(true);
+    } else if (tempFinal <= static_cast<float>(s.obtenerUmbralInferior())) {
+        s.setEstado(EstadoSensor::ALARMA_INFERIOR);
+        s.setEnAlarma(true);
     } else {
-        s.estado = EstadoSensor::OK;
+        s.setEstado(EstadoSensor::OK);
     }
 
-    return s.estado;
+    return s.obtenerEstado();
 }
 
 void GestorSensores::actualizarTodosLosSlots() {
     solicitarConversionGlobal(true);
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
-        if (slots[i].activo) {
+        if (sensores[i].estaActivo()) {
             actualizarLecturaSlot(i);
         }
     }
 }
 
 bool GestorSensores::configurarResolucionSlot(uint8_t slot, uint8_t bits, bool guardarEeprom) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
-    if (!driver.setResolution(slots[slot].rom, bits)) {
-        slots[slot].estado = EstadoSensor::FALLO_ESCRITURA_EEPROM;
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+    if (!driver.setResolution(s.obtenerROM(), bits, false)) {
+        s.setEstado(EstadoSensor::FALLO_ESCRITURA_EEPROM);
         return false;
     }
-    slots[slot].resolucionBits = driver.getResolution(slots[slot].rom);
-    return guardarEeprom ? driver.saveScratchPad(slots[slot].rom) : true;
+    s.setResolucionBits(driver.getResolution(s.obtenerROM()));
+    return guardarEeprom ? driver.saveScratchPad(s.obtenerROM()) : true;
 }
 
 bool GestorSensores::configurarOffsetPorROM(const uint8_t* rom, float offsetC) {
-    if (rom == nullptr) {
-        return false;
+    if (rom == nullptr) return false;
+    int8_t slot = buscarSlotPorROM(rom);
+    if (slot >= 0) {
+        sensores[slot].setOffset(offsetC);
     }
-
     return driver.setOffsetByDeviceAddress(rom, offsetC);
 }
 
-bool GestorSensores::configurarOffsetSlot(
-    uint8_t slot,
-    float offsetC
-) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) {
-        return false;
-    }
-
-    return driver.setOffsetByDeviceAddress(
-        slots[slot].rom,
-        offsetC
-    );
+bool GestorSensores::configurarOffsetSlot(uint8_t slot, float offsetC) {
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    sensores[slot].setOffset(offsetC);
+    return driver.setOffsetByDeviceAddress(sensores[slot].obtenerROM(), offsetC);
 }
 
 bool GestorSensores::configurarAlarmasSlot(uint8_t slot, int8_t thAltoC, int8_t tlBajoC, bool guardarEeprom) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
-    driver.setHighAlarmTemp(slots[slot].rom, thAltoC);
-    driver.setLowAlarmTemp(slots[slot].rom, tlBajoC);
-    slots[slot].alarmaAltaC = driver.getHighAlarmTemp(slots[slot].rom);
-    slots[slot].alarmaBajaC = driver.getLowAlarmTemp(slots[slot].rom);
-    return guardarEeprom ? driver.saveScratchPad(slots[slot].rom) : true;
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+    driver.setHighAlarmTemp(s.obtenerROM(), thAltoC);
+    driver.setLowAlarmTemp(s.obtenerROM(), tlBajoC);
+    driver.setResolution(s.obtenerROM(), s.obtenerResolucionBits(), false);
+    s.setUmbrales(driver.getHighAlarmTemp(s.obtenerROM()), driver.getLowAlarmTemp(s.obtenerROM()));
+    return guardarEeprom ? driver.saveScratchPad(s.obtenerROM()) : true;
+}
+
+bool GestorSensores::configurarAlarmasPorROM(const uint8_t* rom, int8_t thAltoC, int8_t tlBajoC, bool guardarEeprom) {
+    if (rom == nullptr) return false;
+    int8_t slot = buscarSlotPorROM(rom);
+    if (slot >= 0) {
+        return configurarAlarmasSlot(static_cast<uint8_t>(slot), thAltoC, tlBajoC, guardarEeprom);
+    }
+    driver.setHighAlarmTemp(rom, thAltoC);
+    driver.setLowAlarmTemp(rom, tlBajoC);
+    return guardarEeprom ? driver.saveScratchPad(rom) : true;
 }
 
 bool GestorSensores::guardarEepromSlot(uint8_t slot) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
-    return driver.saveScratchPad(slots[slot].rom);
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    return driver.saveScratchPad(sensores[slot].obtenerROM());
 }
 
 bool GestorSensores::restaurarEepromSlot(uint8_t slot) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
-    return driver.recallScratchPad(slots[slot].rom);
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+    if (!driver.recallScratchPad(s.obtenerROM())) return false;
+    s.setUmbrales(driver.getHighAlarmTemp(s.obtenerROM()), driver.getLowAlarmTemp(s.obtenerROM()));
+    s.setResolucionBits(driver.getResolution(s.obtenerROM()));
+    return true;
 }
 
 bool GestorSensores::escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom) {
-    if (slot >= MAX_SENSORES || !slots[slot].activo) return false;
-    driver.setUserData(slots[slot].rom, idCustom);
-    slots[slot].datoUsuario = driver.getUserData(slots[slot].rom);
-    return slots[slot].datoUsuario == idCustom;
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+    driver.setUserData(s.obtenerROM(), idCustom);
+    s.setDatoUsuario(driver.getUserData(s.obtenerROM()));
+    return s.obtenerDatoUsuario() == idCustom;
 }
 
 uint8_t GestorSensores::procesarBusquedaAlarmasHardware() {
     uint8_t contador = 0;
-
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
-        if (!slots[i].activo) {
-            continue;
-        }
-
-        slots[i].enAlarma = driver.hasAlarm(slots[i].rom);
-
-        if (slots[i].enAlarma) {
+        if (!sensores[i].estaActivo()) continue;
+        bool alarma = driver.hasAlarm(sensores[i].obtenerROM());
+        sensores[i].setEnAlarma(alarma);
+        if (alarma) {
             contador++;
+            ultimoEvento = EventoGestor::ALARMA_DETECTADA_EN_BUS;
         }
     }
-
     return contador;
 }
 
@@ -283,11 +353,19 @@ Sensor& GestorSensores::obtenerSensor(uint8_t slot) {
     return sensores[(slot < MAX_SENSORES) ? slot : 0];
 }
 
-const DiagnosticoSlot& GestorSensores::obtenerDiagnostico(uint8_t slot) const {
-    return slots[(slot < MAX_SENSORES) ? slot : 0];
+const Sensor& GestorSensores::obtenerSensor(uint8_t slot) const {
+    return sensores[(slot < MAX_SENSORES) ? slot : 0];
 }
 
-
+Sensor* GestorSensores::buscarSensorPorMAC(const char* macHex) {
+    if (!macHex) return nullptr;
+    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+        if (sensores[i].estaActivo() && strncmp(sensores[i].obtenerMAC(), macHex, 16) == 0) {
+            return &sensores[i];
+        }
+    }
+    return nullptr;
+}
 
 bool GestorSensores::hayModoParasitoGlobal() {
     return driver.isParasitePowerMode();
@@ -304,7 +382,7 @@ const char* GestorSensores::nombreFamilia(uint8_t codigoFamilia) {
     }
 }
 
-const char* GestorSensores::nombreEstado(EstadoSensor estado) {
+const char* GestorSensores::nombreEstadoSensor(EstadoSensor estado) {
     switch (estado) {
         case EstadoSensor::OK:                        return "OK";
         case EstadoSensor::ALARMA_SUPERIOR:           return "ALARMA_ALTA";
@@ -324,5 +402,30 @@ const char* GestorSensores::nombreEstado(EstadoSensor estado) {
         case EstadoSensor::CORTOCIRCUITO_GND:         return "CORTO_GND";
         case EstadoSensor::CIRCUITO_ABIERTO:          return "CIRC_ABIERTO";
         default:                                      return "ERROR_DESC";
+    }
+}
+
+const char* GestorSensores::nombreEstadoBus(EstadoBus estado) {
+    switch (estado) {
+        case EstadoBus::OK:                       return "BUS_OK";
+        case EstadoBus::LINEA_EN_CORTO_GND:       return "CORTO_GND";
+        case EstadoBus::SIN_PULSO_PRESENCIA:      return "SIN_PRESENCIA";
+        case EstadoBus::TOPOLOGIA_MODIFICADA:     return "TOPOLOGIA_CAMBIO";
+        case EstadoBus::FALLO_CONVERSION_GLOBAL:  return "ERR_CONVERSION";
+        case EstadoBus::LIMITE_SENSORES_EXCEDIDO: return "MAX_6_EXCEDIDO";
+        default:                                  return "BUS_DESC";
+    }
+}
+
+const char* GestorSensores::nombreEventoGestor(EventoGestor evento) {
+    switch (evento) {
+        case EventoGestor::NINGUNO:                        return "NINGUNO";
+        case EventoGestor::BUS_INICIALIZADO:               return "BUS_INICIALIZADO";
+        case EventoGestor::NUEVO_SENSOR_DETECTADO:         return "NUEVO_SENSOR";
+        case EventoGestor::SENSOR_DESCONECTADO_EN_CALIENTE:return "HOT_UNPLUG";
+        case EventoGestor::CONVERSION_COMPLETADA:          return "CONV_OK";
+        case EventoGestor::ERROR_BUS_ELECTRICO:            return "ERR_ELECTRICO";
+        case EventoGestor::ALARMA_DETECTADA_EN_BUS:        return "ALARMA_ACTIVA";
+        default:                                           return "EVT_DESC";
     }
 }

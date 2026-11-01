@@ -1,0 +1,42 @@
+#pragma once
+#include <stdint.h>
+#include <DallasTemperature.h>
+
+enum class EstadoBus : uint8_t {
+    OK = 0,
+    LINEA_EN_CORTO_GND,
+    SIN_PULSO_PRESENCIA,
+    TOPOLOGIA_MODIFICADA,
+    FALLO_CONVERSION_GLOBAL,
+    LIMITE_SENSORES_EXCEDIDO
+};
+
+enum class EventoGestor : uint8_t {
+    NINGUNO = 0,
+    BUS_INICIALIZADO,
+    NUEVO_SENSOR_DETECTADO,
+    SENSOR_DESCONECTADO_EN_CALIENTE,
+    CONVERSION_COMPLETADA,
+    ERROR_BUS_ELECTRICO,
+    ALARMA_DETECTADA_EN_BUS
+};
+
+enum class EstadoSensor : int16_t {
+    OK                        = 0,
+    ALARMA_SUPERIOR           = 1,
+    ALARMA_INFERIOR           = 2,
+    SLOT_VACIO                = -1,
+    DIRECCION_ROM_INVALIDA    = -2,
+    FAMILIA_NO_COMPATIBLE     = -3,
+    SCRATCHPAD_VACIO_CEROS    = -4,
+    ERROR_CRC_SCRATCHPAD      = -5,
+    CONVERSION_PENDIENTE      = -6,
+    TIMEOUT_CONVERSION        = -7,
+    FALLO_ESCRITURA_EEPROM    = -8,
+    DESCONECTADO              = DEVICE_DISCONNECTED_C,
+    ALIMENTACION_INSUFICIENTE = DEVICE_INSUFFICIENT_POWER_C,
+    REINICIO_ENERGIA_85C      = DEVICE_POWER_ON_RESET_C,
+    CORTOCIRCUITO_VDD         = DEVICE_FAULT_SHORTVDD_C,
+    CORTOCIRCUITO_GND         = DEVICE_FAULT_SHORTGND_C,
+    CIRCUITO_ABIERTO          = DEVICE_FAULT_OPEN_C
+};

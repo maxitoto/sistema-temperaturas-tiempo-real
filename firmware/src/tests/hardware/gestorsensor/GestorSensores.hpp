@@ -1,4 +1,3 @@
-// Archivo: src/tests/hardware/gestorsensor/GestorSensores.hpp
 #pragma once
 #include <Arduino.h>
 #include <OneWire.h>
@@ -7,44 +6,26 @@
 #include "Sensor.hpp"
 #include "../../../hardware/placa/esp32S/pines_nodemcu32s.hpp"
 
-struct DiagnosticoSlot {
-    bool activo = false;
-    uint8_t indiceSlot = 0;
-    DeviceAddress rom = {0};
-    char romHex[17] = "0000000000000000";
-    EstadoSensor estado = EstadoSensor::SLOT_VACIO;
-    float tempCelsius = DEVICE_DISCONNECTED_C;
-    int32_t tempRaw = DEVICE_DISCONNECTED_RAW;
-    uint8_t resolucionBits = 12;
-    bool alimentacionParasita = false;
-    int8_t alarmaAltaC = 0;
-    int8_t alarmaBajaC = 0;
-    bool enAlarma = false;
-    int16_t datoUsuario = 0;
-    uint8_t ultimoScratchpad[9] = {0};
-};
-
 class GestorSensores {
 public:
-    static constexpr uint8_t MAX_SENSORES = 6;
+    static constexpr uint8_t MAX_SENSORES      = 6;
     static constexpr uint8_t REINTENTOS_LECTURA = 3;
 
 private:
-    OneWire bus;
+    OneWire           bus;
     DallasTemperature driver;
+    Sensor            sensores[MAX_SENSORES];
 
-    // Las 6 instancias de Sensor administradas por el gestor
-    Sensor sensores[MAX_SENSORES];
-    DiagnosticoSlot slots[MAX_SENSORES];
-
-    uint8_t totalDetectadosBus = 0;
-    uint8_t totalAsignados = 0;
-    unsigned long tsUltimaConversion = 0;
+    EstadoBus         estadoBus          = EstadoBus::OK;
+    EventoGestor      ultimoEvento       = EventoGestor::NINGUNO;
+    uint8_t           totalDetectadosBus = 0;
+    uint8_t           totalAsignados     = 0;
+    unsigned long     tsUltimaConversion = 0;
 
     GestorSensores();
     ~GestorSensores() = default;
 
-    static void formatearRomHex(const DeviceAddress rom, char* salida17B);
+    int8_t buscarSlotPorROM(const DeviceAddress rom) const;
     EstadoSensor traducirCodigoRaw(int32_t raw, const uint8_t* scratchpad) const;
 
 public:
@@ -58,12 +39,10 @@ public:
     GestorSensores(GestorSensores&&)                 = delete;
     GestorSensores& operator=(GestorSensores&&)      = delete;
 
-    // --- 1. Inicialización, Bus y Descubrimiento (Hasta 6 Sensores) ---
     EstadoBus verificarEstadoElectricoBus();
-    uint8_t escanearYAsignarSensores(uint8_t resolucionGlobal = 12, bool guardarEnEeprom = true);
-    bool verificarCambiosEnCaliente(); // Usa verifyDeviceCount()
+    uint8_t escanearYAsignarSensores(uint8_t resolucionGlobal = 12, bool guardarEnEeprom = false);
+    bool verificarCambiosEnCaliente();
 
-    // --- 2. Conversión y Adquisición con Diagnóstico Completo ---
     bool solicitarConversionGlobal(bool bloqueante = true);
     bool solicitarConversionPorSlot(uint8_t slot, bool bloqueante = true);
     bool estaConversionCompleta();
@@ -72,28 +51,32 @@ public:
     EstadoSensor actualizarLecturaSlot(uint8_t slot);
     void actualizarTodosLosSlots();
 
-    // --- 3. Configuración, Alarmas Hardware y EEPROM por Slot ---
     bool configurarResolucionSlot(uint8_t slot, uint8_t bits, bool guardarEeprom = false);
     bool configurarOffsetPorROM(const uint8_t* rom, float offsetC);
     bool configurarOffsetSlot(uint8_t slot, float offsetC);
     bool configurarAlarmasSlot(uint8_t slot, int8_t thAltoC, int8_t tlBajoC, bool guardarEeprom = false);
+    bool configurarAlarmasPorROM(const uint8_t* rom, int8_t thAltoC, int8_t tlBajoC, bool guardarEeprom = false);
     bool guardarEepromSlot(uint8_t slot);
     bool restaurarEepromSlot(uint8_t slot);
     bool escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom);
     uint8_t procesarBusquedaAlarmasHardware();
 
-    Sensor &obtenerSensor(uint8_t slot);
+    Sensor& obtenerSensor(uint8_t slot);
+    const Sensor& obtenerSensor(uint8_t slot) const;
+    Sensor* buscarSensorPorMAC(const char* macHex);
 
-    // --- 4. Accesores de las 6 Instancias y Diagnósticos ---
-    const DiagnosticoSlot& obtenerDiagnostico(uint8_t slot) const;
-    uint8_t obtenerTotalAsignados() const { return totalAsignados; }
-    uint8_t obtenerTotalEnBus() const { return totalDetectadosBus; }
-    bool hayModoParasitoGlobal();
+    DallasTemperature& obtenerDriverDallas() { return driver; }
+    EstadoBus          obtenerEstadoBus()    const { return estadoBus; }
+    EventoGestor       obtenerUltimoEvento() const { return ultimoEvento; }
+    uint8_t            obtenerTotalAsignados() const { return totalAsignados; }
+    uint8_t            obtenerTotalEnBus()   const { return totalDetectadosBus; }
+    unsigned long      obtenerTimestampConversion() const { return tsUltimaConversion; }
+    bool               hayModoParasitoGlobal();
 
-    static const char* nombreEstado(EstadoSensor estado);
+    static const char* nombreEstadoSensor(EstadoSensor estado);
+    static const char* nombreEstadoBus(EstadoBus estado);
+    static const char* nombreEventoGestor(EventoGestor evento);
     static const char* nombreFamilia(uint8_t codigoFamilia);
-
-    unsigned long obtenerTimestampConversion() const { return tsUltimaConversion; }
 };
 
 inline GestorSensores& gestorSensores = GestorSensores::getInstance();
