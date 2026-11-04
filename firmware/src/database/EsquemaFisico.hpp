@@ -275,11 +275,11 @@ inline void iniciarEsquema() {
       .addAtribute("fecha_creacion").typeInt().valueDefault("0");
 
     // 13. ÍNDICES DE ACCESO RÁPIDO
-    db.createIndex("idx_sensor_hex").attachTable("Sensor").onAtribute("hexadecimal").orderBy(ASC);
-    db.createIndex("idx_senso_fecha").attachTable("Senso").onAtribute("fecha_creacion").orderBy(DESC);
-    db.createIndex("idx_evento_sensor_smtp").attachTable("EventoSensor").onAtribute("notificado_smtp").orderBy(ASC);
-    db.createIndex("idx_auditoria_fecha").attachTable("Auditoria").onAtribute("fecha_creacion").orderBy(DESC);
-    db.createIndex("idx_ntp_prioridad").attachTable("ServidoresNtp").onAtribute("prioridad").orderBy(ASC);
+    //db.createIndex("idx_sensor_hex").attachTable("Sensor").onAtribute("hexadecimal").orderBy(ASC);
+    //db.createIndex("idx_senso_fecha").attachTable("Senso").onAtribute("fecha_creacion").orderBy(DESC);
+    //db.createIndex("idx_evento_sensor_smtp").attachTable("EventoSensor").onAtribute("notificado_smtp").orderBy(ASC);
+    //db.createIndex("idx_auditoria_fecha").attachTable("Auditoria").onAtribute("fecha_creacion").orderBy(DESC);
+    //db.createIndex("idx_ntp_prioridad").attachTable("ServidoresNtp").onAtribute("prioridad").orderBy(ASC);
 
     // 14. REGLAS DCL (SEGURIDAD DE TABLAS POR ROL)
     // Ningún rol (ni siquiera Operador) puede borrar ni modificar filas de auditoría (Append-Only estricto)
