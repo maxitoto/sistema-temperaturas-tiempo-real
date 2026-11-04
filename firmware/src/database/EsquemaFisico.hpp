@@ -147,7 +147,7 @@ inline void iniciarEsquema() {
     // 8. AUDITORÍA INMUTABLE (NO REPUDIO Y REGISTRO DE INTRUSIONES)
     db.createTable("Auditoria")
       .addAtribute("id_auditoria").typeInt().pk()
-      .addAtribute("id_usuario").typeInt().notNull().FK("usuarios_fw", "id_usuario", RESTRICT)
+      .addAtribute("id_usuario").typeInt().notNull().FK("Usuarios", "id_usuario", RESTRICT)
       .addAtribute("accion").typeSrt().notNull().varChar(32)
       .addAtribute("tabla_afectada").typeSrt().varChar(32).valueDefault("NINGUNA")
       .addAtribute("valor_previo").typeSrt().varChar(64).valueDefault("")
@@ -210,7 +210,7 @@ inline void iniciarEsquema() {
     // 10. TELEMETRÍA HISTÓRICA DE TEMPERATURA
     db.createTable("Senso")
       .addAtribute("id_senso").typeInt().pk()
-      .addAtribute("id_sensor").typeInt().notNull().FK("sensor_fw", "id_sensor", CASCADE)
+      .addAtribute("id_sensor").typeInt().notNull().FK("Sensor", "id_sensor", CASCADE)
       .addAtribute("temperatura_cruda").typeFloat().notNull()
       .addAtribute("temperatura_corregida").typeFloat().notNull()
       .addAtribute("estado_sensor").typeEnum<EstadoSensor>({
@@ -226,8 +226,8 @@ inline void iniciarEsquema() {
     // 11. EVENTOS DE TRANSICIÓN Y VIOLACIÓN DE UMBRALES POR SENSOR
     db.createTable("EventoSensor")
       .addAtribute("id_evento_sensor").typeInt().pk()
-      .addAtribute("id_sensor").typeInt().notNull().FK("sensor_fw", "id_sensor", CASCADE)
-      .addAtribute("id_senso").typeInt().notNull().FK("senso_fw", "id_senso", CASCADE)
+      .addAtribute("id_sensor").typeInt().notNull().FK("Sensor", "id_sensor", CASCADE)
+      .addAtribute("id_senso").typeInt().notNull().FK("Senso", "id_senso", CASCADE)
       .addAtribute("estado_previo_sensor").typeInt().notNull()
       .addAtribute("evento").typeInt().notNull()
       .addAtribute("criticidad").typeEnum<CriticidadEvento>({
@@ -288,9 +288,9 @@ inline void iniciarEsquema() {
 
     // Solo el ADMIN puede alterar umbrales de sensores, red, SMTP, calibración, usuarios y correos
     db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Sensor").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Configuracion_smtp").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Configuracion_conectividad").fromRole(ROL_OPERADOR);
+    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("ConfiguracionSmtp").fromRole(ROL_OPERADOR);
+    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("ConfiguracionConectividad").fromRole(ROL_OPERADOR);
     db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Usuarios").fromRole(ROL_OPERADOR);
     db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Lts").fromRole(ROL_OPERADOR);
     db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Correos").fromRole(ROL_OPERADOR);
-}
+}   

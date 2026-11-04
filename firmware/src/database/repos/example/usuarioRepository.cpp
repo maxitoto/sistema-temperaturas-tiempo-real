@@ -1,6 +1,5 @@
 #include "usuarioRepository.hpp"
 
-auto obtenerUsuarioPorNombre(char* nombre){
-    auto usuario = db.from("Usuario").select("*").eq("nombre", nombre);
-    return usuario;
+std::vector<SGBD::Fila> obtenerUsuarioPorNombre(const char* nombre) {
+    return db.from("Usuarios").select("*").eq("usuario", nombre).execute();
 }

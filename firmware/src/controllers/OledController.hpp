@@ -6,7 +6,6 @@
 #include "../hardware/driver/gestorsensores/GestorSensores.hpp"
 #include "../connections/CommunicationContainer.hpp"
 
-
 namespace Controllers {
 
 class OledController : public Rtos::RtosTask {
@@ -18,13 +17,17 @@ public:
 
 protected:
     void onSetup() override {
-        Rtos::LockGuard lock(Rtos::sysBus.i2cMutex);
-        iniciarOled();
+        auto lock = Rtos::sysBus.lockI2c();
+        if (!iniciarOled()) return;
+
+        // Mostrar logo UNTDF durante 1.5s al inicio y luego preparar la grilla
         oled.fullScreen(icon_untdf, 128, 48);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        oled.limpiarTodo();
+        oled.cabeceraIzq("HELADERA");
     }
 
     void onStep(bool /*wokenByNotification*/) override {
-        // Espera reactiva hasta 2000 ms o hasta que cambien sensores / conexión
         Rtos::sysBus.eventos.waitBits(
             Rtos::Evt::EVT_SENSORES_ACTUALIZADOS | Rtos::Evt::EVT_CONEXION_CAMBIO,
             true, false, 2000
@@ -32,14 +35,20 @@ protected:
 
         auto lock = Rtos::sysBus.lockI2c();
         if (!lock.isLocked() || !oled.estaInicializada()) return;
-        
-        gestorSensores.actualizarTodosLosSlots();
-        for (int i = 0; i < GestorSensores::MAX_SENSORES; ++i) {
-            const Sensor& sensor = gestorSensores.obtenerSensor(i);
-            if (!sensor.estaActivo()) continue;
-            oled.sensorTemperatura(i, sensor.obtenerTempCelsius(), sensor.estaActivo());
+
+        // Solo leemos el último valor en caché de RAM (SensorDbController se encarga del bus 1-Wire)
+        for (uint8_t i = 0; i < GestorSensores::MAX_SENSORES; ++i) {
+            const Sensor& s = gestorSensores.obtenerSensor(i);
+            if (!s.estaActivo()) {
+                oled.sensor(i, "S--: ---");
+            } else {
+                EstadoSensor est = s.obtenerEstado();
+                bool ok = (est == EstadoSensor::OK ||
+                           est == EstadoSensor::ALARMA_SUPERIOR ||
+                           est == EstadoSensor::ALARMA_INFERIOR);
+                oled.sensorTemperatura(i, s.obtenerTempCelsius(), ok);
+            }
         }
-        
     }
 
 private:

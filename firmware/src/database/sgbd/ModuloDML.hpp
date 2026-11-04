@@ -24,10 +24,13 @@ namespace SGBD {
 
             for (const auto& attr : esq.atributos) {
                 bool presente = (fila.find(attr.nombre) != fila.end());
+                bool idAutogenerado = false;
+
                 if (!presente && !esUpdate) {
                     if (attr.esAutoIncrement || attr.esPk) {
                         fila[attr.nombre] = String(cat.siguienteId(esq.nombreTabla));
                         presente = true;
+                        idAutogenerado = true;
                     } else if (attr.tieneDefault) {
                         fila[attr.nombre] = attr.valorDefault;
                         presente = true;
@@ -71,12 +74,9 @@ namespace SGBD {
                     return false;
                 }
 
-                if (!esUpdate && (attr.esPk || attr.esUnique)) {
-                    ConsultaDQL qU;
-                    qU.tabla = esq.nombreTabla;
-                    qU.proyeccionesRaw = { attr.nombre };
-                    qU.filtros.push_back({ attr.nombre, EQ, val });
-                    if (!ModuloDQL::getInstance().seleccionar(qU, true).empty()) {
+                // Verificación O(1) en RAM (streaming) y se saltea si el PK fue autogenerado por secuencia
+                if (!esUpdate && !idAutogenerado && (attr.esPk || attr.esUnique)) {
+                    if (ModuloDQL::getInstance().existeRegistro(esq.nombreTabla, attr.nombre, val)) {
                         ConsolaSQL::getInstance().reportarError(
                             "23505", "UNIQUE_VIOLATION", esq.nombreTabla + "." + attr.nombre,
                             "Ya existe un registro con " + attr.nombre + " = '" + val + "'."
@@ -85,12 +85,9 @@ namespace SGBD {
                     }
                 }
 
+                // Verificación FK O(1) en RAM (streaming)
                 if (attr.esFk) {
-                    ConsultaDQL qFk;
-                    qFk.tabla = attr.fkTablaDestino;
-                    qFk.proyeccionesRaw = { attr.fkColumnaDestino };
-                    qFk.filtros.push_back({ attr.fkColumnaDestino, EQ, val });
-                    if (ModuloDQL::getInstance().seleccionar(qFk, true).empty()) {
+                    if (!ModuloDQL::getInstance().existeRegistro(attr.fkTablaDestino, attr.fkColumnaDestino, val)) {
                         ConsolaSQL::getInstance().reportarError(
                             "23503", "FOREIGN_KEY_VIOLATION", esq.nombreTabla + "." + attr.nombre,
                             "No existe '" + attr.fkColumnaDestino + "=" + val + "' en la tabla padre '" + attr.fkTablaDestino + "'.",
@@ -118,9 +115,7 @@ namespace SGBD {
             if (esq && !validarRestricciones(*esq, fila, false)) return false;
 
             String linea = CatalogoSistema::serializarFila(fila);
-            bool ok = TarjetaSD::getInstance().anexarArchivo(cat.rutaTabla(tabla).c_str(), linea.c_str());
-            if (ok) ConsolaSQL::getInstance().reportarInfo("INSERT", "Fila guardada en '" + tabla + "'.");
-            return ok;
+            return TarjetaSD::getInstance().anexarArchivo(cat.rutaTabla(tabla).c_str(), linea.c_str());
         }
 
         bool actualizar(const String& tabla, const std::vector<CondicionFiltro>& filtros, Fila cambios) {
@@ -164,8 +159,7 @@ namespace SGBD {
                             String valP = fPadre.at(attrH.fkColumnaDestino);
                             std::vector<CondicionFiltro> fHijo = { { attrH.nombre, EQ, valP } };
                             if (attrH.fkOnDelete == RESTRICT) {
-                                ConsultaDQL qH; qH.tabla = esqHija.nombreTabla; qH.proyeccionesRaw = { "*" }; qH.filtros = fHijo;
-                                if (!ModuloDQL::getInstance().seleccionar(qH, true).empty()) {
+                                if (ModuloDQL::getInstance().existeRegistro(esqHija.nombreTabla, attrH.nombre, valP)) {
                                     ConsolaSQL::getInstance().reportarError(
                                         "23503", "FK_RESTRICT_VIOLATION", "DELETE FROM '" + tabla + "'",
                                         "Registro referenciado en '" + esqHija.nombreTabla + "' (" + attrH.nombre + "=" + valP + ").",

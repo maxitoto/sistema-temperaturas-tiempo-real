@@ -44,17 +44,19 @@ namespace SGBD {
         static bool esNumeroValido(const String& s) {
             if (s.isEmpty()) return false;
             int i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
-            if (i >= (int)s.length()) return false;
+            if (i >= static_cast<int>(s.length())) return false;
             bool pto = false;
-            for (; i < (int)s.length(); i++) {
+            for (; i < static_cast<int>(s.length()); i++) {
                 if (s[i] == '.') { if (pto) return false; pto = true; }
                 else if (!isdigit(s[i])) return false;
             }
             return true;
         }
 
-        // Lee todas las filas de una tabla física y agrega prefijos "Tabla.columna"
-        static std::vector<Fila> leerTablaConPrefijo(const String& nombreTabla) {
+        // Optimización de RAM: Solo agrega "Tabla.col" si conPrefijo == true (cuando hay JOINs) y filtra al vuelo si es posible
+        static std::vector<Fila> leerTabla(const String& nombreTabla, bool conPrefijo,
+                                           const std::vector<CondicionFiltro>* filtrosDirectos = nullptr,
+                                           int limiteDirecto = -1) {
             std::vector<Fila> lista;
             String ruta = CatalogoSistema::getInstance().rutaTabla(nombreTabla);
             File f = SD.open(ruta.c_str(), FILE_READ);
@@ -64,19 +66,34 @@ namespace SGBD {
                 String linea = f.readStringUntil('\n');
                 linea.trim();
                 if (linea.isEmpty()) continue;
-                Fila cruda = CatalogoSistema::deserializarFila(linea);
-                Fila enriquecida;
-                for (const auto& par : cruda) {
-                    enriquecida[par.first] = par.second;
-                    enriquecida[nombreTabla + "." + par.first] = par.second;
+
+                Fila fila = CatalogoSistema::deserializarFila(linea);
+                if (conPrefijo) {
+                    Fila enriquecida;
+                    for (const auto& par : fila) {
+                        enriquecida[par.first] = par.second;
+                        enriquecida[nombreTabla + "." + par.first] = par.second;
+                    }
+                    fila = std::move(enriquecida);
                 }
-                lista.push_back(enriquecida);
+
+                if (filtrosDirectos) {
+                    bool pasa = true;
+                    for (const auto& cond : *filtrosDirectos) {
+                        if (!evaluarCondicion(fila, cond)) { pasa = false; break; }
+                    }
+                    if (!pasa) continue;
+                }
+
+                lista.push_back(std::move(fila));
+                if (limiteDirecto > 0 && static_cast<int>(lista.size()) >= limiteDirecto) {
+                    break;
+                }
             }
             f.close();
             return lista;
         }
 
-        // Verifica si una columna (ej. "cvv" o "Usuario.nombre") existe en la tabla base o en los JOINs
         static bool validarExistenciaColumna(const ConsultaDQL& q, const String& colRef) {
             if (colRef == "*") return true;
             CatalogoSistema& cat = CatalogoSistema::getInstance();
@@ -90,7 +107,7 @@ namespace SGBD {
             }
 
             const EsquemaTabla* esqBase = cat.obtenerEsquema(q.tabla);
-            if (!esqBase) return true; // Modo sin esquema estricto
+            if (!esqBase) return true;
             if (esqBase->existeAtributo(colRef)) return true;
 
             for (const auto& j : q.joins) {
@@ -100,7 +117,6 @@ namespace SGBD {
             return false;
         }
 
-        // Autodetecta la relación FK entre dos tablas si el usuario llamó a .join("Usuario") sin columnas
         static bool resolverColumnasJoin(const String& tablaIzq, ClausulaJoin& j) {
             if (!j.colIzquierda.isEmpty() && !j.colDerecha.isEmpty()) return true;
 
@@ -110,7 +126,6 @@ namespace SGBD {
 
             if (!esqIzq || !esqDer) return false;
 
-            // Caso 1: La tabla izquierda tiene una FK apuntando a la tabla derecha (ej: Tarjeta -> Usuario)
             for (const auto& attr : esqIzq->atributos) {
                 if (attr.esFk && attr.fkTablaDestino.equalsIgnoreCase(j.tablaDerecha)) {
                     j.colIzquierda = attr.nombre;
@@ -118,8 +133,6 @@ namespace SGBD {
                     return true;
                 }
             }
-
-            // Caso 2: La tabla derecha tiene una FK apuntando a la izquierda (ej: Usuario -> Tarjeta)
             for (const auto& attr : esqDer->atributos) {
                 if (attr.esFk && attr.fkTablaDestino.equalsIgnoreCase(tablaIzq)) {
                     j.colIzquierda = attr.fkColumnaDestino;
@@ -137,6 +150,28 @@ namespace SGBD {
         }
         ModuloDQL(const ModuloDQL&) = delete;
         ModuloDQL& operator=(const ModuloDQL&) = delete;
+
+        // Búsqueda O(1) en RAM (streaming línea a línea): ideal para validar UNIQUE, PK y FK sin cargar la tabla en memoria
+        bool existeRegistro(const String& nombreTabla, const String& columna, const String& valor) const {
+            String ruta = CatalogoSistema::getInstance().rutaTabla(nombreTabla);
+            File f = SD.open(ruta.c_str(), FILE_READ);
+            if (!f) return false;
+
+            CondicionFiltro cond{columna, EQ, valor};
+            bool encontrado = false;
+            while (f.available()) {
+                String linea = f.readStringUntil('\n');
+                linea.trim();
+                if (linea.isEmpty()) continue;
+                Fila fila = CatalogoSistema::deserializarFila(linea);
+                if (evaluarCondicion(fila, cond)) {
+                    encontrado = true;
+                    break;
+                }
+            }
+            f.close();
+            return encontrado;
+        }
 
         static bool evaluarCondicion(const Fila& fila, const CondicionFiltro& cond) {
             auto it = fila.find(cond.columna);
@@ -198,7 +233,6 @@ namespace SGBD {
 
             CatalogoSistema& cat = CatalogoSistema::getInstance();
 
-            // 1. Validar y preparar los JOINs
             std::vector<ClausulaJoin> joinsResueltos = q.joins;
             for (auto& j : joinsResueltos) {
                 if (!silencioso && !ModuloDCL::getInstance().autorizar(j.tablaDerecha, PERM_SELECT, "JOIN SELECT")) {
@@ -223,7 +257,6 @@ namespace SGBD {
                 }
             }
 
-            // 2. Clasificar columnas solicitadas y funciones agregadas
             std::vector<String> colsSimples;
             std::vector<FuncionAgregada> agregaciones;
 
@@ -252,7 +285,6 @@ namespace SGBD {
                 }
             }
 
-            // 3. Validar regla SQL de GROUP BY
             if (!agregaciones.empty() && !colsSimples.empty()) {
                 for (const auto& c : colsSimples) {
                     bool enGroup = false;
@@ -270,66 +302,74 @@ namespace SGBD {
                 }
             }
 
-            // 4. Leer tabla base y ejecutar todos los JOINs en cascada
-            std::vector<Fila> trabajo = leerTablaConPrefijo(q.tabla);
+            const bool tieneJoins = !joinsResueltos.empty();
+            const bool puedeLimitarEnLectura = !tieneJoins && agregaciones.empty() && q.groupByCols.empty() && q.columnaOrden.isEmpty();
 
-            for (const auto& j : joinsResueltos) {
-                std::vector<Fila> filasDerecha = leerTablaConPrefijo(j.tablaDerecha);
-                std::vector<Fila> nuevoTrabajo;
-                const EsquemaTabla* esqDer = cat.obtenerEsquema(j.tablaDerecha);
+            // Si no hay JOINs, filtramos con WHERE directamente al leer del archivo y sin duplicar claves "Tabla.col"
+            std::vector<Fila> filtradas = leerTabla(
+                q.tabla,
+                tieneJoins,
+                tieneJoins ? nullptr : &q.filtros,
+                puedeLimitarEnLectura ? q.limite : -1
+            );
 
-                String claveIzq = (j.colIzquierda.indexOf('.') != -1) ? j.colIzquierda : (q.tabla + "." + j.colIzquierda);
-                String claveDer = (j.colDerecha.indexOf('.') != -1)   ? j.colDerecha   : (j.tablaDerecha + "." + j.colDerecha);
+            if (tieneJoins) {
+                std::vector<Fila> trabajo = std::move(filtradas);
+                for (const auto& j : joinsResueltos) {
+                    std::vector<Fila> filasDerecha = leerTabla(j.tablaDerecha, true);
+                    std::vector<Fila> nuevoTrabajo;
+                    const EsquemaTabla* esqDer = cat.obtenerEsquema(j.tablaDerecha);
 
-                for (const auto& rIzq : trabajo) {
-                    String valIzq = "";
-                    if (rIzq.count(claveIzq)) valIzq = rIzq.at(claveIzq);
-                    else if (rIzq.count(j.colIzquierda)) valIzq = rIzq.at(j.colIzquierda);
+                    String claveIzq = (j.colIzquierda.indexOf('.') != -1) ? j.colIzquierda : (q.tabla + "." + j.colIzquierda);
+                    String claveDer = (j.colDerecha.indexOf('.') != -1)   ? j.colDerecha   : (j.tablaDerecha + "." + j.colDerecha);
 
-                    bool huboMatch = false;
-                    for (const auto& rDer : filasDerecha) {
-                        String valDer = "";
-                        if (rDer.count(claveDer)) valDer = rDer.at(claveDer);
-                        else if (rDer.count(j.colDerecha)) valDer = rDer.at(j.colDerecha);
+                    for (const auto& rIzq : trabajo) {
+                        String valIzq = "";
+                        if (rIzq.count(claveIzq)) valIzq = rIzq.at(claveIzq);
+                        else if (rIzq.count(j.colIzquierda)) valIzq = rIzq.at(j.colIzquierda);
 
-                        if (!valIzq.isEmpty() && valIzq != "NULL" && valIzq == valDer) {
-                            huboMatch = true;
+                        bool huboMatch = false;
+                        for (const auto& rDer : filasDerecha) {
+                            String valDer = "";
+                            if (rDer.count(claveDer)) valDer = rDer.at(claveDer);
+                            else if (rDer.count(j.colDerecha)) valDer = rDer.at(j.colDerecha);
+
+                            if (!valIzq.isEmpty() && valIzq != "NULL" && valIzq == valDer) {
+                                huboMatch = true;
+                                Fila combinada = rIzq;
+                                for (const auto& parDer : rDer) {
+                                    if (parDer.first.indexOf('.') != -1 || combinada.find(parDer.first) == combinada.end()) {
+                                        combinada[parDer.first] = parDer.second;
+                                    }
+                                }
+                                nuevoTrabajo.push_back(std::move(combinada));
+                            }
+                        }
+
+                        if (!huboMatch && j.tipo == LEFT_JOIN) {
                             Fila combinada = rIzq;
-                            for (const auto& parDer : rDer) {
-                                // Conserva "Usuario.nombre" siempre, y agrega "nombre" si no pisa una columna de la tabla principal
-                                if (parDer.first.indexOf('.') != -1 || combinada.find(parDer.first) == combinada.end()) {
-                                    combinada[parDer.first] = parDer.second;
+                            if (esqDer) {
+                                for (const auto& a : esqDer->atributos) {
+                                    combinada[j.tablaDerecha + "." + a.nombre] = "NULL";
+                                    if (combinada.find(a.nombre) == combinada.end()) combinada[a.nombre] = "NULL";
                                 }
                             }
-                            nuevoTrabajo.push_back(combinada);
+                            nuevoTrabajo.push_back(std::move(combinada));
                         }
                     }
+                    trabajo = std::move(nuevoTrabajo);
+                }
 
-                    if (!huboMatch && j.tipo == LEFT_JOIN) {
-                        Fila combinada = rIzq;
-                        if (esqDer) {
-                            for (const auto& a : esqDer->atributos) {
-                                combinada[j.tablaDerecha + "." + a.nombre] = "NULL";
-                                if (combinada.find(a.nombre) == combinada.end()) combinada[a.nombre] = "NULL";
-                            }
-                        }
-                        nuevoTrabajo.push_back(combinada);
+                filtradas.clear();
+                for (auto& f : trabajo) {
+                    bool pasa = true;
+                    for (const auto& cond : q.filtros) {
+                        if (!evaluarCondicion(f, cond)) { pasa = false; break; }
                     }
+                    if (pasa) filtradas.push_back(std::move(f));
                 }
-                trabajo = std::move(nuevoTrabajo);
             }
 
-            // 5. Filtrar con WHERE
-            std::vector<Fila> filtradas;
-            for (const auto& f : trabajo) {
-                bool pasa = true;
-                for (const auto& cond : q.filtros) {
-                    if (!evaluarCondicion(f, cond)) { pasa = false; break; }
-                }
-                if (pasa) filtradas.push_back(f);
-            }
-
-            // 6. Agrupar o Proyectar
             std::vector<Fila> resultado;
             if (!agregaciones.empty() || !q.groupByCols.empty()) {
                 std::map<String, std::vector<Fila>> grupos;
@@ -364,28 +404,28 @@ namespace SGBD {
                             resG[ag.alias] = String((ag.funcion == "AVG" && !fgList.empty()) ? (s / fgList.size()) : s, 2);
                         }
                     }
-                    resultado.push_back(resG);
+                    resultado.push_back(std::move(resG));
                 }
             } else {
-                for (const auto& f : filtradas) {
+                for (auto& f : filtradas) {
                     if (!colsSimples.empty() && colsSimples[0] != "*") {
                         Fila proy;
                         for (const auto& c : colsSimples) {
                             proy[c] = f.count(c) ? f.at(c) : "NULL";
                         }
-                        resultado.push_back(proy);
-                    } else {
-                        // Si se pidió SELECT *, limpiamos las claves duplicadas con prefijo de la tabla principal
+                        resultado.push_back(std::move(proy));
+                    } else if (tieneJoins) {
                         Fila limpia;
                         for (const auto& kv : f) {
                             if (!kv.first.startsWith(q.tabla + ".")) limpia[kv.first] = kv.second;
                         }
-                        resultado.push_back(limpia);
+                        resultado.push_back(std::move(limpia));
+                    } else {
+                        resultado.push_back(std::move(f));
                     }
                 }
             }
 
-            // 7. ORDER BY y LIMIT
             if (!q.columnaOrden.isEmpty()) {
                 std::sort(resultado.begin(), resultado.end(), [&](const Fila& a, const Fila& b) {
                     String vA = a.count(q.columnaOrden) ? a.at(q.columnaOrden) : "";
@@ -396,7 +436,7 @@ namespace SGBD {
                     return (q.orden == ASC) ? (vA < vB) : (vA > vB);
                 });
             }
-            if (q.limite > 0 && (int)resultado.size() > q.limite) {
+            if (q.limite > 0 && static_cast<int>(resultado.size()) > q.limite) {
                 resultado.resize(q.limite);
             }
             return resultado;

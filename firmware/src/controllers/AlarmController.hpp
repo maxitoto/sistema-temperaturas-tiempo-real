@@ -39,26 +39,17 @@ protected:
         const bool botonActual = digitalRead(Pin::PIN_BOTON_BOOT);
         const uint32_t ahora = millis();
 
+        // Detectar flanco descendente del botón físico BOOT con anti-rebote
         if (botonMuteAnterior_ == HIGH &&
             botonActual == LOW &&
-            ahora - ultimoBotonMuteMs_ > 250) {
-
+            (ahora - ultimoBotonMuteMs_ > 250)) {
             ultimoBotonMuteMs_ = ahora;
             Rtos::sysBus.semMuteAlarma.give();
         }
-
         botonMuteAnterior_ = botonActual;
 
-        // Procesar solicitud de mute.
+        // 1. Procesar solicitud de mute (tanto desde botón físico como desde RPC)
         if (Rtos::sysBus.semMuteAlarma.take(0)) {
-            maskMuteadas_ |= maskEnAlarma_;
-            Buzz::getInstance().silenciarBuzz();
-        }
-
-        // 1. Verificar si se disparó el semáforo binario de Mute (con espera 0, no bloqueante)
-        if (Rtos::sysBus.semMuteAlarma.take(0)) {
-            uint32_t ahora = millis();
-
             if (ahora - ultimoMuteMs_ > 250) {
                 ultimoMuteMs_ = ahora;
                 maskMuteadas_ |= maskEnAlarma_;
@@ -113,13 +104,11 @@ private:
     uint8_t maskEnAlarma_ = 0;
     uint8_t maskMuteadas_ = 0;
     uint32_t ultimoMuteMs_ = 0;
-
-    AlarmController()
-    : Rtos::RtosTask("AlarmTask", 3072, 2, 1,
-                     Rtos::TaskMode::HYBRID, 20) {}
-
     bool botonMuteAnterior_ = HIGH;
     uint32_t ultimoBotonMuteMs_ = 0;
+
+    AlarmController()
+        : Rtos::RtosTask("AlarmTask", 3072, 2, 1, Rtos::TaskMode::HYBRID, 20) {}
 };
 
 inline AlarmController& alarmController = AlarmController::instance();

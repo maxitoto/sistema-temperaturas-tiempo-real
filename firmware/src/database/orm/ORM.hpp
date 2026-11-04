@@ -19,19 +19,21 @@ public:
         SGBD::AtributoDef* actual() { return esquema.atributos.empty() ? nullptr : &esquema.atributos.back(); }
 
     public:
-        TableBuilder(const String& nombre, bool alter = false) : esAlter(alter) {
+        __attribute__((noinline)) TableBuilder(const String& nombre, bool alter = false) : esAlter(alter) {
             esquema.nombreTabla = nombre;
             if (alter) {
                 const auto* ex = SGBD::CatalogoSistema::getInstance().obtenerEsquema(nombre);
                 if (!ex) {
                     SGBD::ConsolaSQL::getInstance().reportarError("42P01", "UNDEFINED_TABLE", "ALTER TABLE", "No existe '" + nombre + "'.");
                     tieneError = true;
-                } else esquema = *ex;
+                } else {
+                    esquema = *ex;
+                }
             }
         }
         ~TableBuilder() { if (!comiteado) execute(); }
 
-        TableBuilder& addAttribute(const String& n) {
+        __attribute__((noinline)) TableBuilder& addAttribute(const String& n) {
             if (esquema.existeAtributo(n)) {
                 SGBD::ConsolaSQL::getInstance().reportarError(
                     "42701", "DUPLICATE_COLUMN", "TABLE '" + esquema.nombreTabla + "'",
@@ -41,20 +43,23 @@ public:
                 tieneError = true;
                 return *this;
             }
-            SGBD::AtributoDef a; a.nombre = n;
+            SGBD::AtributoDef a;
+            a.nombre = n;
             esquema.atributos.push_back(a);
             return *this;
         }
         TableBuilder& addAtribute(const String& n) { return addAttribute(n); }
+        TableBuilder& addAttribute(const char* n)  { return addAttribute(String(n ? n : "")); }
+        TableBuilder& addAtribute(const char* n)   { return addAttribute(String(n ? n : "")); }
 
-        TableBuilder& typeInt()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_INT;   return *this; }
-        TableBuilder& typeFloat() { if (auto* a = actual()) a->tipo = SGBD::TYPE_FLOAT; return *this; }
-        TableBuilder& typeStr()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_STR;   return *this; }
-        TableBuilder& typeSrt()   { return typeStr(); }
-        TableBuilder& typeBool()  { if (auto* a = actual()) a->tipo = SGBD::TYPE_BOOL;  return *this; }
+        __attribute__((noinline)) TableBuilder& typeInt()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_INT;   return *this; }
+        __attribute__((noinline)) TableBuilder& typeFloat() { if (auto* a = actual()) a->tipo = SGBD::TYPE_FLOAT; return *this; }
+        __attribute__((noinline)) TableBuilder& typeStr()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_STR;   return *this; }
+        TableBuilder& typeSrt()                             { return typeStr(); }
+        __attribute__((noinline)) TableBuilder& typeBool()  { if (auto* a = actual()) a->tipo = SGBD::TYPE_BOOL;  return *this; }
 
         template <typename TEnum, std::enable_if_t<std::is_enum_v<TEnum>, int> = 0>
-        TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
+        __attribute__((noinline)) TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
             if (auto* a = actual()) {
                 a->tipo = SGBD::TYPE_ENUM;
                 a->valoresEnum.clear();
@@ -66,12 +71,18 @@ public:
             return *this;
         }
 
-        TableBuilder& pk() { if (auto* a = actual()) { a->esPk = a->esNotNull = a->esUnique = true; } return *this; }
-        TableBuilder& notNull() { if (auto* a = actual()) a->esNotNull = true; return *this; }
-        TableBuilder& unique()  { if (auto* a = actual()) a->esUnique = true;  return *this; }
-        TableBuilder& varChar(size_t len) { if (auto* a = actual()) { a->tipo = SGBD::TYPE_STR; a->maxVarchar = len; } return *this; }
+        __attribute__((noinline)) TableBuilder& pk() {
+            if (auto* a = actual()) { a->esPk = a->esNotNull = a->esUnique = true; }
+            return *this;
+        }
+        __attribute__((noinline)) TableBuilder& notNull() { if (auto* a = actual()) a->esNotNull = true; return *this; }
+        __attribute__((noinline)) TableBuilder& unique()  { if (auto* a = actual()) a->esUnique = true;  return *this; }
+        __attribute__((noinline)) TableBuilder& varChar(size_t len) {
+            if (auto* a = actual()) { a->tipo = SGBD::TYPE_STR; a->maxVarchar = len; }
+            return *this;
+        }
 
-        TableBuilder& valueDefault(const String& v) {
+        __attribute__((noinline)) TableBuilder& valueDefault(const String& v) {
             if (auto* a = actual()) { a->tieneDefault = true; a->valorDefault = v; }
             return *this;
         }
@@ -87,20 +98,25 @@ public:
             return valueDefault(String(static_cast<int32_t>(valorEnum)));
         }
 
-        TableBuilder& check(SGBD::CheckPredicado fn, const char* desc = "CHECK") {
-            if (auto* a = actual()) { a->fnCheck = fn; a->exprCheckTexto = desc; }
+        __attribute__((noinline)) TableBuilder& check(SGBD::CheckPredicado fn, const char* desc = "CHECK") {
+            if (auto* a = actual()) { a->fnCheck = fn; a->exprCheckTexto = desc ? desc : "CHECK"; }
             return *this;
         }
 
-        TableBuilder& fk(const String& tPadre, const String& cPadre, SGBD::AccionFK onDel = SGBD::RESTRICT) {
-            if (auto* a = actual()) { a->esFk = true; a->fkTablaDestino = tPadre; a->fkColumnaDestino = cPadre; a->fkOnDelete = onDel; }
+        __attribute__((noinline)) TableBuilder& fk(const String& tPadre, const String& cPadre, SGBD::AccionFK onDel = SGBD::RESTRICT) {
+            if (auto* a = actual()) {
+                a->esFk = true;
+                a->fkTablaDestino = tPadre;
+                a->fkColumnaDestino = cPadre;
+                a->fkOnDelete = onDel;
+            }
             return *this;
         }
         TableBuilder& FK(const String& tPadre, const String& cPadre, SGBD::AccionFK onDel = SGBD::RESTRICT) {
             return fk(tPadre, cPadre, onDel);
         }
 
-        bool execute() {
+        __attribute__((noinline)) bool execute() {
             comiteado = true;
             if (tieneError) return false;
             return SGBD::MotorSGBD::getInstance().ddl().crearTabla(esquema);
@@ -146,7 +162,7 @@ public:
         QueryBuilder& select(const String& proyeccion = "*") {
             q.proyeccionesRaw.clear();
             int ini = 0;
-            while (ini < (int)proyeccion.length()) {
+            while (ini < static_cast<int>(proyeccion.length())) {
                 int coma = proyeccion.indexOf(',', ini);
                 if (coma == -1) coma = proyeccion.length();
                 String col = proyeccion.substring(ini, coma);
@@ -157,13 +173,11 @@ public:
             return *this;
         }
 
-        // JOIN automático usando la FK declarada en el esquema: .join("Usuario")
         QueryBuilder& join(const String& tablaDerecha, SGBD::TipoJoin tipo = SGBD::INNER_JOIN) {
             q.joins.push_back({ tablaDerecha, "", "", tipo });
             return *this;
         }
 
-        // JOIN explícito indicando las columnas: .join("Usuario", "id_usuario_fk", "id", INNER_JOIN)
         QueryBuilder& join(const String& tablaDerecha, const String& colIzq, const String& colDer, SGBD::TipoJoin tipo = SGBD::INNER_JOIN) {
             q.joins.push_back({ tablaDerecha, colIzq, colDer, tipo });
             return *this;

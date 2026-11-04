@@ -1,5 +1,4 @@
 #pragma once
-
 #include "../../orm/ORM.hpp"
 
-auto obtenerUsuarioPorNombre(char* nombre);
+std::vector<SGBD::Fila> obtenerUsuarioPorNombre(const char* nombre);

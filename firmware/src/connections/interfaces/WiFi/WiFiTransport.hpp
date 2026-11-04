@@ -73,7 +73,6 @@ public:
             cfg_ = WifiConfig{};
         }
         tcpCrypto_.loadConfig();
-        udpCrypto_.loadConfig();
     }
 
     bool applyConfig(const WifiConfig& in) {
