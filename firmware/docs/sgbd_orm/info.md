@@ -18,3 +18,9 @@ auto datos = db.from("Tarjeta")
                .join("Usuario")
                .eq("Usuario.dni", "42123456")
                .execute();
+```
+
+```cpp
+db.createTable("Usuario")
+.addAtribute("id_usuario").typeInt().pk().autoIncemental()
+.addAtribute("nombre").typeSrt().notNull().default("Tomás");
