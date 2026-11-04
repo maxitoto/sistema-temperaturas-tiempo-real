@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/ModuloDDL.hpp
 #pragma once
 #include "CatalogoSistema.hpp"
 #include "ModuloDCL.hpp"

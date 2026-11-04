@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/MotorSGBD.hpp
 #pragma once
 #include "CatalogoSistema.hpp"
 #include "ModuloDDL.hpp"

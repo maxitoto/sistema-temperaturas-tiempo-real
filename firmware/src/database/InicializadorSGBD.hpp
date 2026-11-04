@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/InicializadorSGBD.hpp
 #pragma once
 #include "../hardware/driver/tarjetasd/TarjetaSD.hpp"
 #include "orm/ORM.hpp"

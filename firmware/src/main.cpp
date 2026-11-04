@@ -1,24 +1,30 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <iostream>
+
+#include "connections/CommunicationContainer.hpp"
+#include "apis/apiRegistry.hpp"
 #include "database/InicializadorSGBD.hpp"
 #include "database/EsquemaFisico.hpp"
-#include "hardware/driver/oled/Oled.h"
-
+#include "controllers/ControllerRegistry.hpp"
 
 void setup() {
-    delay(1000);
-    iniciarOled();
-    iniciarSGBDyORM(); // 1. Inicia la base de datos (SD + SGBD) y el ORM
-    iniciarEsquema();  // 2. Ejecuta el modelo físico (diccionario de datos)
+    // 1. Inicializar almacenamiento MicroSD, SGBD y esquema físico del ORM
+    if (iniciarSGBDyORM()) {
+        iniciarEsquema();
+    }
 
-    Serial.println("Hola Mundo.");
-    std::cout << "hola mundo!" << std::endl; //se escribe literal!
-    delay(250);
+    // 2. Inicializar contenedor de comunicaciones y registrar las APIs por dominio
+    Connections::comm.begin();
+    Apis::registrarTodasLasApis();
+
+    // 3. Arrancar todas las tareas y controladores FreeRTOS (Comm, SensorDb, Alarm, Oled)
+    Controllers::iniciarTodosLosControladores();
+
+    // 4. Eliminar la tarea de arranque de Arduino (toda la ejecución queda gobernada por FreeRTOS)
     vTaskDelete(nullptr);
 }
 
 void loop() {
-    // Inaccesible después de eliminar esta tarea.
+    // Inaccesible: gobernado por los controladores FreeRTOS.
 }

@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/CatalogoSistema.hpp
 #pragma once
 #include <Arduino.h>
 #include <map>

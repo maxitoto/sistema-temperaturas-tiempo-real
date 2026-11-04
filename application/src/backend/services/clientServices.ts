@@ -1,6 +1,7 @@
-// Archivo: ./src/backend/services/clientServices.ts
-import { conexionesBackend } from "../connections/ContenedorComunicacion"
+import { conexionApi, sensoresApi, sistemaApi } from "../apis";
 
 export const clientServices = {
-  ...conexionesBackend
+  ...conexionApi,
+  ...sensoresApi,
+  ...sistemaApi,
 };

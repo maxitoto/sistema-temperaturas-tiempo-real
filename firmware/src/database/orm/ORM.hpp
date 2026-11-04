@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/orm/ORM.hpp
 #pragma once
 #include "../sgbd/MotorSGBD.hpp"
 
@@ -53,12 +52,15 @@ public:
         TableBuilder& typeStr()   { if (auto* a = actual()) a->tipo = SGBD::TYPE_STR;   return *this; }
         TableBuilder& typeSrt()   { return typeStr(); }
         TableBuilder& typeBool()  { if (auto* a = actual()) a->tipo = SGBD::TYPE_BOOL;  return *this; }
-        template <typename TEnum>
+
+        template <typename TEnum, std::enable_if_t<std::is_enum_v<TEnum>, int> = 0>
         TableBuilder& typeEnum(std::initializer_list<TEnum> valoresPermitidos = {}) {
             if (auto* a = actual()) {
                 a->tipo = SGBD::TYPE_ENUM;
                 a->valoresEnum.clear();
-                for (auto v : valoresPermitidos) a->valoresEnum.push_back(static_cast<int32_t>(v));
+                for (auto v : valoresPermitidos) {
+                    a->valoresEnum.push_back(static_cast<int32_t>(v));
+                }
                 a->exprCheckTexto = "VALOR_FUERA_DE_ENUM";
             }
             return *this;
@@ -68,8 +70,19 @@ public:
         TableBuilder& notNull() { if (auto* a = actual()) a->esNotNull = true; return *this; }
         TableBuilder& unique()  { if (auto* a = actual()) a->esUnique = true;  return *this; }
         TableBuilder& varChar(size_t len) { if (auto* a = actual()) { a->tipo = SGBD::TYPE_STR; a->maxVarchar = len; } return *this; }
-        TableBuilder& valueDefault(const String& v) { if (auto* a = actual()) { a->tieneDefault = true; a->valorDefault = v; } return *this; }
-        template <typename TEnum>
+
+        TableBuilder& valueDefault(const String& v) {
+            if (auto* a = actual()) { a->tieneDefault = true; a->valorDefault = v; }
+            return *this;
+        }
+        TableBuilder& valueDefault(const char* v) {
+            return valueDefault(String(v ? v : ""));
+        }
+        template <typename TInt, std::enable_if_t<std::is_arithmetic_v<TInt>, int> = 0>
+        TableBuilder& valueDefault(TInt v) {
+            return valueDefault(String(v));
+        }
+        template <typename TEnum, std::enable_if_t<std::is_enum_v<TEnum>, int> = 0>
         TableBuilder& valueDefault(TEnum valorEnum) {
             return valueDefault(String(static_cast<int32_t>(valorEnum)));
         }

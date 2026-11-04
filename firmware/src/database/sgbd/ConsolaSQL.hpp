@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/ConsolaSQL.hpp
 #pragma once
 #include <Arduino.h>
 

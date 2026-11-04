@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/ModuloDQL.hpp
 #pragma once
 #include <Arduino.h>
 #include <SD.h>

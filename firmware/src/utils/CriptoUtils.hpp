@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/CriptoUtils.hpp
 #pragma once
 #include <Arduino.h>
 #include <vector>

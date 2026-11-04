@@ -1,4 +1,3 @@
-// Archivo: src/tests/SQLite/sgbd/TiposSGBD.hpp
 #pragma once
 #include <Arduino.h>
 #include <functional>

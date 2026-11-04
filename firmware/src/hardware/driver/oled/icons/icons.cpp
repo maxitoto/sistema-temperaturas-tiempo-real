@@ -1,4 +1,4 @@
-#include "icons.h"
+#include "icons.hpp"
 
 #define BYTES_ESPERADOS(ancho, alto)  ((((ancho) + 7) / 8) * (alto))
 #define VALIDAR_ICONO(nombre, ancho, alto)                            \
