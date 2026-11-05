@@ -1,7 +1,6 @@
 #pragma once
 #include "DTOs/RpcDto.hpp"
 #include "Skeletons/RpcSkeleton.hpp"
-#include "Stubs/RpcStub.hpp"
 #include "../../proxy/TransportProxy.hpp"
 #include <Arduino.h>
 #include <functional>
@@ -57,16 +56,7 @@ public:
             if (env.type == PacketType::Request ||
                (env.type == PacketType::StreamChunk && (env.flow == RpcFlow::ClientStream || env.flow == RpcFlow::BidiStream))) {
                 skeleton_.onIncomingPacket(clientId, sessionId, env);
-            } else if (attachedStub_) {
-                attachedStub_->onIncomingResponse(clientId, env);
             }
-        });
-    }
-
-    void attachClientStub(RpcStub* stub) {
-        attachedStub_ = stub;
-        proxy_.setBusyCheck([stub](uint32_t clientId) {
-            return stub ? stub->hasActiveOperations(clientId) : false;
         });
     }
 
@@ -114,7 +104,6 @@ public:
 
     void run() {
         proxy_.schedule();
-        if (attachedStub_) attachedStub_->pollRetries();
     }
 
     RpcSkeleton& skeleton() { return skeleton_; }
@@ -122,48 +111,6 @@ public:
 private:
     Connections::TransportProxy& proxy_;
     RpcSkeleton skeleton_;
-    RpcStub* attachedStub_ = nullptr;
-};
-
-class client {
-public:
-    explicit client(Connections::TransportProxy& proxy, server* srv = nullptr)
-        : proxy_(proxy), stub_(proxy) {
-        stub_.loadConfig();
-        if (srv) {
-            srv->attachClientStub(&stub_);
-        } else {
-            proxy_.setRpcHandler([this](uint32_t clientId, uint32_t, const std::vector<uint8_t>& raw, bool) {
-                RpcEnvelope env;
-                if (MsgPack::unpackEnvelope(raw, env)) {
-                    stub_.onIncomingResponse(clientId, env);
-                }
-            });
-        }
-    }
-
-    template <typename TResp, typename TCallback, typename... Args>
-    uint32_t call_async(uint32_t clientId, std::string_view name, TCallback&& onResult, Args&&... args) {
-        auto tupleArgs = std::make_tuple(std::forward<Args>(args)...);
-        std::vector<uint8_t> payload = MsgPack::serialize(tupleArgs);
-
-        return stub_.invoke(
-            clientId, name, RpcFlow::Unary, RpcSemantics::AtMostOnce, payload, true,
-            [cb = std::forward<TCallback>(onResult)](const std::vector<uint8_t>& raw, bool) {
-                TResp decoded{};
-                if (MsgPack::deserialize(raw, decoded)) {
-                    cb(decoded);
-                }
-            },
-            nullptr
-        );
-    }
-
-    RpcStub& stub() { return stub_; }
-
-private:
-    Connections::TransportProxy& proxy_;
-    RpcStub stub_;
 };
 
 } // namespace Messages::Rpc

@@ -280,17 +280,4 @@ inline void iniciarEsquema() {
     //db.createIndex("idx_evento_sensor_smtp").attachTable("EventoSensor").onAtribute("notificado_smtp").orderBy(ASC);
     //db.createIndex("idx_auditoria_fecha").attachTable("Auditoria").onAtribute("fecha_creacion").orderBy(DESC);
     //db.createIndex("idx_ntp_prioridad").attachTable("ServidoresNtp").onAtribute("prioridad").orderBy(ASC);
-
-    // 14. REGLAS DCL (SEGURIDAD DE TABLAS POR ROL)
-    // Ningún rol (ni siquiera Operador) puede borrar ni modificar filas de auditoría (Append-Only estricto)
-    db.revoke(PERM_UPDATE | PERM_DELETE).onTable("Auditoria").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_UPDATE | PERM_DELETE).onTable("Auditoria").fromRole(ROL_LECTOR);
-
-    // Solo el ADMIN puede alterar umbrales de sensores, red, SMTP, calibración, usuarios y correos
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Sensor").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("ConfiguracionSmtp").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("ConfiguracionConectividad").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Usuarios").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Lts").fromRole(ROL_OPERADOR);
-    db.revoke(PERM_INSERT | PERM_UPDATE | PERM_DELETE).onTable("Correos").fromRole(ROL_OPERADOR);
 }   

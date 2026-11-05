@@ -47,11 +47,9 @@ inline void registrarConexionApi() {
         return comm.uartS.reliability().applyConfig(rcfg, comm.proxy.getConfig().linkTimeoutMs);
     });
 
-    // 6. Configurar parámetros de la capa RPC (Skeleton + Stub)
-    comm.srv.bind("rpc.configure", [&comm](uint32_t maxHist, uint32_t /*ttlMs*/, uint32_t retryMs, uint8_t maxRetries) -> bool {
-        bool ok1 = comm.srv.skeleton().applyConfig(maxHist);
-        bool ok2 = comm.c.stub().applyConfig(retryMs, maxRetries);
-        return ok1 && ok2;
+    // 6. Configurar parámetros de la capa RPC (solo Skeleton de servidor)
+    comm.srv.bind("rpc.configure", [&comm](uint32_t maxHist, uint32_t /*ttlMs*/, uint32_t /*retryMs*/, uint8_t /*maxRetries*/) -> bool {
+        return comm.srv.skeleton().applyConfig(maxHist);
     });
 
     // 7. Lectura consolidada de configuración activa sin exponer claves
@@ -71,8 +69,8 @@ inline void registrarConexionApi() {
             r.maxRetries,
             static_cast<uint32_t>(r.maxChunkSize),
             static_cast<uint32_t>(comm.srv.skeleton().maxHistoryEntries()),
-            comm.c.stub().retryTimeoutMs(),
-            comm.c.stub().maxRpcRetries()
+            0,
+            0
         };
     });
 }

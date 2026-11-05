@@ -187,46 +187,6 @@ public:
             }
             s.wasAuthenticated = isAuth;
 
-            if (isAuth) {
-                if (now >= s.lastRxMs && (now - s.lastRxMs > cfg_.linkTimeoutMs)) {
-                    s.lastReason = DisconnectReason::LINK_TIMEOUT;
-                    t->disconnect();
-                    s.wasAuthenticated = false;
-                    s.closingGracefully = false;
-                    notifyDisconnected(s, DisconnectReason::LINK_TIMEOUT);
-                    continue;
-                }
-
-                if (s.closingGracefully) {
-                    if (now >= s.gracefulCloseStartMs &&
-                        (now - s.gracefulCloseStartMs >= cfg_.gracefulWaitMs)) {
-                        s.lastReason = DisconnectReason::IDLE_NO_AGREEMENT;
-                        t->closeIdle();
-                        s.wasAuthenticated = false;
-                        s.closingGracefully = false;
-                        notifyDisconnected(s, DisconnectReason::IDLE_NO_AGREEMENT);
-                        continue;
-                    }
-                } else if (now >= s.lastRpcActivityMs &&
-                           (now - s.lastRpcActivityMs >= s.negotiatedIdleMs)) {
-                    if (busyCheck_ && busyCheck_(s.clientId)) {
-                        s.lastRpcActivityMs = now;
-                    } else {
-                        s.closingGracefully = true;
-                        s.gracefulCloseStartMs = now;
-                        sendControlFrame(m, s.peerId, PROXY_IDLE_CLOSE);
-                        continue;
-                    }
-                }
-
-                if (!s.closingGracefully &&
-                    now >= s.lastProbeTxMs &&
-                    (now - s.lastProbeTxMs >= cfg_.probeIntervalMs) &&
-                    (now - s.lastRxMs >= cfg_.probeIntervalMs)) {
-                    sendControlFrame(m, s.peerId, PROXY_PING);
-                    s.lastProbeTxMs = now;
-                }
-            }
         }
 
         size_t processed = 0;

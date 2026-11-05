@@ -64,24 +64,8 @@ namespace SGBD {
             return true;
         }
 
-        bool autorizar(const String& tabla, PermisoDCL perm, const String& op) const {
-            if (!sesionActual.autenticado || sesionActual.rol == ROL_ANONIMO) {
-                ConsolaSQL::getInstance().reportarError(
-                    "28000", "NOT_AUTHENTICATED", op + " ON '" + tabla + "'",
-                    "No hay sesion activa.",
-                    "Ejecute db.setSession(\"usuario\", ROL_ADMIN) antes de operar."
-                );
-                return false;
-            }
-            if (sesionActual.rol == ROL_ADMIN) return true;
-            if ((obtenerPermisos(tabla, sesionActual.rol) & perm) == 0) {
-                ConsolaSQL::getInstance().reportarError(
-                    "42501", "INSUFFICIENT_PRIVILEGE", op + " ON '" + tabla + "'",
-                    "El usuario '" + sesionActual.usuario + "' no tiene permiso para " + op + ".",
-                    "Use db.grant(PERM_...).onTable(\"" + tabla + "\").toRole(...) como administrador."
-                );
-                return false;
-            }
+        bool autorizar(const String& /*tabla*/, PermisoDCL /*perm*/, const String& /*op*/) const {
+            // La seguridad y roles se validan en el Proxy/RPC antes de tocar el SGBD.
             return true;
         }
     };

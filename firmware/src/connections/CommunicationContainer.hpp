@@ -15,7 +15,6 @@ public:
     UartS::UartSTransport uartS;
     Wifi::WifiTransport wifi;
     rpc::server srv;
-    rpc::client c;
 
     static CommunicationContainer& instance() {
         static CommunicationContainer inst;
@@ -46,7 +45,7 @@ public:
 
 private:
     CommunicationContainer()
-        : uartS(Serial), srv(proxy), c(proxy, &srv) {}
+        : uartS(Serial), srv(proxy) {}
 
     CommunicationContainer(const CommunicationContainer&) = delete;
     CommunicationContainer& operator=(const CommunicationContainer&) = delete;

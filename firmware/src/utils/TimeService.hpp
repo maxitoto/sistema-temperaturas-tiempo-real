@@ -170,18 +170,6 @@ public:
         return false;
     }
 
-    // Pide silenciosamente el timestamp al cliente recién conectado por RPC
-    void solicitarHoraACliente(uint32_t clientId = 0) {
-        if (estaSincronizado()) return;
-        Connections::comm.c.call_async<uint64_t>(
-            clientId,
-            "client.get_timestamp",
-            [this](uint64_t tsCliente) {
-                this->establecerEpoch(tsCliente);
-            }
-        );
-    }
-
 private:
     bool sincronizado_ = false;
     bool esperandoCliente_ = true;

@@ -58,17 +58,11 @@ protected:
 
         comm.tick();
 
-        // 1. Procesar auditoría de conexión/desconexión y pedir timestamp al cliente si estamos sin hora
+        // 1. Procesar auditoría de conexión/desconexión
         if (eventoAuditoriaPendiente_.pendiente) {
             EventoConexion ev = eventoAuditoriaPendiente_;
             eventoAuditoriaPendiente_.pendiente = false;
             auditarCambioSesion(ev.conectado, ev.medio, ev.motivo);
-
-            // Si se conectó un cliente y todavía no tenemos hora por NTP, se la pedimos en silencio
-            if (ev.conectado && !Time::timeSrv.estaSincronizado()) {
-                uint32_t cid = comm.proxy.bindDefaultEndpoint(ev.medio, 1);
-                Time::timeSrv.solicitarHoraACliente(cid);
-            }
         }
 
         // 2. Si hay WiFi STA conectado y aún no hay hora válida, probar servidores NTP en cascada (1 -> 2 -> 3)
