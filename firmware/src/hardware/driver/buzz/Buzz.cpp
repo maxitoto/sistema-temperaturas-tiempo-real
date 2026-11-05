@@ -45,6 +45,8 @@ void Buzz::_tick() {
 
     if (frecuencia > 0) {
         ledcWriteTone(Pin::PIN_BUZZ, frecuencia);
+    } else {
+        ledcWriteTone(Pin::PIN_BUZZ, 0);   
     }
 }
 

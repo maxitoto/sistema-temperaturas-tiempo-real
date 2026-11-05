@@ -136,7 +136,8 @@ export class WiFiTransport extends ITransport {
         this.onTcpData(chunk);
       });
 
-      this.tcpClient_.on("error", () => {
+      this.tcpClient_.on("error", (err: NodeJS.ErrnoException) => {
+        console.warn(`[WIFI] TCP ${this.hostIp_}:${WiFiTransport.TCP_PORT} -> ${err.code ?? err.message}`);
         if (this.authResolver_) this.authResolver_(false);
         else void this.disconnect(DisconnectReason.PORT_CLOSED);
       });

@@ -1,6 +1,30 @@
 #pragma once
 #include <stdint.h>
-#include <DallasTemperature.h>
+
+// Dirección ROM de 64 bits (8 bytes) estándar 1-Wire
+using DeviceAddress = uint8_t[8];
+
+// Códigos de familia 1-Wire (Maxim / Dallas)
+static constexpr uint8_t DS18S20MODEL  = 0x10;
+static constexpr uint8_t DS18B20MODEL  = 0x28;
+static constexpr uint8_t DS1822MODEL   = 0x22;
+static constexpr uint8_t DS1825MODEL   = 0x3B;
+static constexpr uint8_t DS28EA00MODEL = 0x42;
+
+// Constantes de diagnóstico y fallos eléctricos (en °C y en 1/128 °C raw)
+static constexpr float   DEVICE_DISCONNECTED_C       = -127.0f;
+static constexpr float   DEVICE_INSUFFICIENT_POWER_C =  127.9375f;
+static constexpr float   DEVICE_POWER_ON_RESET_C     =   85.0f;
+static constexpr float   DEVICE_FAULT_SHORTVDD_C     = -128.0f;
+static constexpr float   DEVICE_FAULT_SHORTGND_C     = -129.0f;
+static constexpr float   DEVICE_FAULT_OPEN_C         = -130.0f;
+
+static constexpr int32_t DEVICE_DISCONNECTED_RAW       = -16256;
+static constexpr int32_t DEVICE_INSUFFICIENT_POWER_RAW =  16376;
+static constexpr int32_t DEVICE_POWER_ON_RESET_RAW     =  10880;
+static constexpr int32_t DEVICE_FAULT_SHORTVDD_RAW     = -16384;
+static constexpr int32_t DEVICE_FAULT_SHORTGND_RAW     = -16512;
+static constexpr int32_t DEVICE_FAULT_OPEN_RAW         = -16640;
 
 enum class EstadoBus : uint8_t {
     OK = 0,
@@ -33,10 +57,10 @@ enum class EstadoSensor : int16_t {
     CONVERSION_PENDIENTE      = -6,
     TIMEOUT_CONVERSION        = -7,
     FALLO_ESCRITURA_EEPROM    = -8,
-    DESCONECTADO              = DEVICE_DISCONNECTED_C,
-    ALIMENTACION_INSUFICIENTE = DEVICE_INSUFFICIENT_POWER_C,
-    REINICIO_ENERGIA_85C      = DEVICE_POWER_ON_RESET_C,
-    CORTOCIRCUITO_VDD         = DEVICE_FAULT_SHORTVDD_C,
-    CORTOCIRCUITO_GND         = DEVICE_FAULT_SHORTGND_C,
-    CIRCUITO_ABIERTO          = DEVICE_FAULT_OPEN_C
+    DESCONECTADO              = -127,
+    ALIMENTACION_INSUFICIENTE = 127,
+    REINICIO_ENERGIA_85C      = 85,
+    CORTOCIRCUITO_VDD         = -128,
+    CORTOCIRCUITO_GND         = -129,
+    CIRCUITO_ABIERTO          = -130
 };

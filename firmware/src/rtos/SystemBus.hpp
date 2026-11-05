@@ -8,6 +8,8 @@ namespace Evt {
     constexpr EventBits_t EVT_CONEXION_CAMBIO       = (1 << 1);
     constexpr EventBits_t EVT_ALARMA_CAMBIO         = (1 << 2);
     constexpr EventBits_t EVT_FORZAR_GUARDADO_DB    = (1 << 3);
+    constexpr EventBits_t EVT_NOTIFICAR_FISICA      = (1 << 4); 
+    constexpr EventBits_t EVT_NOTIFICAR_CORREOS     = (1 << 5); 
 }
 
 // Alias para mantener retrocompatibilidad si algún archivo usa namespaceEvt

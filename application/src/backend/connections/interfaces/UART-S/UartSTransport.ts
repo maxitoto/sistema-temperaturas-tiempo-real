@@ -53,7 +53,7 @@ export class UartSTransport extends ITransport {
     return true;
   }
 
-  public async connect(timeoutMs = 3500): Promise<boolean> {
+  public async connect(timeoutMs = 8000): Promise<boolean> {
     // Atajo H-02: si ya está autenticado y el puerto sigue abierto, no reabrir ni reiniciar el ESP32
     if (this.state_ === TransportState.AUTHENTICATED && this.phy_.isOpen()) {
       return true;
@@ -114,8 +114,7 @@ export class UartSTransport extends ITransport {
       this.reliability_.poll();
     }
     this.reliability_.resetSession();
-    if (reason === DisconnectReason.USER_CLOSE || !this.phy_.isOpen()) {
-      await this.phy_.close();
+    if (!this.phy_.isOpen()) {
       this.setState(TransportState.DISCONNECTED, reason);
     } else {
       this.setState(TransportState.PHY_LINKED, reason);

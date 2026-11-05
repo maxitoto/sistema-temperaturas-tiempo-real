@@ -9,14 +9,13 @@
 #include "controllers/ControllerRegistry.hpp"
 
 void setup() {
-    // 1. Inicializar almacenamiento MicroSD, SGBD y esquema físico del ORM
+
+    Connections::comm.begin();
+    Apis::registrarTodasLasApis();
+    // 2. SD, SGBD y esquema
     if (iniciarSGBDyORM()) {
         iniciarEsquema();
     }
-
-    // 2. Inicializar contenedor de comunicaciones y registrar las APIs por dominio
-    Connections::comm.begin();
-    Apis::registrarTodasLasApis();
 
     // 3. Arrancar todas las tareas y controladores FreeRTOS (Comm, SensorDb, Alarm, Oled)
     Controllers::iniciarTodosLosControladores();

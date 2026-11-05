@@ -1,6 +1,6 @@
 #pragma once
 #include "CommController.hpp"
-#include "SensorDbController.hpp"
+#include "SensorController.hpp"
 #include "AlarmController.hpp"
 #include "OledController.hpp"
 
@@ -9,7 +9,7 @@ namespace Controllers {
 inline void iniciarTodosLosControladores() {
     oledController.start();
     alarmController.start();
-    sensorDbController.start();
+    sensorController.start();
     commController.start();
 }
 

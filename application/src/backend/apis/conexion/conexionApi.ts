@@ -178,6 +178,9 @@ export const conexionApi = {
       throw new Error("La clave WPA2 del AP debe tener entre 8 y 64 caracteres");
     }
 
+    for (let i = 0; i < 2 && !comm.proxy.isConnected(); i++) {
+      await comm.uartS.connect(8000);
+    }
     const target = comm.resolverClienteExplicitado(clientId);
     // zona base de datos
     const usaCuatroArgs = apSsid.trim().length > 0 || apPassword.length > 0;

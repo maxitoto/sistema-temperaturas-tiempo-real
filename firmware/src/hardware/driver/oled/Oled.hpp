@@ -166,6 +166,16 @@ public:
     // 1. GRILLA WEB PARA 6 SENSORES (2 Columnas x 3 Filas)
     //    indice: 0..5 -> Actualiza por I2C SOLO esa celda
     // =======================================================
+
+    void sensor(const char* mac, const char* texto) {
+        if (!inicializada || !mac || !texto) return;
+        // Combina "MAC + texto" y lo muestra en la fila correspondiente
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s %s", mac, texto);
+        // Usá la primera fila libre o una fija según tu layout:
+        fila1(buf);
+    }
+
     void sensor(uint8_t indice, const char* texto) {
         if (!inicializada || indice >= 6 || !texto) return;
 
@@ -185,13 +195,14 @@ public:
     }
 
     // Helper directo para pasar número de sensor y temperatura formateada
-    void sensorTemperatura(uint8_t indice, float tempC, bool ok = true) {
-        if (indice >= 6) return;
-        char txt[12];
+    void sensorTemperatura(uint8_t indice, const char* mac, float tempC, bool ok = true) {
+        if (indice >= 6 || !mac) return;
+
+        char txt[16];   // 12 quedaba justo con temps negativas
         if (!ok) {
-            snprintf(txt, sizeof(txt), "S%u: ERR", indice + 1);
+            snprintf(txt, sizeof(txt), "%s:--", mac);
         } else {
-            snprintf(txt, sizeof(txt), "S%u:%5.1fC", indice + 1, tempC);
+            snprintf(txt, sizeof(txt), "%s:%4.1fC", mac, tempC);
         }
         sensor(indice, txt);
     }

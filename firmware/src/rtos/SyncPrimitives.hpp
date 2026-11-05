@@ -40,6 +40,7 @@ public:
     }
 
     bool isLocked() const { return locked_; }
+    void release() { if (locked_) { mutex_.unlock(); locked_ = false; } }
 
 private:
     RtosMutex& mutex_;

@@ -87,9 +87,11 @@ public:
             prefs.putUChar("apChan", in.apChannel);
             prefs.end();
         }
+        apChanged_ = (in.apSsid != cfg_.apSsid || in.apPassword != cfg_.apPassword);
         cfg_ = in;
         // Aplicación diferida: permite enviar la respuesta RPC antes de reconfigurar el AP/STA en poll()
         reinitPending_ = true;
+        bool apChanged_ = false;
         reinitScheduledMs_ = millis();
         return true;
     }
@@ -187,8 +189,10 @@ public:
 
         // 1. Aplicar reconfiguración diferida una vez que salió la respuesta RPC
         if (reinitPending_ && (now - reinitScheduledMs_ >= 60)) {
-            reinitPending_ = false;
-            apActive_ = WiFi.softAP(cfg_.apSsid.c_str(), cfg_.apPassword.c_str(), cfg_.apChannel, 0, 4);
+            if (apChanged_) {
+                  // el AP sigue el canal de la STA; no reiniciarlo (expulsa clientes)
+                apChanged_ = false;
+            }
             if (!cfg_.staSsid.empty()) {
                 startAsyncStaConnect();
             } else {
@@ -208,11 +212,8 @@ public:
                 apActive_ = WiFi.softAP(cfg_.apSsid.c_str(), cfg_.apPassword.c_str(), ch, 0, 4);
                 WiFi.setSleep(false);
             } else if (now - staConnectStartMs_ >= STA_CONNECT_TIMEOUT_MS) {
-                staConnecting_ = false;
-                WiFi.disconnect(true);
-                WiFi.mode(WIFI_AP);
-                apActive_ = WiFi.softAP(cfg_.apSsid.c_str(), cfg_.apPassword.c_str(), cfg_.apChannel, 0, 4);
-                WiFi.setSleep(false);
+                staConnectStartMs_ = now;
+                WiFi.reconnect();   // reintenta; no apagar la STA ni pasar a WIFI_AP
             }
         }
 
@@ -336,6 +337,7 @@ private:
     WifiConfig cfg_;
     bool apActive_ = false;
     bool reinitPending_ = false;
+    bool apChanged_ = false;
     uint32_t reinitScheduledMs_ = 0;
 
     bool staConnecting_ = false;
@@ -364,7 +366,11 @@ private:
     void startAsyncStaConnect() {
         WiFi.mode(WIFI_AP_STA);
         WiFi.setSleep(false);
-        WiFi.disconnect();
+        WiFi.setAutoReconnect(true);
+        if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == cfg_.staSsid.c_str()) {
+            staConnecting_ = false;
+            return;
+        }
         WiFi.begin(cfg_.staSsid.c_str(), cfg_.staPassword.c_str());
         staConnecting_ = true;
         staConnectStartMs_ = millis();

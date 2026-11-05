@@ -229,6 +229,14 @@ public:
     }
 
     static bool unpackValue(const uint8_t* data, size_t len, size_t& offset, float& out) {
+        if (offset < len && data[offset] == 0xCF) {   // entero enviado por JS (8, -5...)
+            if (offset + 9 > len) return false;
+            offset++;
+            uint64_t u = 0;
+            for (int i = 0; i < 8; ++i) u = (u << 8) | data[offset++];
+            out = static_cast<float>(static_cast<int64_t>(u));
+            return true;
+        }
         if (offset + 5 > len || data[offset++] != 0xCA) return false;
         uint32_t bits = 0;
         for (int i = 0; i < 4; ++i) bits = (bits << 8) | data[offset++];

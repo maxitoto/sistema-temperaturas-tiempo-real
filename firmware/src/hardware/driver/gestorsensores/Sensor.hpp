@@ -2,14 +2,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
-#include <DallasTemperature.h>
 #include "EstadoSensor.hpp"
 
 class Sensor {
 public:
-    static constexpr int8_t UMBRAL_MAX_DEFAULT = 126;
-    static constexpr int8_t UMBRAL_MIN_DEFAULT = -126;
-    static constexpr float  OFFSET_DEFAULT     = 0.0f;
+    static constexpr float UMBRAL_MAX_DEFAULT = 125.0f;
+    static constexpr float UMBRAL_MIN_DEFAULT = -55.0f;
+    static constexpr float OFFSET_DEFAULT     = 0.0f;
 
 private:
     bool          activo               = false;
@@ -17,9 +16,11 @@ private:
     DeviceAddress rom                  = {0};
     char          mac[17]              = "0000000000000000";
     char          mac2[3]              = "00";
-    int8_t        umbralSuperior       = UMBRAL_MAX_DEFAULT;
-    int8_t        umbralInferior       = UMBRAL_MIN_DEFAULT;
+    float         umbralSuperior       = UMBRAL_MAX_DEFAULT;
+    float         umbralInferior       = UMBRAL_MIN_DEFAULT;
     float         offset               = OFFSET_DEFAULT;
+    float         correccionSuperior   = 0.0f;
+    float         correccionInferior   = 0.0f;
     EstadoSensor  estado               = EstadoSensor::SLOT_VACIO;
     float         tempCelsius          = DEVICE_DISCONNECTED_C;
     int32_t       tempRaw              = DEVICE_DISCONNECTED_RAW;
@@ -42,6 +43,8 @@ public:
         umbralSuperior       = UMBRAL_MAX_DEFAULT;
         umbralInferior       = UMBRAL_MIN_DEFAULT;
         offset               = OFFSET_DEFAULT;
+        correccionSuperior   = 0.0f;
+        correccionInferior   = 0.0f;
         estado               = EstadoSensor::SLOT_VACIO;
         tempCelsius          = DEVICE_DISCONNECTED_C;
         tempRaw              = DEVICE_DISCONNECTED_RAW;
@@ -75,10 +78,11 @@ public:
 
     void setActivo(bool v)                     { activo = v; }
     void setIndiceSlot(uint8_t s)              { indiceSlot = s; }
-    void setUmbralSuperior(int8_t v)           { umbralSuperior = v; }
-    void setUmbralInferior(int8_t v)           { umbralInferior = v; }
-    void setUmbrales(int8_t sup, int8_t inf)   { umbralSuperior = sup; umbralInferior = inf; }
+    void setUmbralSuperior(float v)            { umbralSuperior = v; }
+    void setUmbralInferior(float v)            { umbralInferior = v; }
+    void setUmbrales(float sup, float inf)     { umbralSuperior = sup; umbralInferior = inf; }
     void setOffset(float v)                    { offset = v; }
+    void setCorrecciones(float sup, float inf) { correccionSuperior = sup; correccionInferior = inf; }
     void setEstado(EstadoSensor e)             { estado = e; }
     void setTempCelsius(float t)               { tempCelsius = t; }
     void setTempRaw(int32_t r)                 { tempRaw = r; }
@@ -93,9 +97,11 @@ public:
     uint8_t        obtenerFamilia()         const { return rom[0]; }
     const char*    obtenerMAC()             const { return mac; }
     const char*    obtenerMAC2()            const { return mac2; }
-    int8_t         obtenerUmbralSuperior()  const { return umbralSuperior; }
-    int8_t         obtenerUmbralInferior()  const { return umbralInferior; }
+    float          obtenerUmbralSuperior()  const { return umbralSuperior; }
+    float          obtenerUmbralInferior()  const { return umbralInferior; }
     float          obtenerOffset()          const { return offset; }
+    float          obtenerCorreccionSuperior() const { return correccionSuperior; }
+    float          obtenerCorreccionInferior() const { return correccionInferior; }
     EstadoSensor   obtenerEstado()          const { return estado; }
     float          obtenerTempCelsius()     const { return tempCelsius; }
     int32_t        obtenerTempRaw()         const { return tempRaw; }
