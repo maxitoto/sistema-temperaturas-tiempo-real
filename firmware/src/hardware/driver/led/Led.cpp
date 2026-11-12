@@ -1,4 +1,3 @@
-// led.cpp
 #include "Led.hpp"
 #include <Arduino.h>
 
@@ -7,17 +6,16 @@ Led::Led() {
     digitalWrite(Pin::PIN_LED, LOW);
 }
 
-// Se definen SOLO los métodos que quedaron sin cuerpo en el .hpp
 void Led::encenderLed() {
-    state = true;
+    state.store(true, std::memory_order_relaxed);
     digitalWrite(Pin::PIN_LED, HIGH);
 }
 
 void Led::apagarLed() {
-    state = false;
+    state.store(false, std::memory_order_relaxed);
     digitalWrite(Pin::PIN_LED, LOW);
-}   
+}
 
-bool Led::ledEstaEncendido() {
-    return state;
+bool Led::ledEstaEncendido() const {
+    return state.load(std::memory_order_relaxed);
 }

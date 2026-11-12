@@ -2,7 +2,54 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include "EstadoSensor.hpp"
+
+// Copia segura por valor (Thread-Safe Snapshot) para usar desde cualquier tarea o RPC
+struct SnapshotSensor {
+    bool         activo;
+    uint8_t      slot;
+    int32_t      idSensorDB;
+    uint8_t      rom[8];
+    char         mac[17];
+    char         mac3[4];
+    char         mac2[3];
+    float        tempCruda;
+    float        tempCorregida;
+    float        umbralSuperior;
+    float        umbralInferior;
+    float        offset;
+    float        medicionAguaHirviendo;
+    float        medicionAguaHelada;
+    EstadoSensor estado;
+    EstadoSensor estadoPrevio;
+    bool         enAlarma;
+    uint8_t      resolucionBits;
+    bool         alimentacionParasita;
+    uint32_t     timestampLecturaMs;
+};
+
+// Evento emitido automáticamente cuando un sensor cambia de estado (ej. de OK a ALARMA o DESCONECTADO)
+struct EventoCambioSensor {
+    int32_t      idSensorDB;
+    uint8_t      slot;
+    char         mac[17];
+    EstadoSensor estadoPrevio;
+    EstadoSensor estadoNuevo;
+    float        tempCruda;
+    float        tempCorregida;
+    uint32_t     timestampMs;
+};
+
+struct ResumenSistemaSensores {
+    EstadoBus    estadoBus;
+    EventoGestor ultimoEvento;
+    uint8_t      totalConectados;
+    uint8_t      totalDetectadosBus;
+    uint8_t      totalEnAlarma;
+    bool         modoParasitoActivo;
+    uint32_t     timestampUltimaConversionMs;
+};
 
 class Sensor {
 public:
@@ -11,47 +58,65 @@ public:
     static constexpr float OFFSET_DEFAULT     = 0.0f;
 
 private:
-    bool          activo               = false;
-    uint8_t       indiceSlot           = 0;
-    DeviceAddress rom                  = {0};
-    char          mac[17]              = "0000000000000000";
-    char          mac2[3]              = "00";
-    float         umbralSuperior       = UMBRAL_MAX_DEFAULT;
-    float         umbralInferior       = UMBRAL_MIN_DEFAULT;
-    float         offset               = OFFSET_DEFAULT;
-    float         correccionSuperior   = 0.0f;
-    float         correccionInferior   = 0.0f;
-    EstadoSensor  estado               = EstadoSensor::SLOT_VACIO;
-    float         tempCelsius          = DEVICE_DISCONNECTED_C;
-    int32_t       tempRaw              = DEVICE_DISCONNECTED_RAW;
-    uint8_t       resolucionBits       = 12;
-    bool          alimentacionParasita = false;
-    bool          enAlarma             = false;
-    int16_t       datoUsuario          = 0;
-    uint8_t       scratchpad[9]        = {0};
+    bool          activo                = false;
+    bool          hidratadoDB           = false;
+    uint8_t       indiceSlot            = 0;
+    int32_t       idSensorDB            = -1;
+    DeviceAddress rom                   = {0};
+    char          mac[17]               = "0000000000000000";
+    char          mac3[4]               = "000";
+    char          mac2[3]               = "00";
+    float         umbralSuperior        = UMBRAL_MAX_DEFAULT;
+    float         umbralInferior        = UMBRAL_MIN_DEFAULT;
+    float         offset                = OFFSET_DEFAULT;
+    float         correccionSuperior    = 0.0f; // Temperatura medida en agua hirviendo (3 min)
+    float         correccionInferior    = 0.0f; // Temperatura medida en agua con hielo (3 min)
+    float         escalaM               = 1.0f; // Pendiente precalculada O(1)
+    float         ordenadaB             = 0.0f; // Ordenada precalculada O(1)
+    EstadoSensor  estado                = EstadoSensor::SLOT_VACIO;
+    EstadoSensor  estadoPrevio          = EstadoSensor::SLOT_VACIO;
+    bool          cambioEstadoPendiente = false;
+    float         tempCruda             = DEVICE_DISCONNECTED_C;
+    float         tempCelsius           = DEVICE_DISCONNECTED_C; // Temperatura corregida (fuente de verdad)
+    int32_t       tempRaw               = DEVICE_DISCONNECTED_RAW;
+    uint8_t       resolucionBits        = 12;
+    bool          alimentacionParasita  = false;
+    bool          enAlarma              = false;
+    int16_t       datoUsuario           = 0;
+    uint32_t      ultimoTimestampMs     = 0;
+    uint8_t       scratchpad[9]         = {0};
 
 public:
     Sensor() = default;
     ~Sensor() = default;
 
     void limpiar(uint8_t slot = 0) {
-        activo               = false;
-        indiceSlot           = slot;
+        activo                = false;
+        hidratadoDB           = false;
+        indiceSlot            = slot;
+        idSensorDB            = -1;
         memset(rom, 0, sizeof(rom));
         strncpy(mac, "0000000000000000", sizeof(mac));
+        strncpy(mac3, "000", sizeof(mac3));
         strncpy(mac2, "00", sizeof(mac2));
-        umbralSuperior       = UMBRAL_MAX_DEFAULT;
-        umbralInferior       = UMBRAL_MIN_DEFAULT;
-        offset               = OFFSET_DEFAULT;
-        correccionSuperior   = 0.0f;
-        correccionInferior   = 0.0f;
-        estado               = EstadoSensor::SLOT_VACIO;
-        tempCelsius          = DEVICE_DISCONNECTED_C;
-        tempRaw              = DEVICE_DISCONNECTED_RAW;
-        resolucionBits       = 12;
-        alimentacionParasita = false;
-        enAlarma             = false;
-        datoUsuario          = 0;
+        umbralSuperior        = UMBRAL_MAX_DEFAULT;
+        umbralInferior        = UMBRAL_MIN_DEFAULT;
+        offset                = OFFSET_DEFAULT;
+        correccionSuperior    = 0.0f;
+        correccionInferior    = 0.0f;
+        escalaM               = 1.0f;
+        ordenadaB             = 0.0f;
+        estado                = EstadoSensor::SLOT_VACIO;
+        estadoPrevio          = EstadoSensor::SLOT_VACIO;
+        cambioEstadoPendiente = false;
+        tempCruda             = DEVICE_DISCONNECTED_C;
+        tempCelsius           = DEVICE_DISCONNECTED_C;
+        tempRaw               = DEVICE_DISCONNECTED_RAW;
+        resolucionBits        = 12;
+        alimentacionParasita  = false;
+        enAlarma              = false;
+        datoUsuario           = 0;
+        ultimoTimestampMs     = 0;
         memset(scratchpad, 0, sizeof(scratchpad));
     }
 
@@ -63,13 +128,32 @@ public:
             snprintf(mac + (i * 2), 3, "%02X", rom[i]);
         }
         mac[16] = '\0';
+        mac3[0] = mac[13];
+        mac3[1] = mac[14];
+        mac3[2] = mac[15];
+        mac3[3] = '\0';
         mac2[0] = mac[14];
         mac2[1] = mac[15];
         mac2[2] = '\0';
-        umbralSuperior = UMBRAL_MAX_DEFAULT;
-        umbralInferior = UMBRAL_MIN_DEFAULT;
-        offset         = OFFSET_DEFAULT;
-        estado         = EstadoSensor::OK;
+        estado       = EstadoSensor::OK;
+        estadoPrevio = EstadoSensor::OK;
+        recalcularRectaCalibracion();
+    }
+
+    // Precalcula m y b una sola vez para que cada lectura sea O(1): T_corr = m * T_cruda + b
+    void recalcularRectaCalibracion(float refCongelacion = 0.0f, float refEbullicion = 100.0f) {
+        float deltaMedido = correccionSuperior - correccionInferior;
+        if (fabsf(deltaMedido) > 1.0f && fabsf(refEbullicion - refCongelacion) > 1.0f) {
+            escalaM   = (refEbullicion - refCongelacion) / deltaMedido;
+            ordenadaB = refCongelacion - (escalaM * correccionInferior) + offset;
+        } else {
+            escalaM   = 1.0f;
+            ordenadaB = offset;
+        }
+    }
+
+    float aplicarCalibracion(float lecturaCruda) const {
+        return (escalaM * lecturaCruda) + ordenadaB;
     }
 
     bool coincideROM(const DeviceAddress otraRom) const {
@@ -77,38 +161,104 @@ public:
     }
 
     void setActivo(bool v)                     { activo = v; }
+    void setHidratadoDB(bool h)                { hidratadoDB = h; }
+    void setIdSensorDB(int32_t id)             { idSensorDB = id; }
     void setIndiceSlot(uint8_t s)              { indiceSlot = s; }
     void setUmbralSuperior(float v)            { umbralSuperior = v; }
     void setUmbralInferior(float v)            { umbralInferior = v; }
     void setUmbrales(float sup, float inf)     { umbralSuperior = sup; umbralInferior = inf; }
-    void setOffset(float v)                    { offset = v; }
-    void setCorrecciones(float sup, float inf) { correccionSuperior = sup; correccionInferior = inf; }
-    void setEstado(EstadoSensor e)             { estado = e; }
+    void setOffset(float v, float refCong = 0.0f, float refEbull = 100.0f) {
+        offset = v;
+        recalcularRectaCalibracion(refCong, refEbull);
+    }
+    void setCorrecciones(float medSupHirviendo, float medInfHielo, float refCong = 0.0f, float refEbull = 100.0f) {
+        correccionSuperior = medSupHirviendo;
+        correccionInferior = medInfHielo;
+        recalcularRectaCalibracion(refCong, refEbull);
+    }
+    void setEstado(EstadoSensor nuevoEstado) {
+        if (estado != nuevoEstado) {
+            if (estado != EstadoSensor::SLOT_VACIO) {
+                estadoPrevio = estado;
+                cambioEstadoPendiente = true;
+            } else {
+                estadoPrevio = nuevoEstado;
+            }
+            estado = nuevoEstado;
+        }
+    }
+    bool consumirCambioEstado(EventoCambioSensor& outEvt) {
+        if (!cambioEstadoPendiente) return false;
+        cambioEstadoPendiente = false;
+        outEvt.idSensorDB    = idSensorDB;
+        outEvt.slot          = indiceSlot;
+        strncpy(outEvt.mac, mac, sizeof(outEvt.mac));
+        outEvt.estadoPrevio  = estadoPrevio;
+        outEvt.estadoNuevo   = estado;
+        outEvt.tempCruda     = tempCruda;
+        outEvt.tempCorregida = tempCelsius;
+        outEvt.timestampMs   = ultimoTimestampMs;
+        return true;
+    }
+
+    void setTempCruda(float t)                 { tempCruda = t; }
     void setTempCelsius(float t)               { tempCelsius = t; }
     void setTempRaw(int32_t r)                 { tempRaw = r; }
+    void setTimestampLectura(uint32_t ts)      { ultimoTimestampMs = ts; }
     void setResolucionBits(uint8_t b)          { resolucionBits = b; }
     void setAlimentacionParasita(bool p)       { alimentacionParasita = p; }
     void setEnAlarma(bool a)                   { enAlarma = a; }
     void setDatoUsuario(int16_t d)             { datoUsuario = d; }
 
-    bool           estaActivo()             const { return activo; }
-    uint8_t        obtenerSlot()            const { return indiceSlot; }
-    const uint8_t* obtenerROM()             const { return rom; }
-    uint8_t        obtenerFamilia()         const { return rom[0]; }
-    const char*    obtenerMAC()             const { return mac; }
-    const char*    obtenerMAC2()            const { return mac2; }
-    float          obtenerUmbralSuperior()  const { return umbralSuperior; }
-    float          obtenerUmbralInferior()  const { return umbralInferior; }
-    float          obtenerOffset()          const { return offset; }
+    bool           estaActivo()                const { return activo; }
+    bool           estaHidratadoDB()           const { return hidratadoDB; }
+    int32_t        obtenerIdSensorDB()         const { return idSensorDB; }
+    uint8_t        obtenerSlot()               const { return indiceSlot; }
+    const uint8_t* obtenerROM()                const { return rom; }
+    uint8_t        obtenerFamilia()            const { return rom[0]; }
+    const char*    obtenerMAC()                const { return mac; }
+    const char*    obtenerMAC3()               const { return mac3; }
+    const char*    obtenerMAC2()               const { return mac2; }
+    float          obtenerUmbralSuperior()     const { return umbralSuperior; }
+    float          obtenerUmbralInferior()     const { return umbralInferior; }
+    float          obtenerOffset()             const { return offset; }
     float          obtenerCorreccionSuperior() const { return correccionSuperior; }
     float          obtenerCorreccionInferior() const { return correccionInferior; }
-    EstadoSensor   obtenerEstado()          const { return estado; }
-    float          obtenerTempCelsius()     const { return tempCelsius; }
-    int32_t        obtenerTempRaw()         const { return tempRaw; }
-    uint8_t        obtenerResolucionBits()  const { return resolucionBits; }
-    bool           esAlimentacionParasita() const { return alimentacionParasita; }
-    bool           estaEnAlarma()           const { return enAlarma; }
-    int16_t        obtenerDatoUsuario()     const { return datoUsuario; }
-    uint8_t*       obtenerScratchpad()            { return scratchpad; }
-    const uint8_t* obtenerScratchpad()      const { return scratchpad; }
+    EstadoSensor   obtenerEstado()             const { return estado; }
+    EstadoSensor   obtenerEstadoPrevio()       const { return estadoPrevio; }
+    float          obtenerTempCruda()          const { return tempCruda; }
+    float          obtenerTempCelsius()        const { return tempCelsius; }
+    int32_t        obtenerTempRaw()            const { return tempRaw; }
+    uint8_t        obtenerResolucionBits()     const { return resolucionBits; }
+    bool           esAlimentacionParasita()    const { return alimentacionParasita; }
+    bool           estaEnAlarma()              const { return enAlarma; }
+    int16_t        obtenerDatoUsuario()        const { return datoUsuario; }
+    uint32_t       obtenerTimestampLectura()   const { return ultimoTimestampMs; }
+    uint8_t*       obtenerScratchpad()               { return scratchpad; }
+    const uint8_t* obtenerScratchpad()         const { return scratchpad; }
+
+    SnapshotSensor crearSnapshot() const {
+        SnapshotSensor snap{};
+        snap.activo               = activo;
+        snap.slot                 = indiceSlot;
+        snap.idSensorDB           = idSensorDB;
+        memcpy(snap.rom, rom, sizeof(rom));
+        strncpy(snap.mac, mac, sizeof(snap.mac));
+        strncpy(snap.mac3, mac3, sizeof(snap.mac3));
+        strncpy(snap.mac2, mac2, sizeof(snap.mac2));
+        snap.tempCruda            = tempCruda;
+        snap.tempCorregida        = tempCelsius;
+        snap.umbralSuperior       = umbralSuperior;
+        snap.umbralInferior       = umbralInferior;
+        snap.offset               = offset;
+        snap.medicionAguaHirviendo= correccionSuperior;
+        snap.medicionAguaHelada   = correccionInferior;
+        snap.estado               = estado;
+        snap.estadoPrevio         = estadoPrevio;
+        snap.enAlarma             = enAlarma;
+        snap.resolucionBits       = resolucionBits;
+        snap.alimentacionParasita = alimentacionParasita;
+        snap.timestampLecturaMs   = ultimoTimestampMs;
+        return snap;
+    }
 };

@@ -207,6 +207,28 @@ public:
         sensor(indice, txt);
     }
 
+    // Formatea 10 caracteres exactos (60 px) para entrar sin recorte en la columna de 64 px: "F8E:23C OK"
+    void sensorEstado(uint8_t indice, const char* macCorto, float tempC, int16_t codigoEstado) {
+        if (indice >= 6 || !macCorto) return;
+
+        // Toma los últimos 3 caracteres si se le pasa una MAC más larga
+        size_t lenMac = strlen(macCorto);
+        const char* m3 = (lenMac > 3) ? (macCorto + lenMac - 3) : macCorto;
+
+        char txt[12];
+        int tempRedondeada = static_cast<int>(roundf(tempC));
+        if (codigoEstado == 0) { // EstadoSensor::OK
+            snprintf(txt, sizeof(txt), "%3s:%2dC OK", m3, tempRedondeada);
+        } else if (codigoEstado == 1) { // ALARMA_SUPERIOR
+            snprintf(txt, sizeof(txt), "%3s:%2dCALT", m3, tempRedondeada);
+        } else if (codigoEstado == 2) { // ALARMA_INFERIOR
+            snprintf(txt, sizeof(txt), "%3s:%2dCBAJ", m3, tempRedondeada);
+        } else {
+            snprintf(txt, sizeof(txt), "%3s:---ERR", m3);
+        }
+        sensor(indice, txt);
+    }
+
     // =======================================================
     // 2. CABECERA E ICONOS DE ESTADO (Actualización parcial)
     // =======================================================

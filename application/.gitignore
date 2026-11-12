@@ -39,6 +39,7 @@ migrations/*
 generated/*
 
 #para la IA
+migrarYordenar
 migration
 migration/*
 *.sh

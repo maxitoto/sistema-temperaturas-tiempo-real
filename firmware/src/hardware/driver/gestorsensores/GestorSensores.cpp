@@ -1,10 +1,13 @@
 #include "GestorSensores.hpp"
+#include "SensorInicializador.hpp"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <math.h>
 
 GestorSensores::GestorSensores()
     : bus(Pin::PIN_SENSOR_1WIRE) {
+    mutexSensores = xSemaphoreCreateRecursiveMutex();
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
         sensores[i].limpiar(i);
     }
@@ -32,6 +35,51 @@ int8_t GestorSensores::buscarSlotPorROM(const DeviceAddress rom) const {
     return -1;
 }
 
+int8_t GestorSensores::buscarSlotPorMACInterno(const char* macHex) const {
+    if (!macHex || macHex[0] == '\0') return -1;
+    size_t len = strlen(macHex);
+    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+        if (!sensores[i].estaActivo()) continue;
+        // Permite buscar tanto por MAC completa (16 chars) como por sufijo corto (mac3 o mac2)
+        if (len == 3 && strncasecmp(sensores[i].obtenerMAC3(), macHex, 3) == 0) {
+            return static_cast<int8_t>(i);
+        }
+        if (len == 2 && strncasecmp(sensores[i].obtenerMAC2(), macHex, 2) == 0) {
+            return static_cast<int8_t>(i);
+        }
+        if (strncasecmp(sensores[i].obtenerMAC(), macHex, 16) == 0) {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
+int8_t GestorSensores::buscarSlotPorIdInterno(int32_t idSensorDB) const {
+    if (idSensorDB < 0) return -1;
+    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+        if (sensores[i].estaActivo() && sensores[i].obtenerIdSensorDB() == idSensorDB) {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
+void GestorSensores::reevaluarAlarmaSlotInterno(Sensor& s) {
+    float t = s.obtenerTempCelsius();
+    if (t >= s.obtenerUmbralSuperior()) {
+        s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
+        s.setEnAlarma(true);
+    } else if (t <= s.obtenerUmbralInferior()) {
+        s.setEstado(EstadoSensor::ALARMA_INFERIOR);
+        s.setEnAlarma(true);
+    } else if (s.obtenerEstado() == EstadoSensor::ALARMA_SUPERIOR ||
+               s.obtenerEstado() == EstadoSensor::ALARMA_INFERIOR ||
+               s.obtenerEstado() == EstadoSensor::OK) {
+        s.setEstado(EstadoSensor::OK);
+        s.setEnAlarma(false);
+    }
+}
+
 bool GestorSensores::leerScratchpadNativo(const uint8_t* rom, uint8_t* pad) {
     if (!bus.reset()) return false;
     bus.select(rom);
@@ -46,16 +94,16 @@ bool GestorSensores::escribirScratchpadNativo(const uint8_t* rom, const uint8_t*
     if (!bus.reset()) return false;
     bus.select(rom);
     bus.write(CMD_WRITE_SCRATCHPAD);
-    bus.write(pad[2]); // TH / User byte 1
-    bus.write(pad[3]); // TL / User byte 2
+    bus.write(pad[2]);
+    bus.write(pad[3]);
     if (rom[0] != DS18S20MODEL) {
-        bus.write(pad[4]); // Registro de configuración (resolución 9..12 bits)
+        bus.write(pad[4]);
     }
     if (!copiarAEeprom) return true;
     if (!bus.reset()) return false;
     bus.select(rom);
     bus.write(CMD_COPY_SCRATCHPAD, modoParasitoGlobal ? 1 : 0);
-    delay(15); // Tiempo de escritura en EEPROM según hoja de datos (10 ms min)
+    vTaskDelay(pdMS_TO_TICKS(15));
     if (modoParasitoGlobal) bus.depower();
     return true;
 }
@@ -64,7 +112,7 @@ bool GestorSensores::leerFuenteAlimentacionNativa(const uint8_t* rom) {
     if (!bus.reset()) return false;
     bus.select(rom);
     bus.write(CMD_READ_POWER_SUPPLY);
-    uint8_t bit = bus.read_bit(); // 0 = parásita, 1 = VDD externo
+    uint8_t bit = bus.read_bit();
     bus.reset();
     return (bit == 0);
 }
@@ -84,7 +132,6 @@ float GestorSensores::convertirScratchpadACelsius(const uint8_t* rom, const uint
     int16_t raw16 = static_cast<int16_t>((static_cast<uint16_t>(pad[1]) << 8) | pad[0]);
 
     if (rom[0] == DS18S20MODEL) {
-        // DS18S20 usa resolución extendida con COUNT_REMAIN (pad[6]) y COUNT_PER_C (pad[7])
         int16_t trunc = raw16 >> 1;
         float tempC = static_cast<float>(trunc) - 0.25f;
         if (pad[7] != 0) {
@@ -94,21 +141,21 @@ float GestorSensores::convertirScratchpadACelsius(const uint8_t* rom, const uint
         return tempC;
     }
 
-    // Limpiar bits indefinidos según resolución configurada (9, 10, 11 o 12 bits)
     switch (pad[4] & 0x60) {
-        case 0x00: raw16 &= ~0x0007; break; // 9 bits
-        case 0x20: raw16 &= ~0x0003; break; // 10 bits
-        case 0x40: raw16 &= ~0x0001; break; // 11 bits
-        default:   break;                   // 12 bits
+        case 0x00: raw16 &= ~0x0007; break;
+        case 0x20: raw16 &= ~0x0003; break;
+        case 0x40: raw16 &= ~0x0001; break;
+        default:   break;
     }
 
-    outRaw = static_cast<int32_t>(raw16) * 8; // En unidades de 1/128 °C (16 LSB/°C * 8 = 128)
+    outRaw = static_cast<int32_t>(raw16) * 8;
     return static_cast<float>(raw16) * 0.0625f;
 }
 
 EstadoBus GestorSensores::verificarEstadoElectricoBus() {
+    ScopedSensorLock lk(mutexSensores);
     pinMode(Pin::PIN_SENSOR_1WIRE, INPUT_PULLUP);
-    delay(2);
+    vTaskDelay(pdMS_TO_TICKS(2));
     if (digitalRead(Pin::PIN_SENSOR_1WIRE) == LOW) {
         estadoBus    = EstadoBus::LINEA_EN_CORTO_GND;
         ultimoEvento = EventoGestor::ERROR_BUS_ELECTRICO;
@@ -124,6 +171,7 @@ EstadoBus GestorSensores::verificarEstadoElectricoBus() {
 }
 
 uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool guardarEnEeprom) {
+    ScopedSensorLock lk(mutexSensores);
     if (resolucionGlobal < 9 || resolucionGlobal > 12) resolucionGlobal = 12;
 
     DeviceAddress romsEncontradas[MAX_SENSORES + 2];
@@ -186,9 +234,13 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
         s.setAlimentacionParasita(parasita);
         if (parasita) modoParasitoGlobal = true;
 
+        // Hidrata a demanda desde la caché lazy o desde la tabla Sensor en la MicroSD
+        SensorInicializador::hidratarSensorBajoDemanda(s);
+
         uint8_t* pad = s.obtenerScratchpad();
         if (leerScratchpadNativo(romDetectada, pad) && OneWire::crc8(pad, 8) == pad[8]) {
-            uint8_t cfgByte = ((resolucionGlobal - 9) << 5) | 0x1F;
+            uint8_t resDeseada = s.estaHidratadoDB() ? s.obtenerResolucionBits() : resolucionGlobal;
+            uint8_t cfgByte = ((resDeseada - 9) << 5) | 0x1F;
             if (!yaExistia && pad[4] != cfgByte) {
                 pad[2] = static_cast<uint8_t>(clampToInt8(s.obtenerUmbralSuperior()));
                 pad[3] = static_cast<uint8_t>(clampToInt8(s.obtenerUmbralInferior()));
@@ -218,6 +270,7 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
 }
 
 bool GestorSensores::verificarCambiosEnCaliente() {
+    ScopedSensorLock lk(mutexSensores);
     DeviceAddress romsActuales[MAX_SENSORES + 2];
     uint8_t nuevoTotal = 0;
 
@@ -256,44 +309,70 @@ bool GestorSensores::verificarCambiosEnCaliente() {
 }
 
 bool GestorSensores::solicitarConversionGlobal(bool bloqueante) {
-    if (!bus.reset()) {
-        estadoBus = EstadoBus::FALLO_CONVERSION_GLOBAL;
-        return false;
-    }
-    bus.skip(); // Broadcast a todas las sondas del bus
-    bus.write(CMD_CONVERT_T, modoParasitoGlobal ? 1 : 0);
-    tsUltimaConversion = millis();
+    uint16_t esperaMs = 0;
+    bool parasito = false;
 
-    if (bloqueante) {
-        uint8_t maxBits = 9;
-        for (uint8_t i = 0; i < MAX_SENSORES; i++) {
-            if (sensores[i].estaActivo() && sensores[i].obtenerResolucionBits() > maxBits) {
-                maxBits = sensores[i].obtenerResolucionBits();
-            }
+    {
+        ScopedSensorLock lk(mutexSensores);
+        if (!bus.reset()) {
+            estadoBus = EstadoBus::FALLO_CONVERSION_GLOBAL;
+            return false;
         }
-        delay(tiempoConversionSegunResolucion(maxBits));
-        if (modoParasitoGlobal) bus.depower();
+        bus.skip();
+        bus.write(CMD_CONVERT_T, modoParasitoGlobal ? 1 : 0);
+        tsUltimaConversion = millis();
+        parasito = modoParasitoGlobal;
+
+        if (bloqueante) {
+            uint8_t maxBits = 9;
+            for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+                if (sensores[i].estaActivo() && sensores[i].obtenerResolucionBits() > maxBits) {
+                    maxBits = sensores[i].obtenerResolucionBits();
+                }
+            }
+            esperaMs = tiempoConversionSegunResolucion(maxBits);
+        }
     }
 
+    // Espera de conversión (ej. 750ms) FUERA del mutex para que OLED y RPC lean snapshots sin bloqueo
+    if (bloqueante && esperaMs > 0) {
+        vTaskDelay(pdMS_TO_TICKS(esperaMs));
+        ScopedSensorLock lk(mutexSensores);
+        if (parasito) bus.depower();
+    }
+
+    ScopedSensorLock lk(mutexSensores);
     ultimoEvento = EventoGestor::CONVERSION_COMPLETADA;
     return true;
 }
 
 bool GestorSensores::solicitarConversionPorSlot(uint8_t slot, bool bloqueante) {
-    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
-    if (!bus.reset()) return false;
-    bus.select(sensores[slot].obtenerROM());
-    bus.write(CMD_CONVERT_T, modoParasitoGlobal ? 1 : 0);
-    tsUltimaConversion = millis();
+    uint16_t esperaMs = 0;
+    bool parasito = false;
 
-    if (bloqueante) {
-        delay(tiempoConversionSegunResolucion(sensores[slot].obtenerResolucionBits()));
-        if (modoParasitoGlobal) bus.depower();
+    {
+        ScopedSensorLock lk(mutexSensores);
+        if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+        if (!bus.reset()) return false;
+        bus.select(sensores[slot].obtenerROM());
+        bus.write(CMD_CONVERT_T, modoParasitoGlobal ? 1 : 0);
+        tsUltimaConversion = millis();
+        parasito = modoParasitoGlobal;
+        if (bloqueante) {
+            esperaMs = tiempoConversionSegunResolucion(sensores[slot].obtenerResolucionBits());
+        }
+    }
+
+    if (bloqueante && esperaMs > 0) {
+        vTaskDelay(pdMS_TO_TICKS(esperaMs));
+        ScopedSensorLock lk(mutexSensores);
+        if (parasito) bus.depower();
     }
     return true;
 }
 
 bool GestorSensores::estaConversionCompleta() {
+    ScopedSensorLock lk(mutexSensores);
     if (modoParasitoGlobal) {
         return (millis() - tsUltimaConversion) >= 750;
     }
@@ -313,7 +392,6 @@ uint16_t GestorSensores::tiempoConversionSegunResolucion(uint8_t bits) const {
 EstadoSensor GestorSensores::evaluarFalloScratchpad(const uint8_t* pad) const {
     if (pad == nullptr) return EstadoSensor::DESCONECTADO;
 
-    // 1. Todo 0xFF → línea abierta o sensor desconectado durante la lectura
     bool todoFF = true;
     bool todoCeros = true;
     for (uint8_t b = 0; b < 9; b++) {
@@ -323,12 +401,10 @@ EstadoSensor GestorSensores::evaluarFalloScratchpad(const uint8_t* pad) const {
     if (todoFF)    return EstadoSensor::DESCONECTADO;
     if (todoCeros) return EstadoSensor::SCRATCHPAD_VACIO_CEROS;
 
-    // 2. Verificar CRC8 del scratchpad
     if (OneWire::crc8(pad, 8) != pad[8]) {
         return EstadoSensor::ERROR_CRC_SCRATCHPAD;
     }
 
-    // 3. Códigos especiales en el registro de temperatura (bytes 0 y 1)
     int16_t raw16 = static_cast<int16_t>((static_cast<uint16_t>(pad[1]) << 8) | pad[0]);
     if (raw16 == 0x0550 && pad[6] == 0x0C) {
         return EstadoSensor::REINICIO_ENERGIA_85C;
@@ -341,6 +417,7 @@ EstadoSensor GestorSensores::evaluarFalloScratchpad(const uint8_t* pad) const {
 }
 
 EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
+    ScopedSensorLock lk(mutexSensores);
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) {
         return EstadoSensor::SLOT_VACIO;
     }
@@ -362,14 +439,17 @@ EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
         }
     }
 
+    s.setTimestampLectura(millis());
+
     if (!padLeido) {
         s.setTempRaw(DEVICE_DISCONNECTED_RAW);
+        s.setTempCruda(DEVICE_DISCONNECTED_C);
         s.setTempCelsius(DEVICE_DISCONNECTED_C);
         s.setEstado(EstadoSensor::DESCONECTADO);
+        s.setEnAlarma(true);
         return s.obtenerEstado();
     }
 
-    // Si el sensor reporta 85.0 °C por Power-On-Reset (glitch de energía), forzamos reconversión
     if (estadoEvaluado == EstadoSensor::REINICIO_ENERGIA_85C) {
         solicitarConversionPorSlot(slot, true);
         if (leerScratchpadNativo(s.obtenerROM(), pad)) {
@@ -378,35 +458,29 @@ EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
     }
 
     if (estadoEvaluado != EstadoSensor::OK) {
-        s.setTempCelsius(static_cast<float>(static_cast<int16_t>(estadoEvaluado)));
+        float codigoComoTemp = static_cast<float>(static_cast<int16_t>(estadoEvaluado));
+        s.setTempCruda(codigoComoTemp);
+        s.setTempCelsius(codigoComoTemp);
         s.setEstado(estadoEvaluado);
+        s.setEnAlarma(true);
         return s.obtenerEstado();
     }
 
     int32_t raw = 0;
     float tempCruda = convertirScratchpadACelsius(s.obtenerROM(), pad, raw);
-    float tempFinal = tempCruda + s.obtenerOffset();
+    float tempCorregida = s.aplicarCalibracion(tempCruda);
 
     s.setTempRaw(raw);
-    s.setTempCelsius(tempFinal);
+    s.setTempCruda(tempCruda);
+    s.setTempCelsius(tempCorregida);
 
-    // Evaluación de umbrales en punto flotante real (float)
-    if (tempFinal >= s.obtenerUmbralSuperior()) {
-        s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
-        s.setEnAlarma(true);
-    } else if (tempFinal <= s.obtenerUmbralInferior()) {
-        s.setEstado(EstadoSensor::ALARMA_INFERIOR);
-        s.setEnAlarma(true);
-    } else {
-        s.setEstado(EstadoSensor::OK);
-        s.setEnAlarma(false);
-    }
-
+    reevaluarAlarmaSlotInterno(s);
     return s.obtenerEstado();
 }
 
 void GestorSensores::actualizarTodosLosSlots() {
     solicitarConversionGlobal(true);
+    ScopedSensorLock lk(mutexSensores);
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
         if (sensores[i].estaActivo()) {
             actualizarLecturaSlot(i);
@@ -414,7 +488,202 @@ void GestorSensores::actualizarTodosLosSlots() {
     }
 }
 
+// --- CONSULTAS THREAD-SAFE ---
+
+bool GestorSensores::obtenerSensorPorMAC(const char* macHex, SnapshotSensor& outSnapshot) const {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorMACInterno(macHex);
+    if (slot < 0) return false;
+    outSnapshot = sensores[slot].crearSnapshot();
+    return true;
+}
+
+bool GestorSensores::obtenerSensorPorROM(const uint8_t rom8[8], SnapshotSensor& outSnapshot) const {
+    ScopedSensorLock lk(mutexSensores);
+    if (!rom8) return false;
+    int8_t slot = buscarSlotPorROM(rom8);
+    if (slot < 0) return false;
+    outSnapshot = sensores[slot].crearSnapshot();
+    return true;
+}
+
+bool GestorSensores::obtenerSensorPorId(int32_t idSensorDB, SnapshotSensor& outSnapshot) const {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorIdInterno(idSensorDB);
+    if (slot < 0) return false;
+    outSnapshot = sensores[slot].crearSnapshot();
+    return true;
+}
+
+bool GestorSensores::obtenerSensorPorSlot(uint8_t slot, SnapshotSensor& outSnapshot) const {
+    ScopedSensorLock lk(mutexSensores);
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    outSnapshot = sensores[slot].crearSnapshot();
+    return true;
+}
+
+uint8_t GestorSensores::obtenerSensoresConectados(SnapshotSensor outLista[MAX_SENSORES]) const {
+    ScopedSensorLock lk(mutexSensores);
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        if (sensores[i].estaActivo()) {
+            outLista[count++] = sensores[i].crearSnapshot();
+        }
+    }
+    return count;
+}
+
+uint8_t GestorSensores::obtenerMacsConectadas(char outMacs[MAX_SENSORES][17]) const {
+    ScopedSensorLock lk(mutexSensores);
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        if (sensores[i].estaActivo()) {
+            strncpy(outMacs[count], sensores[i].obtenerMAC(), 17);
+            outMacs[count][16] = '\0';
+            count++;
+        }
+    }
+    return count;
+}
+
+ResumenSistemaSensores GestorSensores::obtenerEstadoSistema() const {
+    ScopedSensorLock lk(mutexSensores);
+    ResumenSistemaSensores res{};
+    res.estadoBus                   = estadoBus;
+    res.ultimoEvento                = ultimoEvento;
+    res.totalConectados             = totalAsignados;
+    res.totalDetectadosBus          = totalDetectadosBus;
+    res.modoParasitoActivo          = modoParasitoGlobal;
+    res.timestampUltimaConversionMs = tsUltimaConversion;
+    res.totalEnAlarma               = 0;
+
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        if (sensores[i].estaActivo() && sensores[i].obtenerEstado() != EstadoSensor::OK) {
+            res.totalEnAlarma++;
+        }
+    }
+    return res;
+}
+
+void GestorSensores::obtenerEstadosParaAlarma(EstadoSensor outEstados[MAX_SENSORES], EstadoBus& outEstadoBus) const {
+    ScopedSensorLock lk(mutexSensores);
+    outEstadoBus = estadoBus;
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        outEstados[i] = sensores[i].estaActivo() ? sensores[i].obtenerEstado() : EstadoSensor::SLOT_VACIO;
+    }
+}
+
+uint8_t GestorSensores::extraerEventosCambioEstado(EventoCambioSensor outEventos[MAX_SENSORES]) {
+    ScopedSensorLock lk(mutexSensores);
+    uint8_t cant = 0;
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        if (sensores[i].estaActivo()) {
+            EventoCambioSensor evt{};
+            if (sensores[i].consumirCambioEstado(evt)) {
+                outEventos[cant++] = evt;
+            }
+        }
+    }
+    return cant;
+}
+
+// --- MUTADORES CON ACTUALIZACIÓN EN RAM + BASE DE DATOS ---
+
+bool GestorSensores::configurarOffsetPorMAC(const char* macHex, float nuevoOffsetC) {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorMACInterno(macHex);
+    if (slot < 0) return false;
+    return configurarOffsetSlot(static_cast<uint8_t>(slot), nuevoOffsetC);
+}
+
+bool GestorSensores::configurarOffsetPorId(int32_t idSensorDB, float nuevoOffsetC) {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorIdInterno(idSensorDB);
+    if (slot < 0) return false;
+    return configurarOffsetSlot(static_cast<uint8_t>(slot), nuevoOffsetC);
+}
+
+bool GestorSensores::configurarOffsetPorROM(const uint8_t* rom, float offsetC) {
+    ScopedSensorLock lk(mutexSensores);
+    if (rom == nullptr) return false;
+    int8_t slot = buscarSlotPorROM(rom);
+    if (slot < 0) return false;
+    return configurarOffsetSlot(static_cast<uint8_t>(slot), offsetC);
+}
+
+bool GestorSensores::configurarOffsetSlot(uint8_t slot, float offsetC) {
+    ScopedSensorLock lk(mutexSensores);
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+    s.setOffset(offsetC, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
+    if (s.obtenerTempCruda() > DEVICE_DISCONNECTED_C) {
+        s.setTempCelsius(s.aplicarCalibracion(s.obtenerTempCruda()));
+        reevaluarAlarmaSlotInterno(s);
+    }
+    SensorInicializador::persistirConfiguracionSensor(s);
+    return true;
+}
+
+bool GestorSensores::calibrarPuntosPorMAC(const char* macHex, float tempMedidaHirviendo, float tempMedidaHielo, float offsetManual) {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorMACInterno(macHex);
+    if (slot < 0) return false;
+    Sensor& s = sensores[slot];
+    s.setOffset(offsetManual, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
+    s.setCorrecciones(tempMedidaHirviendo, tempMedidaHielo, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
+    if (s.obtenerTempCruda() > DEVICE_DISCONNECTED_C) {
+        s.setTempCelsius(s.aplicarCalibracion(s.obtenerTempCruda()));
+        reevaluarAlarmaSlotInterno(s);
+    }
+    SensorInicializador::persistirConfiguracionSensor(s);
+    return true;
+}
+
+bool GestorSensores::configurarUmbralesPorMAC(const char* macHex, float thAltoC, float tlBajoC, bool guardarEeprom) {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorMACInterno(macHex);
+    if (slot < 0) return false;
+    return configurarAlarmasSlot(static_cast<uint8_t>(slot), thAltoC, tlBajoC, guardarEeprom);
+}
+
+bool GestorSensores::configurarUmbralesPorId(int32_t idSensorDB, float thAltoC, float tlBajoC, bool guardarEeprom) {
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorIdInterno(idSensorDB);
+    if (slot < 0) return false;
+    return configurarAlarmasSlot(static_cast<uint8_t>(slot), thAltoC, tlBajoC, guardarEeprom);
+}
+
+bool GestorSensores::configurarAlarmasSlot(uint8_t slot, float thAltoC, float tlBajoC, bool guardarEeprom) {
+    ScopedSensorLock lk(mutexSensores);
+    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
+    Sensor& s = sensores[slot];
+
+    s.setUmbrales(thAltoC, tlBajoC);
+    reevaluarAlarmaSlotInterno(s);
+    SensorInicializador::persistirConfiguracionSensor(s);
+
+    if (guardarEeprom) {
+        uint8_t* pad = s.obtenerScratchpad();
+        if (!leerScratchpadNativo(s.obtenerROM(), pad)) return false;
+        pad[2] = static_cast<uint8_t>(clampToInt8(thAltoC));
+        pad[3] = static_cast<uint8_t>(clampToInt8(tlBajoC));
+        return escribirScratchpadNativo(s.obtenerROM(), pad, true);
+    }
+    return true;
+}
+
+bool GestorSensores::configurarAlarmasPorROM(const uint8_t* rom, float thAltoC, float tlBajoC, bool guardarEeprom) {
+    ScopedSensorLock lk(mutexSensores);
+    if (rom == nullptr) return false;
+    int8_t slot = buscarSlotPorROM(rom);
+    if (slot >= 0) {
+        return configurarAlarmasSlot(static_cast<uint8_t>(slot), thAltoC, tlBajoC, guardarEeprom);
+    }
+    return false;
+}
+
 bool GestorSensores::configurarResolucionSlot(uint8_t slot, uint8_t bits, bool guardarEeprom) {
+    ScopedSensorLock lk(mutexSensores);
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     if (bits < 9 || bits > 12) return false;
 
@@ -428,63 +697,25 @@ bool GestorSensores::configurarResolucionSlot(uint8_t slot, uint8_t bits, bool g
         return false;
     }
     s.setResolucionBits(bits);
+    SensorInicializador::persistirConfiguracionSensor(s);
     return true;
-}
-
-bool GestorSensores::configurarOffsetPorROM(const uint8_t* rom, float offsetC) {
-    if (rom == nullptr) return false;
-    int8_t slot = buscarSlotPorROM(rom);
-    if (slot < 0) return false;
-    sensores[slot].setOffset(offsetC);
-    return true;
-}
-
-bool GestorSensores::configurarOffsetSlot(uint8_t slot, float offsetC) {
-    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
-    sensores[slot].setOffset(offsetC);
-    return true;
-}
-
-bool GestorSensores::configurarAlarmasSlot(uint8_t slot, float thAltoC, float tlBajoC, bool guardarEeprom) {
-    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
-    Sensor& s = sensores[slot];
-
-    // Guardamos los umbrales exactos en float en RAM
-    s.setUmbrales(thAltoC, tlBajoC);
-
-    // Opcionalmente escribimos los registros TH/TL del scratchpad si se pide persistir en EEPROM del sensor
-    if (guardarEeprom) {
-        uint8_t* pad = s.obtenerScratchpad();
-        if (!leerScratchpadNativo(s.obtenerROM(), pad)) return false;
-        pad[2] = static_cast<uint8_t>(clampToInt8(thAltoC));
-        pad[3] = static_cast<uint8_t>(clampToInt8(tlBajoC));
-        return escribirScratchpadNativo(s.obtenerROM(), pad, true);
-    }
-    return true;
-}
-
-bool GestorSensores::configurarAlarmasPorROM(const uint8_t* rom, float thAltoC, float tlBajoC, bool guardarEeprom) {
-    if (rom == nullptr) return false;
-    int8_t slot = buscarSlotPorROM(rom);
-    if (slot >= 0) {
-        return configurarAlarmasSlot(static_cast<uint8_t>(slot), thAltoC, tlBajoC, guardarEeprom);
-    }
-    return false;
 }
 
 bool GestorSensores::guardarEepromSlot(uint8_t slot) {
+    ScopedSensorLock lk(mutexSensores);
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     Sensor& s = sensores[slot];
     return escribirScratchpadNativo(s.obtenerROM(), s.obtenerScratchpad(), true);
 }
 
 bool GestorSensores::restaurarEepromSlot(uint8_t slot) {
+    ScopedSensorLock lk(mutexSensores);
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     Sensor& s = sensores[slot];
     if (!bus.reset()) return false;
     bus.select(s.obtenerROM());
     bus.write(CMD_RECALL_EEPROM);
-    delay(10);
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     uint8_t* pad = s.obtenerScratchpad();
     if (!leerScratchpadNativo(s.obtenerROM(), pad)) return false;
@@ -493,6 +724,7 @@ bool GestorSensores::restaurarEepromSlot(uint8_t slot) {
 }
 
 bool GestorSensores::escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom) {
+    ScopedSensorLock lk(mutexSensores);
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     Sensor& s = sensores[slot];
     uint8_t* pad = s.obtenerScratchpad();
@@ -507,14 +739,12 @@ bool GestorSensores::escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom) {
 }
 
 uint8_t GestorSensores::procesarBusquedaAlarmasHardware() {
+    ScopedSensorLock lk(mutexSensores);
     uint8_t contador = 0;
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
         if (!sensores[i].estaActivo()) continue;
-        float t = sensores[i].obtenerTempCelsius();
-        bool alarma = (t >= sensores[i].obtenerUmbralSuperior() ||
-                       t <= sensores[i].obtenerUmbralInferior());
-        sensores[i].setEnAlarma(alarma);
-        if (alarma) {
+        reevaluarAlarmaSlotInterno(sensores[i]);
+        if (sensores[i].estaEnAlarma()) {
             contador++;
             ultimoEvento = EventoGestor::ALARMA_DETECTADA_EN_BUS;
         }
@@ -523,21 +753,19 @@ uint8_t GestorSensores::procesarBusquedaAlarmasHardware() {
 }
 
 Sensor& GestorSensores::obtenerSensor(uint8_t slot) {
+    ScopedSensorLock lk(mutexSensores);
     return sensores[(slot < MAX_SENSORES) ? slot : 0];
 }
 
 const Sensor& GestorSensores::obtenerSensor(uint8_t slot) const {
+    ScopedSensorLock lk(mutexSensores);
     return sensores[(slot < MAX_SENSORES) ? slot : 0];
 }
 
 Sensor* GestorSensores::buscarSensorPorMAC(const char* macHex) {
-    if (!macHex) return nullptr;
-    for (uint8_t i = 0; i < MAX_SENSORES; i++) {
-        if (sensores[i].estaActivo() && strncmp(sensores[i].obtenerMAC(), macHex, 16) == 0) {
-            return &sensores[i];
-        }
-    }
-    return nullptr;
+    ScopedSensorLock lk(mutexSensores);
+    int8_t slot = buscarSlotPorMACInterno(macHex);
+    return (slot >= 0) ? &sensores[slot] : nullptr;
 }
 
 const char* GestorSensores::nombreFamilia(uint8_t codigoFamilia) {
