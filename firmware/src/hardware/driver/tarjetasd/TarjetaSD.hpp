@@ -16,19 +16,33 @@ private:
     TarjetaSD();
     ~TarjetaSD() = default;
 
-public:
-    // Guardia RAII para bloquear de forma segura transacciones de Base de Datos / MicroSD entre tareas
-    class ScopedLock {
-    private:
-        SemaphoreHandle_t mtx;
     public:
-        explicit ScopedLock(SemaphoreHandle_t m) : mtx(m) {
-            if (mtx) xSemaphoreTakeRecursive(mtx, portMAX_DELAY);
-        }
-        ~ScopedLock() {
-            if (mtx) xSemaphoreGiveRecursive(mtx);
-        }
-    };
+    // Guardia RAII no copiable para bloquear de forma segura transacciones de Base de Datos / MicroSD
+        class ScopedLock {
+        private:
+            SemaphoreHandle_t mtx;
+        public:
+            explicit ScopedLock(SemaphoreHandle_t m) : mtx(m) {
+                if (mtx) xSemaphoreTakeRecursive(mtx, portMAX_DELAY);
+            }
+            ScopedLock(const ScopedLock&) = delete;
+            ScopedLock& operator=(const ScopedLock&) = delete;
+
+            ScopedLock(ScopedLock&& other) noexcept : mtx(other.mtx) {
+                other.mtx = nullptr;
+            }
+            ScopedLock& operator=(ScopedLock&& other) noexcept {
+                if (this != &other) {
+                    if (mtx) xSemaphoreGiveRecursive(mtx);
+                    mtx = other.mtx;
+                    other.mtx = nullptr;
+                }
+                return *this;
+            }
+            ~ScopedLock() {
+                if (mtx) xSemaphoreGiveRecursive(mtx);
+            }
+        };
 
     static TarjetaSD& getInstance() {
         static TarjetaSD instance;

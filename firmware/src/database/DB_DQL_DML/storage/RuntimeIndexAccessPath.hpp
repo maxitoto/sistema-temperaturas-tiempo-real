@@ -3,24 +3,35 @@
 #include <SD.h>
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
+#include <cstring>
+#include <cstdio>
 #include "RuntimeTypedTuple.hpp"
 #include "../../DB_DDL/engine/PhysicalSchemaCatalog.hpp"
 
 namespace DbRuntime::Storage {
 
-    // Entrada compacta de índice que vincula el valor de la clave con su posición exacta (byte offset / rowIndex).
+    // Entrada POD de tamaño fijo (36 bytes): CERO Arduino::String dinámicos, CERO fragmentación de Heap.
     struct IndexEntry {
-        String keyValue;
-        uint32_t rowPosition = 0; // Offset de byte en archivo .tbl o posición en buffer RAM
+        char key[32];
+        uint32_t rowPosition; // Byte-offset exacto en /db/<tabla>.tbl (o índice si opera sin SD)
 
-        // Compara entradas numérica o lexicográficamente para búsqueda binaria O(log N).
+        IndexEntry() : rowPosition(0) { key[0] = '\0'; }
+        IndexEntry(const char* k, uint32_t pos) : rowPosition(pos) {
+            if (k) {
+                strncpy(key, k, sizeof(key) - 1);
+                key[sizeof(key) - 1] = '\0';
+            } else {
+                key[0] = '\0';
+            }
+        }
+
         bool operator<(const IndexEntry& other) const {
-            return keyValue < other.keyValue;
+            return strcmp(key, other.key) < 0;
         }
     };
 
-    // Representa la estructura en memoria de un índice activo (PK, UNIQUE o CREATE INDEX).
     struct ActiveIndexStructure {
         String indexName;
         String tableName;
@@ -29,46 +40,124 @@ namespace DbRuntime::Storage {
         bool isPrimary = false;
         std::vector<IndexEntry> sortedEntries;
 
-        // Compone la clave de búsqueda concatenando las columnas del índice con separador '\x1F'.
-        String buildCompositeKey(const PgTuple& tuple) const {
-            String k = "";
-            for (size_t i = 0; i < keyColumns.size(); ++i) {
-                if (i > 0) k += "\x1F";
-                const PgCell* c = tuple.findCell(keyColumns[i]);
-                if (!c || c->isNull) return ""; // En PostgreSQL los NULL no colisionan en UNIQUE estándar
-                k += c->rawText;
+        // Normaliza números a ancho fijo con prefijo de signo para que strcmp() ordene numéricamente ("2" < "100")
+        static void formatCanonicalComponent(const String& rawVal, char* outBuf, size_t cap) {
+            if (rawVal.isEmpty()) {
+                outBuf[0] = '\0';
+                return;
             }
-            return k;
+            bool isInt = true;
+            size_t start = (rawVal[0] == '-' || rawVal[0] == '+') ? 1 : 0;
+            if (start >= rawVal.length()) isInt = false;
+            for (size_t i = start; i < rawVal.length() && isInt; ++i) {
+                if (!isdigit(rawVal[i])) isInt = false;
+            }
+
+            if (isInt && rawVal.length() <= 11) {
+                long long v = atoll(rawVal.c_str());
+                if (v >= 0) {
+                    snprintf(outBuf, cap, "P%010lld", v);
+                } else {
+                    // Complemento para que negativos más pequeños queden antes en orden ASCII
+                    long long inv = 9999999999LL + v;
+                    if (inv < 0) inv = 0;
+                    snprintf(outBuf, cap, "N%010lld", inv);
+                }
+            } else {
+                strncpy(outBuf, rawVal.c_str(), cap - 1);
+                outBuf[cap - 1] = '\0';
+            }
         }
 
-        // Ejecuta búsqueda binaria O(log N) sobre las entradas ordenadas devolviendo las posiciones coincidentes.
-        std::vector<uint32_t> lookupEqual(const String& targetKey) const {
+        bool buildCompositeKey(const PgTuple& tuple, char* outKey, size_t cap) const {
+            outKey[0] = '\0';
+            size_t used = 0;
+            for (size_t i = 0; i < keyColumns.size(); ++i) {
+                const PgCell* c = tuple.findCell(keyColumns[i]);
+                if (!c || c->isNull) return false;
+
+                char comp[24];
+                formatCanonicalComponent(c->rawText, comp, sizeof(comp));
+
+                if (i > 0 && used + 1 < cap) {
+                    outKey[used++] = '\x1F';
+                    outKey[used] = '\0';
+                }
+                size_t rem = (used < cap) ? (cap - used - 1) : 0;
+                if (rem > 0) {
+                    strncat(outKey, comp, rem);
+                    used = strlen(outKey);
+                }
+            }
+            return outKey[0] != '\0';
+        }
+
+        // Búsqueda binaria O(log N) por clave exacta (acepta clave cruda o canónica)
+        std::vector<uint32_t> lookupEqual(const String& rawTargetKey) const {
+            char target[32];
+            if (rawTargetKey.indexOf('\x1F') != -1) {
+                strncpy(target, rawTargetKey.c_str(), sizeof(target) - 1);
+                target[sizeof(target) - 1] = '\0';
+            } else {
+                formatCanonicalComponent(rawTargetKey, target, sizeof(target));
+            }
+
             std::vector<uint32_t> matches;
-            IndexEntry probe{targetKey, 0};
+            IndexEntry probe(target, 0);
             auto it = std::lower_bound(sortedEntries.begin(), sortedEntries.end(), probe);
-            while (it != sortedEntries.end() && it->keyValue == targetKey) {
+            while (it != sortedEntries.end() && strcmp(it->key, target) == 0) {
                 matches.push_back(it->rowPosition);
                 ++it;
             }
             return matches;
         }
 
-        // Inserta una entrada manteniendo el orden para B-Tree en RAM.
-        void insertEntry(const String& key, uint32_t pos) {
-            if (key.isEmpty()) return;
-            IndexEntry entry{key, pos};
+        // Búsqueda binaria O(log N) por primera columna de un índice simple o compuesto
+        std::vector<uint32_t> lookupFirstColumnPrefix(const String& firstColValue) const {
+            if (keyColumns.size() <= 1) {
+                return lookupEqual(firstColValue);
+            }
+            char canonFirst[24];
+            formatCanonicalComponent(firstColValue, canonFirst, sizeof(canonFirst));
+
+            char prefix[28];
+            snprintf(prefix, sizeof(prefix), "%s\x1F", canonFirst);
+            size_t prefixLen = strlen(prefix);
+
+            std::vector<uint32_t> matches;
+            IndexEntry probe(prefix, 0);
+            auto it = std::lower_bound(sortedEntries.begin(), sortedEntries.end(), probe);
+            while (it != sortedEntries.end() && strncmp(it->key, prefix, prefixLen) == 0) {
+                matches.push_back(it->rowPosition);
+                ++it;
+            }
+            return matches;
+        }
+
+        void insertEntry(const char* keyStr, uint32_t pos) {
+            if (!keyStr || keyStr[0] == '\0') return;
+            // Si el índice supera las 512 entradas en RAM, descarta la más antigua para acotar memoria
+            if (sortedEntries.size() >= 512) {
+                sortedEntries.erase(sortedEntries.begin());
+            }
+            IndexEntry entry(keyStr, pos);
             auto it = std::upper_bound(sortedEntries.begin(), sortedEntries.end(), entry);
             sortedEntries.insert(it, entry);
         }
     };
 
-    // Gestor de almacenamiento físico y caminos de acceso indexados sincronizado con PhysicalSchemaCatalog.
     class RuntimeStorageAndIndexManager {
+    public:
+        static constexpr size_t MAX_SELECT_ROWS_RAM = 64;
+
     private:
-        // Almacén en RAM de respaldo (y caché de alta velocidad) sincronizado con los archivos .tbl de la SD
-        std::map<String, std::vector<PgTuple>> tableRowsCache;
+        // Fallback en RAM usado ÚNICAMENTE si la tarjeta MicroSD no está insertada
+        std::map<String, std::vector<PgTuple>> fallbackRamRows;
         std::map<String, std::vector<ActiveIndexStructure>> tableIndexes;
         std::map<String, int64_t> sequenceCounters;
+
+        uint8_t batchDepth = 0;
+        std::map<String, String> pendingBatchAppends;
 
         RuntimeStorageAndIndexManager() = default;
 
@@ -79,90 +168,211 @@ namespace DbRuntime::Storage {
             return k;
         }
 
+        void recoverInterruptedTmpFile(const String& tableName) {
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            if (!sd.estaInicializada()) return;
+            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            String path = cat.tableDataFilePath(tableName);
+            String tmpPath = path + ".tmp";
+            if (sd.existeArchivo(tmpPath.c_str())) {
+                if (!sd.existeArchivo(path.c_str())) {
+                    SD.rename(tmpPath.c_str(), path.c_str());
+                } else {
+                    sd.eliminarArchivo(tmpPath.c_str());
+                }
+            }
+        }
+
     public:
         static RuntimeStorageAndIndexManager& getInstance() {
             static RuntimeStorageAndIndexManager instance;
             return instance;
         }
 
-        // Sincroniza todas las tablas, PKs, UNIQUEs e índices declarados en database_not_runtime.
+        static TarjetaSD::ScopedLock lockEngine() {
+            return TarjetaSD::ScopedLock(TarjetaSD::getInstance().obtenerMutex());
+        }
+
+        void beginBatch() {
+            xSemaphoreTakeRecursive(TarjetaSD::getInstance().obtenerMutex(), portMAX_DELAY);
+            batchDepth++;
+        }
+
+        bool commitBatch() {
+            bool ok = true;
+            if (batchDepth > 0) {
+                batchDepth--;
+                if (batchDepth == 0) {
+                    TarjetaSD& sd = TarjetaSD::getInstance();
+                    auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+                    if (sd.estaInicializada()) {
+                        for (const auto& kv : pendingBatchAppends) {
+                            if (kv.second.isEmpty()) continue;
+                            String path = cat.tableDataFilePath(kv.first);
+                            if (!sd.anexarArchivo(path.c_str(), kv.second.c_str())) {
+                                ok = false;
+                            }
+                        }
+                    }
+                    pendingBatchAppends.clear();
+                }
+            }
+            xSemaphoreGiveRecursive(TarjetaSD::getInstance().obtenerMutex());
+            return ok;
+        }
+
+        void flushPendingBatchForTable(const String& tableName) {
+            auto lk = lockEngine();
+            String key = norm(tableName);
+            auto it = pendingBatchAppends.find(key);
+            if (it == pendingBatchAppends.end() || it->second.isEmpty()) return;
+
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            if (sd.estaInicializada()) {
+                auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+                String path = cat.tableDataFilePath(tableName);
+                sd.anexarArchivo(path.c_str(), it->second.c_str());
+            }
+            it->second = "";
+        }
+
         bool synchronizeWithDdlCatalog() {
+            auto lk = lockEngine();
             auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
             for (const auto& pair : cat.getAllTables()) {
                 const auto& schema = pair.second;
-                loadTableFromSdIfAvailable(schema.tableName);
+                recoverInterruptedTmpFile(schema.tableName);
                 rebuildIndexesForTable(schema.tableName);
             }
             return true;
         }
 
-        // Carga las filas desde el archivo físico /db/<tabla>.tbl si la tarjeta SD está inicializada.
-        void loadTableFromSdIfAvailable(const String& tableName) {
-            String key = norm(tableName);
-            TarjetaSD& sd = TarjetaSD::getInstance();
-            if (!sd.estaInicializada()) return;
+        // Lee una única fila directamente desde la MicroSD saltando al byteOffset exacto en O(1)
+        bool readRowAtOffset(const String& tableName, uint32_t byteOffset, PgTuple& outTuple) {
+            auto lk = lockEngine();
+            flushPendingBatchForTable(tableName);
 
+            TarjetaSD& sd = TarjetaSD::getInstance();
             auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
             const auto* schema = cat.getTable(tableName);
-            String path = cat.tableDataFilePath(tableName);
-            String tmpPath = path + ".tmp";
-            if (sd.existeArchivo(tmpPath.c_str())) {
-                if (!sd.existeArchivo(path.c_str())) {
-                    SD.rename(tmpPath.c_str(), path.c_str()); // corte entre remove y rename: recupera
-                } else {
-                    sd.eliminarArchivo(tmpPath.c_str());      // corte durante la escritura: .tmp incompleto
-                }
+
+            if (!sd.estaInicializada()) {
+                const auto& rows = fallbackRamRows[norm(tableName)];
+                if (byteOffset >= rows.size()) return false;
+                outTuple = rows[byteOffset];
+                return true;
             }
-            if (!sd.existeArchivo(path.c_str())) return;
+
+            String path = cat.tableDataFilePath(tableName);
+            if (!SD.exists(path.c_str())) return false;
+
+            File f = SD.open(path.c_str(), FILE_READ);
+            if (!f) return false;
+
+            if (!f.seek(byteOffset)) {
+                f.close();
+                return false;
+            }
+
+            String line = f.readStringUntil('\n');
+            f.close();
+
+            line.trim();
+            if (line.isEmpty()) return false;
+            outTuple = PgTuple::deserializeTsv(line, schema);
+            return true;
+        }
+
+        // Recorre una tabla en streaming línea por línea desde la MicroSD (1 sola PgTuple en RAM a la vez)
+        template <typename CallbackFn>
+        void forEachRowStreaming(const String& tableName, CallbackFn fn) {
+            auto lk = lockEngine();
+            flushPendingBatchForTable(tableName);
+
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            const auto* schema = cat.getTable(tableName);
+
+            if (!sd.estaInicializada()) {
+                const auto& rows = fallbackRamRows[norm(tableName)];
+                for (uint32_t i = 0; i < rows.size(); ++i) {
+                    if (!fn(rows[i], i)) break;
+                }
+                return;
+            }
+
+            String path = cat.tableDataFilePath(tableName);
+            if (!SD.exists(path.c_str())) return;
 
             File f = SD.open(path.c_str(), FILE_READ);
             if (!f) return;
 
-            std::vector<PgTuple> rows;
             while (f.available()) {
+                uint32_t offset = static_cast<uint32_t>(f.position());
                 String line = f.readStringUntil('\n');
                 line.trim();
                 if (line.isEmpty()) continue;
-                rows.push_back(PgTuple::deserializeTsv(line, schema));
+
+                PgTuple row = PgTuple::deserializeTsv(line, schema);
+                if (!fn(row, offset)) break;
             }
             f.close();
-            tableRowsCache[key] = std::move(rows);
         }
 
-        // Vuelca el vector de tuplas de una tabla al archivo físico /db/<tabla>.tbl en una sola operación de I/O.
-        bool persistTableToSd(const String& tableName) {
+        // Inserta al final del archivo .tbl (FILE_APPEND) y registra su byteOffset exacto en los índices
+        bool appendRowAndIndex(const String& tableName, const PgTuple& newRow) {
+            auto lk = lockEngine();
+            String key = norm(tableName);
             TarjetaSD& sd = TarjetaSD::getInstance();
-            if (!sd.estaInicializada()) return true; // Modo en memoria para tests
-
             auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+
+            if (!sd.estaInicializada()) {
+                auto& rows = fallbackRamRows[key];
+                if (rows.size() >= MAX_SELECT_ROWS_RAM) rows.erase(rows.begin());
+                uint32_t pos = static_cast<uint32_t>(rows.size());
+                rows.push_back(newRow);
+                for (auto& idx : tableIndexes[key]) {
+                    char k[32];
+                    if (idx.buildCompositeKey(newRow, k, sizeof(k))) idx.insertEntry(k, pos);
+                }
+                return true;
+            }
+
             String path = cat.tableDataFilePath(tableName);
-            String tmpPath = path + ".tmp";
-            const auto& rows = getTableRows(tableName);
-
-            String payload = "";
-            for (const auto& r : rows) {
-                payload += r.serializeTsv();
+            uint32_t baseSize = 0;
+            if (SD.exists(path.c_str())) {
+                File f = SD.open(path.c_str(), FILE_READ);
+                if (f) {
+                    baseSize = static_cast<uint32_t>(f.size());
+                    f.close();
+                }
             }
 
-            // 1. Escribir primero en el archivo temporal .tmp
-            if (!sd.escribirArchivo(tmpPath.c_str(), payload.c_str())) {
-                Serial.println("[SD] ERROR: no se pudo escribir " + tmpPath);
-                return false;
+            uint32_t newByteOffset = baseSize + static_cast<uint32_t>(pendingBatchAppends[key].length());
+            String lineTsv = newRow.serializeTsv();
+
+            if (batchDepth > 0) {
+                pendingBatchAppends[key] += lineTsv;
+            } else {
+                if (!sd.anexarArchivo(path.c_str(), lineTsv.c_str())) {
+                    return false;
+                }
             }
 
-            // 2. Si ya existe el archivo final, eliminarlo de forma segura
-            if (sd.existeArchivo(path.c_str())) {
-                sd.eliminarArchivo(path.c_str());
+            for (auto& idx : tableIndexes[key]) {
+                char k[32];
+                if (idx.buildCompositeKey(newRow, k, sizeof(k))) {
+                    idx.insertEntry(k, newByteOffset);
+                }
             }
-
-            // 3. Renombrar .tmp -> .tbl de forma atómica
-            bool ok = SD.rename(tmpPath.c_str(), path.c_str());
-            if (!ok) Serial.println("[SD] ERROR: rename " + tmpPath + " -> " + path + " fallo");
-            return ok;
+            return true;
         }
 
-        // Reconstruye todos los índices (PK, UNIQUE de columna, UNIQUE compuestos y CREATE INDEX) de una tabla.
+        // Reconstruye los índices leyendo en streaming desde la MicroSD sin dejar filas en RAM
         bool rebuildIndexesForTable(const String& tableName) {
+            auto lk = lockEngine();
+            flushPendingBatchForTable(tableName);
+
             auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
             const auto* schema = cat.getTable(tableName);
             if (!schema) return false;
@@ -170,20 +380,18 @@ namespace DbRuntime::Storage {
             String key = norm(tableName);
             std::vector<ActiveIndexStructure> idxList;
 
-            // 1. Índices implícitos por PRIMARY KEY y UNIQUE a nivel columna
             for (const auto& col : schema->columns) {
                 if (col.isPrimaryKey || col.isUnique) {
                     ActiveIndexStructure idx;
-                    idx.indexName = schema->tableName + "_" + col.columnName + (col.isPrimaryKey ? "_pkey" : "_key");
-                    idx.tableName = schema->tableName;
+                    idx.indexName  = schema->tableName + "_" + col.columnName + (col.isPrimaryKey ? "_pkey" : "_key");
+                    idx.tableName  = schema->tableName;
                     idx.keyColumns = { col.columnName };
-                    idx.isUnique  = true;
-                    idx.isPrimary = col.isPrimaryKey;
+                    idx.isUnique   = true;
+                    idx.isPrimary  = col.isPrimaryKey;
                     idxList.push_back(std::move(idx));
                 }
             }
 
-            // 2. Índices implícitos por restricciones UNIQUE / PK compuestas a nivel tabla
             for (const auto& tc : schema->tableConstraints) {
                 if (tc.type == DbNotRuntime::Standard::TableLevelConstraintDef::Type::PRIMARY_KEY ||
                     tc.type == DbNotRuntime::Standard::TableLevelConstraintDef::Type::UNIQUE) {
@@ -197,43 +405,43 @@ namespace DbRuntime::Storage {
                 }
             }
 
-            // 3. Índices explícitos creados con ModuloDDL::createIndex (Meta.indexes de Django)
-            // Inspeccionamos nombres conocidos o registrados en el catálogo
-            const auto& rows = getTableRows(tableName);
-            for (auto& idx : idxList) {
-                for (uint32_t i = 0; i < rows.size(); ++i) {
-                    String k = idx.buildCompositeKey(rows[i]);
-                    idx.insertEntry(k, i);
+            for (const auto& idxPair : cat.getAllIndexes()) {
+                const auto& idxDef = idxPair.second;
+                if (norm(idxDef.tableName) == key) {
+                    ActiveIndexStructure idx;
+                    idx.indexName  = idxDef.indexName;
+                    idx.tableName  = schema->tableName;
+                    idx.keyColumns = idxDef.keyColumns;
+                    idx.isUnique   = idxDef.isUnique;
+                    idx.isPrimary  = false;
+                    idxList.push_back(std::move(idx));
                 }
             }
+
+            // Escaneo en streaming de 1 sola tupla a la vez para indexar byte-offsets y secuencias IDENTITY
+            forEachRowStreaming(tableName, [&](const PgTuple& row, uint32_t offset) -> bool {
+                for (auto& idx : idxList) {
+                    char k[32];
+                    if (idx.buildCompositeKey(row, k, sizeof(k))) {
+                        idx.insertEntry(k, offset);
+                    }
+                }
+                for (const auto& col : schema->columns) {
+                    if (col.identityMode != DbNotRuntime::Standard::IdentityGeneration::NONE) {
+                        String seqKey = norm(tableName + "." + col.columnName);
+                        int64_t val = row.getBigInt(col.columnName.c_str(), 0);
+                        if (val >= sequenceCounters[seqKey]) {
+                            sequenceCounters[seqKey] = val + col.identityIncrement;
+                        }
+                    }
+                }
+                return true;
+            });
 
             tableIndexes[key] = std::move(idxList);
             return true;
         }
 
-        // Registra también en el motor de caminos de acceso cualquier índice secundario declarado en un modelo Django.
-        void ensureSecondaryIndexRegistered(const String& tableName, const String& indexName,
-                                            const std::vector<String>& cols, bool isUnique) {
-            String key = norm(tableName);
-            auto& list = tableIndexes[key];
-            for (const auto& existing : list) {
-                if (existing.indexName.equalsIgnoreCase(indexName)) return;
-            }
-            ActiveIndexStructure idx;
-            idx.indexName  = indexName;
-            idx.tableName  = tableName;
-            idx.keyColumns = cols;
-            idx.isUnique   = isUnique;
-            idx.isPrimary  = false;
-
-            const auto& rows = getTableRows(tableName);
-            for (uint32_t i = 0; i < rows.size(); ++i) {
-                idx.insertEntry(idx.buildCompositeKey(rows[i]), i);
-            }
-            list.push_back(std::move(idx));
-        }
-
-        // Busca si existe un índice cuyo primer atributo coincida con la columna filtrada.
         const ActiveIndexStructure* findBestIndexForColumn(const String& tableName, const String& colName) const {
             String key = norm(tableName);
             auto it = tableIndexes.find(key);
@@ -242,37 +450,55 @@ namespace DbRuntime::Storage {
             const ActiveIndexStructure* fallbackSecondary = nullptr;
             for (const auto& idx : it->second) {
                 if (!idx.keyColumns.empty() && idx.keyColumns[0].equalsIgnoreCase(colName)) {
-                    if (idx.isPrimary || idx.isUnique) return &idx; // Prioriza índice único / PK
+                    if (idx.isPrimary || idx.isUnique) return &idx;
                     fallbackSecondary = &idx;
                 }
             }
             return fallbackSecondary;
         }
 
-        // Genera el siguiente valor de secuencia IDENTITY para una tabla y columna.
         int64_t nextIdentityValue(const String& tableName, const String& colName, int64_t start, int64_t inc) {
             String seqKey = norm(tableName + "." + colName);
-            if (sequenceCounters.find(seqKey) == sequenceCounters.end()) {
-                int64_t maxFound = start - inc;
-                for (const auto& r : getTableRows(tableName)) {
-                    int64_t v = r.getBigInt(colName.c_str(), maxFound);
-                    if (v > maxFound) maxFound = v;
-                }
-                sequenceCounters[seqKey] = maxFound + inc;
-            } else {
-                sequenceCounters[seqKey] += inc;
+            auto it = sequenceCounters.find(seqKey);
+            if (it == sequenceCounters.end() || it->second < start) {
+                sequenceCounters[seqKey] = start + inc;
+                return start;
             }
-            return sequenceCounters[seqKey];
+            int64_t current = it->second;
+            it->second += inc;
+            return current;
         }
 
-        const std::vector<PgTuple>& getTableRows(const String& tableName) const {
-            static const std::vector<PgTuple> emptyVec;
-            auto it = tableRowsCache.find(norm(tableName));
-            return (it != tableRowsCache.end()) ? it->second : emptyVec;
+        // Carga acotada (máximo MAX_SELECT_ROWS_RAM filas) para operaciones auxiliares
+        std::vector<PgTuple> getTableRows(const String& tableName) {
+            std::vector<PgTuple> out;
+            forEachRowStreaming(tableName, [&](const PgTuple& r, uint32_t) -> bool {
+                if (out.size() >= MAX_SELECT_ROWS_RAM) out.erase(out.begin());
+                out.push_back(r);
+                return true;
+            });
+            return out;
         }
 
         std::vector<PgTuple>& getTableRowsMutable(const String& tableName) {
-            return tableRowsCache[norm(tableName)];
+            return fallbackRamRows[norm(tableName)];
+        }
+
+        bool persistTableToSd(const String& tableName) {
+            auto lk = lockEngine();
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            if (!sd.estaInicializada()) return true;
+
+            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            String path = cat.tableDataFilePath(tableName);
+            String tmpPath = path + ".tmp";
+            const auto& rows = fallbackRamRows[norm(tableName)];
+
+            String payload = "";
+            for (const auto& r : rows) payload += r.serializeTsv();
+            if (!sd.escribirArchivo(tmpPath.c_str(), payload.c_str())) return false;
+            if (sd.existeArchivo(path.c_str())) sd.eliminarArchivo(path.c_str());
+            return SD.rename(tmpPath.c_str(), path.c_str());
         }
 
         const std::vector<ActiveIndexStructure>& getIndexesOfTable(const String& tableName) const {

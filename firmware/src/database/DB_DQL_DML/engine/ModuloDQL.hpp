@@ -582,6 +582,7 @@ namespace DbRuntime::Engine {
     public:
         // Ejecuta un plan SELECT completo usando los índices del DDL cuando están disponibles y midiendo el costo en hardware.
         std::vector<PgTuple> executeSelect(const SelectQueryPlan& plan) {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             Telemetry::ScopedCostProbe probe(lastCost, "SELECT", plan.fromTable);
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
 
@@ -606,30 +607,44 @@ namespace DbRuntime::Engine {
 
             if (!loadedFromCte) {
                 auto& storage = Storage::RuntimeStorageAndIndexManager::getInstance();
-                const auto& allRows = storage.getTableRows(plan.fromTable);
                 ChosenAccessPlan accessPlan = AccessPathPlanner::chooseBestAccessPath(plan.fromTable, plan.wherePredicates, lastCost);
 
+                const size_t maxFilasSeguras = (plan.limitCount > 0 && plan.orderBy.empty() && plan.aggregates.empty())
+                    ? static_cast<size_t>(plan.limitCount + plan.offsetCount)
+                    : Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM;
+
                 if (accessPlan.indexPtr != nullptr) {
-                    // INDEX SCAN / PK LOOKUP / UNIQUE LOOKUP en O(log N)
-                    std::vector<uint32_t> positions = accessPlan.indexPtr->lookupEqual(accessPlan.lookupValue);
-                    lastCost.rowsExamined = static_cast<uint16_t>(positions.size());
-                    for (uint32_t pos : positions) {
-                        if (pos < allRows.size()) {
-                            PgTuple candidate = hasJoins ? enrichTupleWithPrefix(allRows[pos], plan.fromTable) : allRows[pos];
-                            if (hasJoins || evaluatePredicateChain(candidate, plan.wherePredicates)) {
-                                workingRows.push_back(std::move(candidate));
+                    // INDEX SCAN / PK LOOKUP / UNIQUE LOOKUP en O(log N) + seek(byteOffset) directo en MicroSD
+                    std::vector<uint32_t> offsets = accessPlan.indexPtr->lookupFirstColumnPrefix(accessPlan.lookupValue);
+                    lastCost.rowsExamined = static_cast<uint16_t>(offsets.size());
+                    for (uint32_t byteOff : offsets) {
+                        PgTuple rawRow;
+                        if (!storage.readRowAtOffset(plan.fromTable, byteOff, rawRow)) continue;
+                        PgTuple candidate = hasJoins ? enrichTupleWithPrefix(rawRow, plan.fromTable) : std::move(rawRow);
+                        if (hasJoins || evaluatePredicateChain(candidate, plan.wherePredicates)) {
+                            if (workingRows.size() >= Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) {
+                                workingRows.erase(workingRows.begin());
                             }
+                            workingRows.push_back(std::move(candidate));
+                            if (workingRows.size() >= maxFilasSeguras && plan.orderBy.empty()) break;
                         }
                     }
                 } else {
-                    // SEQ SCAN
-                    lastCost.rowsExamined = static_cast<uint16_t>(allRows.size());
-                    for (const auto& r : allRows) {
+                    // SEQ SCAN en streaming desde la MicroSD (1 sola PgTuple en RAM a la vez)
+                    uint16_t examinadas = 0;
+                    storage.forEachRowStreaming(plan.fromTable, [&](const PgTuple& r, uint32_t) -> bool {
+                        examinadas++;
                         PgTuple candidate = hasJoins ? enrichTupleWithPrefix(r, plan.fromTable) : r;
                         if (hasJoins || evaluatePredicateChain(candidate, plan.wherePredicates)) {
+                            if (workingRows.size() >= Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) {
+                                workingRows.erase(workingRows.begin());
+                            }
                             workingRows.push_back(std::move(candidate));
+                            if (workingRows.size() >= maxFilasSeguras && plan.orderBy.empty()) return false;
                         }
-                    }
+                        return true;
+                    });
+                    lastCost.rowsExamined = examinadas;
                 }
             } else if (!hasJoins) {
                 std::vector<PgTuple> filtered;

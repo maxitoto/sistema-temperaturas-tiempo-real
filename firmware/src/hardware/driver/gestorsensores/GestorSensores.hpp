@@ -41,6 +41,8 @@ private:
         explicit ScopedSensorLock(SemaphoreHandle_t m) : mtx(m) {
             if (mtx) xSemaphoreTakeRecursive(mtx, portMAX_DELAY);
         }
+        ScopedSensorLock(const ScopedSensorLock&) = delete;
+        ScopedSensorLock& operator=(const ScopedSensorLock&) = delete;
         ~ScopedSensorLock() {
             if (mtx) xSemaphoreGiveRecursive(mtx);
         }
@@ -122,10 +124,7 @@ public:
     bool escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom);
     uint8_t procesarBusquedaAlarmasHardware();
 
-    // Acceso legacy para código existente
-    Sensor& obtenerSensor(uint8_t slot);
-    const Sensor& obtenerSensor(uint8_t slot) const;
-    Sensor* buscarSensorPorMAC(const char* macHex);
+
 
     EstadoBus     obtenerEstadoBus()           const { ScopedSensorLock lk(mutexSensores); return estadoBus; }
     EventoGestor  obtenerUltimoEvento()        const { ScopedSensorLock lk(mutexSensores); return ultimoEvento; }

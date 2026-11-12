@@ -752,22 +752,6 @@ uint8_t GestorSensores::procesarBusquedaAlarmasHardware() {
     return contador;
 }
 
-Sensor& GestorSensores::obtenerSensor(uint8_t slot) {
-    ScopedSensorLock lk(mutexSensores);
-    return sensores[(slot < MAX_SENSORES) ? slot : 0];
-}
-
-const Sensor& GestorSensores::obtenerSensor(uint8_t slot) const {
-    ScopedSensorLock lk(mutexSensores);
-    return sensores[(slot < MAX_SENSORES) ? slot : 0];
-}
-
-Sensor* GestorSensores::buscarSensorPorMAC(const char* macHex) {
-    ScopedSensorLock lk(mutexSensores);
-    int8_t slot = buscarSlotPorMACInterno(macHex);
-    return (slot >= 0) ? &sensores[slot] : nullptr;
-}
-
 const char* GestorSensores::nombreFamilia(uint8_t codigoFamilia) {
     switch (codigoFamilia) {
         case DS18S20MODEL:  return "DS18S20";

@@ -156,19 +156,19 @@ namespace DbRuntime::Engine {
             return true;
         }
 
-        // Busca si una tupla colisiona con algún índice UNIQUE o PRIMARY KEY devolviendo la posición de la fila en conflicto.
+        // Busca si una tupla colisiona con algún índice UNIQUE o PRIMARY KEY devolviendo el byteOffset en conflicto.
         static int32_t findUniqueConflictRowIndex(const String& tableName,
                                                   const Storage::PgTuple& candidate,
-                                                  int32_t ignoreRowIndex,
+                                                  int32_t ignoreRowOffset,
                                                   String& outIndexName) {
             auto& storage = Storage::RuntimeStorageAndIndexManager::getInstance();
             for (const auto& idx : storage.getIndexesOfTable(tableName)) {
                 if (!idx.isUnique && !idx.isPrimary) continue;
-                String key = idx.buildCompositeKey(candidate);
-                if (key.isEmpty()) continue;
-                std::vector<uint32_t> matches = idx.lookupEqual(key);
+                char key[32];
+                if (!idx.buildCompositeKey(candidate, key, sizeof(key))) continue;
+                std::vector<uint32_t> matches = idx.lookupEqual(String(key));
                 for (uint32_t pos : matches) {
-                    if (static_cast<int32_t>(pos) != ignoreRowIndex) {
+                    if (static_cast<int32_t>(pos) != ignoreRowOffset) {
                         outIndexName = idx.indexName;
                         return static_cast<int32_t>(pos);
                     }
@@ -225,6 +225,7 @@ namespace DbRuntime::Engine {
                                      Storage::PgTuple inputRow,
                                      const OnConflictClause& onConflict = {},
                                      const std::vector<String>& returningColumns = {}) {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             DmlExecutionResult result;
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
             auto& cat     = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
@@ -298,10 +299,11 @@ namespace DbRuntime::Engine {
                             }
                         }
                     }
-                    auto& rows = storage.getTableRowsMutable(tableName);
-                    rows.push_back(inputRow);
-                    storage.rebuildIndexesForTable(tableName);
-                    storage.persistTableToSd(tableName);
+                    if (!storage.appendRowAndIndex(tableName, inputRow)) {
+                        console.raiseError(SqlState::IO_ERROR, "INSERT", tableName, "", "could not append row to SD");
+                        probe.finish(); result.cost = lastCost;
+                        return result;
+                    }
 
                     result.success = true;
                     result.affectedRows = 1;
@@ -324,6 +326,7 @@ namespace DbRuntime::Engine {
                                       const std::vector<String>& returningColumns = {},
                                       bool allowUnconditionalUpdate = false,
                                       const String& fromAuxTable = "") {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             DmlExecutionResult result;
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
             auto& cat     = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
@@ -353,7 +356,7 @@ namespace DbRuntime::Engine {
 
                 std::vector<uint32_t> targetIndices;
                 if (accessPlan.indexPtr != nullptr) {
-                    targetIndices = accessPlan.indexPtr->lookupEqual(accessPlan.lookupValue);
+                    targetIndices = accessPlan.indexPtr->lookupFirstColumnPrefix(accessPlan.lookupValue);
                     lastCost.rowsExamined = static_cast<uint16_t>(targetIndices.size());
                 } else {
                     lastCost.rowsExamined = static_cast<uint16_t>(rows.size());
@@ -407,10 +410,11 @@ namespace DbRuntime::Engine {
                     if (!uniqueViolation && !stagedUpdates.empty()) {
                         for (const auto& ix : storage.getIndexesOfTable(tableName)) {
                             if (!ix.isUnique && !ix.isPrimary) continue;
-                            String kNew = ix.buildCompositeKey(candidate);
-                            if (kNew.isEmpty()) continue;
+                            char kNew[32];
+                            if (!ix.buildCompositeKey(candidate, kNew, sizeof(kNew))) continue;
                             for (const auto& st : stagedUpdates) {
-                                if (kNew == ix.buildCompositeKey(st.second)) {
+                                char kSt[32];
+                                if (ix.buildCompositeKey(st.second, kSt, sizeof(kSt)) && strcmp(kNew, kSt) == 0) {
                                     conflictIdx = ix.indexName;
                                     uniqueViolation = true;
                                     break;
@@ -472,6 +476,7 @@ namespace DbRuntime::Engine {
                                       const std::vector<String>& returningColumns = {},
                                       bool allowUnconditionalDelete = false,
                                       const String& usingAuxTable = "") {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             DmlExecutionResult result;
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
             auto& cat     = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
@@ -658,6 +663,7 @@ namespace DbRuntime::Engine {
                                      const String& joinKeyTargetCol,
                                      const String& joinKeySourceCol,
                                      const std::vector<MergeWhenClause>& whenClauses) {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             DmlExecutionResult result;
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
             auto& cat     = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
@@ -725,6 +731,7 @@ namespace DbRuntime::Engine {
         // Vacía la tabla en RAM, limpia sus índices y trunca el archivo .tbl verificando dependencias FK en el catálogo.
         DmlExecutionResult truncateTable(const String& tableName,
                                          DbNotRuntime::Standard::ReferentialAction behavior = DbNotRuntime::Standard::ReferentialAction::RESTRICT) {
+            auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
             DmlExecutionResult res;
             Telemetry::ScopedCostProbe probe(lastCost, "TRUNCATE", tableName);
 

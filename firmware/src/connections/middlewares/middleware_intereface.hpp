@@ -18,7 +18,7 @@ struct AcumuladorFramingTcp {
 
 class MiddlewareInterface {
 public:
-    static constexpr uint32_t TIEMPO_EXPIRACION_KEEPALIVE_MS = 120000; // 2 minutos
+    static constexpr uint32_t TIEMPO_EXPIRACION_KEEPALIVE_MS = WiFiRuntime::TIEMPO_EXPIRACION_PEER_MS; // 2 minutos
 
 private:
     UARTSRuntime& uarts;

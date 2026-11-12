@@ -62,7 +62,7 @@ namespace DbRuntime::Engine {
                     (cond.columnOrExpr.indexOf('.') == -1 || cond.columnOrExpr.startsWith(tableName + "."))) {
                     String cleanCol = cond.cleanColumnName();
                     const auto* idx = storage.findBestIndexForColumn(tableName, cleanCol);
-                    if (idx && idx->keyColumns.size() == 1) {
+                    if (idx && !idx->keyColumns.empty()) {
                         plan.indexPtr    = idx;
                         plan.lookupValue = cond.valueA;
                         if (idx->isPrimary) {

@@ -22,7 +22,7 @@ struct RegistroPeerWiFi {
 class WiFiRuntime {
 public:
     static constexpr uint8_t MAXIMO_PEERS_WIFI = 8;
-    static constexpr uint32_t TIEMPO_EXPIRACION_PEER_MS = MiddlewareInterface::TIEMPO_EXPIRACION_KEEPALIVE_MS;
+    static constexpr uint32_t TIEMPO_EXPIRACION_PEER_MS = 120000; // 2 minutos
 
 private:
     WiFiInicializador& inicializador;

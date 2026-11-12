@@ -137,7 +137,8 @@ namespace DbNotRuntime::Engine {
         bool hasIndex(const String& name) const { return indexes.find(normalizeKey(name)) != indexes.end(); }
         void registerIndex(const Standard::IndexDefinition& idx) { indexes[normalizeKey(idx.indexName)] = idx; }
         void removeIndex(const String& name) { indexes.erase(normalizeKey(name)); }
-
+        const std::map<String, Standard::IndexDefinition>& getAllIndexes() const { return indexes; }
+        
         // Elimina todos los índices asociados a una tabla cuando se ejecuta DROP TABLE.
         void removeIndexesOfTable(const String& tableName) {
             String normTable = normalizeKey(tableName);
