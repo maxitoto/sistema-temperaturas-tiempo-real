@@ -2,13 +2,12 @@
 #include <Arduino.h>
 #include <vector>
 #include <utility>
-#include "../standard/PostgresDataTypes.hpp"
-#include "../standard/PostgresConstraints.hpp"
+#include "../../common/PostgresDataTypes.hpp"
+#include "../../common/PostgresConstraints.hpp"
 #include "../engine/ModuloDDL.hpp"
 
 namespace DbNotRuntime::Models {
 
-    // Mapea las constantes de integridad referencial estilo Django (models::CASCADE, models::PROTECT, etc.) a PostgreSQL.
     static constexpr Standard::ReferentialAction CASCADE     = Standard::ReferentialAction::CASCADE;
     static constexpr Standard::ReferentialAction PROTECT     = Standard::ReferentialAction::RESTRICT;
     static constexpr Standard::ReferentialAction RESTRICT    = Standard::ReferentialAction::RESTRICT;
@@ -16,10 +15,8 @@ namespace DbNotRuntime::Models {
     static constexpr Standard::ReferentialAction SET_DEFAULT = Standard::ReferentialAction::SET_DEFAULT;
     static constexpr Standard::ReferentialAction DO_NOTHING  = Standard::ReferentialAction::NO_ACTION;
 
-    // Permite declarar enumeraciones nativas de PostgreSQL al estilo TextChoices / IntegerChoices de Django.
     class PgEnumChoices {
     public:
-        // Registra inmediatamente el tipo ENUM en el catálogo PostgreSQL a partir de su nombre y lista de etiquetas.
         static bool registerChoices(const String& enumTypeName, const std::vector<String>& labels) {
             if (Engine::PhysicalSchemaCatalog::getInstance().hasEnum(enumTypeName)) {
                 return true;
@@ -28,17 +25,15 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // Clase fluido-declarativa que representa un Field de Django y se mueve sin copias pesadas en la pila.
     class Field {
     protected:
         Standard::ColumnConstraintDef def;
 
     public:
-        // Inicializa un campo base indicando el nombre de columna y su tipo nativo en PostgreSQL.
         Field(const String& colName, Standard::PgDataType type) {
             def.columnName = colName;
             def.dataType   = type;
-            def.isNotNull  = true; // En Django todos los campos son null=False (NOT NULL) por defecto
+            def.isNotNull  = true;
         }
 
         Field(const Field&) = default;
@@ -46,7 +41,6 @@ namespace DbNotRuntime::Models {
         Field& operator=(const Field&) = default;
         Field& operator=(Field&&) noexcept = default;
 
-        // Equivale a primary_key=True en Django moviendo la instancia temporal para no duplicar memoria en pila.
         Field&& primary_key(bool val = true) {
             def.isPrimaryKey = val;
             if (val) {
@@ -56,68 +50,80 @@ namespace DbNotRuntime::Models {
             return std::move(*this);
         }
 
-        // Equivale a null=True/False en Django (invierte la bandera física NOT NULL de PostgreSQL).
         Field&& null(bool allowNull) {
             def.isNotNull = !allowNull;
             return std::move(*this);
         }
 
-        // Equivale a unique=True en Django.
         Field&& unique(bool val = true) {
             def.isUnique = val;
             return std::move(*this);
         }
 
-        // Equivale a default="..." con literal C-string evitando conversión ambigua con el literal entero 0.
         Field&& default_val(const char* literal) {
             def.hasDefault   = true;
             def.defaultValue = literal ? String(literal) : String("");
             return std::move(*this);
         }
 
-        // Equivale a default=... con objeto String de Arduino.
         Field&& default_val(const String& literal) {
             def.hasDefault   = true;
             def.defaultValue = literal;
             return std::move(*this);
         }
 
-        // Sobrecarga exacta para literales int estándar (ej: default_val(0), default_val(8443)).
         Field&& default_val(int numericLiteral) {
             def.hasDefault   = true;
             def.defaultValue = String(numericLiteral);
             return std::move(*this);
         }
 
-        // Sobrecarga exacta para enteros de 32 bits en Xtensa (long / int32_t).
         Field&& default_val(long numericLiteral) {
             def.hasDefault   = true;
             def.defaultValue = String(numericLiteral);
             return std::move(*this);
         }
 
-        // Sobrecarga exacta para enteros de 64 bits (long long / int64_t).
         Field&& default_val(long long numericLiteral) {
             def.hasDefault   = true;
             def.defaultValue = String(static_cast<long>(numericLiteral));
             return std::move(*this);
         }
 
-        // Sobrecarga exacta para literales float (ej: default_val(0.0f), default_val(1013.25f)).
         Field&& default_val(float floatLiteral, uint8_t decimals = 2) {
             def.hasDefault   = true;
             def.defaultValue = String(floatLiteral, static_cast<unsigned int>(decimals));
             return std::move(*this);
         }
 
-        // Sobrecarga exacta para literales double (ej: default_val(0.0)).
         Field&& default_val(double doubleLiteral, uint8_t decimals = 2) {
             def.hasDefault   = true;
             def.defaultValue = String(doubleLiteral, static_cast<unsigned int>(decimals));
             return std::move(*this);
         }
 
-        // Agrega una restricción CHECK(expr) al campo actual al estilo CheckConstraint de Django.
+        Field&& auto_now_add(bool enabled = true) {
+            def.autoNowAdd = enabled;
+            if (enabled) {
+                def.hasDefault = true;
+                if (def.dataType == Standard::PgDataType::DATE) def.defaultValue = "CURRENT_DATE";
+                else if (def.dataType == Standard::PgDataType::TIME || def.dataType == Standard::PgDataType::TIME_TZ) def.defaultValue = "CURRENT_TIME";
+                else def.defaultValue = "CURRENT_TIMESTAMP";
+            }
+            return std::move(*this);
+        }
+
+        Field&& auto_now(bool enabled = true) {
+            def.autoNow = enabled;
+            if (enabled) {
+                def.hasDefault = true;
+                if (def.dataType == Standard::PgDataType::DATE) def.defaultValue = "CURRENT_DATE";
+                else if (def.dataType == Standard::PgDataType::TIME || def.dataType == Standard::PgDataType::TIME_TZ) def.defaultValue = "CURRENT_TIME";
+                else def.defaultValue = "CURRENT_TIMESTAMP";
+            }
+            return std::move(*this);
+        }
+
         Field&& check(const String& sqlExpr, Standard::CheckEvaluatorFn fn = nullptr) {
             def.hasCheck        = true;
             def.checkExpression = sqlExpr;
@@ -125,19 +131,28 @@ namespace DbNotRuntime::Models {
             return std::move(*this);
         }
 
-        // Equivale a db_comment="..." en Django 4.2+ para documentar la columna en el catálogo PostgreSQL.
         Field&& db_comment(const String& comment) {
             def.comment = comment;
             return std::move(*this);
         }
 
-        // Devuelve la estructura física de restricción de columna compilada.
         const Standard::ColumnConstraintDef& compiled() const { return def; }
     };
 
-    // ---------------- Campos Numéricos y Autoincrementales (Django -> PostgreSQL) ----------------
+    // ---------------- 1. Campos Autoincrementales (IDENTITY) ----------------
 
-    // Crea una clave primaria INTEGER GENERATED BY DEFAULT AS IDENTITY como AutoField en Django.
+    class SmallAutoField : public Field {
+    public:
+        explicit SmallAutoField(const String& colName) : Field(colName, Standard::PgDataType::SMALLINT) {
+            def.isPrimaryKey      = true;
+            def.isNotNull         = true;
+            def.isUnique          = true;
+            def.identityMode      = Standard::IdentityGeneration::BY_DEFAULT;
+            def.identityStart     = 1;
+            def.identityIncrement = 1;
+        }
+    };
+
     class AutoField : public Field {
     public:
         explicit AutoField(const String& colName) : Field(colName, Standard::PgDataType::INTEGER) {
@@ -150,7 +165,6 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // Crea una clave primaria BIGINT GENERATED BY DEFAULT AS IDENTITY como BigAutoField en Django.
     class BigAutoField : public Field {
     public:
         explicit BigAutoField(const String& colName) : Field(colName, Standard::PgDataType::BIGINT) {
@@ -163,25 +177,25 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // Crea una columna SMALLINT (16 bits) en PostgreSQL.
+    // ---------------- 2. Campos Numéricos Enteros y de Punto Flotante ----------------
+
     class SmallIntegerField : public Field {
     public:
         explicit SmallIntegerField(const String& colName) : Field(colName, Standard::PgDataType::SMALLINT) {}
     };
 
-    // Crea una columna INTEGER (32 bits) en PostgreSQL.
+    class PositiveSmallIntegerField : public Field {
+    public:
+        explicit PositiveSmallIntegerField(const String& colName) : Field(colName, Standard::PgDataType::SMALLINT) {
+            check(colName + " >= 0", +[](const String& v) -> bool { return v.toInt() >= 0; });
+        }
+    };
+
     class IntegerField : public Field {
     public:
         explicit IntegerField(const String& colName) : Field(colName, Standard::PgDataType::INTEGER) {}
     };
 
-    // Crea una columna BIGINT (64 bits) en PostgreSQL.
-    class BigIntegerField : public Field {
-    public:
-        explicit BigIntegerField(const String& colName) : Field(colName, Standard::PgDataType::BIGINT) {}
-    };
-
-    // Crea una columna INTEGER con restricción automática CHECK (col >= 0) como PositiveIntegerField en Django.
     class PositiveIntegerField : public Field {
     public:
         explicit PositiveIntegerField(const String& colName) : Field(colName, Standard::PgDataType::INTEGER) {
@@ -189,32 +203,51 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // Crea una columna REAL / DOUBLE PRECISION en PostgreSQL.
+    class BigIntegerField : public Field {
+    public:
+        explicit BigIntegerField(const String& colName) : Field(colName, Standard::PgDataType::BIGINT) {}
+    };
+
+    class PositiveBigIntegerField : public Field {
+    public:
+        explicit PositiveBigIntegerField(const String& colName) : Field(colName, Standard::PgDataType::BIGINT) {
+            check(colName + " >= 0", +[](const String& v) -> bool { return atoll(v.c_str()) >= 0; });
+        }
+    };
+
     class FloatField : public Field {
     public:
         explicit FloatField(const String& colName, bool doublePrecision = false)
             : Field(colName, doublePrecision ? Standard::PgDataType::DOUBLE_PRECISION : Standard::PgDataType::REAL) {}
     };
 
-    // Crea una columna NUMERIC(max_digits, decimal_places) exacta en PostgreSQL.
+    class DoublePrecisionField : public Field {
+    public:
+        explicit DoublePrecisionField(const String& colName)
+            : Field(colName, Standard::PgDataType::DOUBLE_PRECISION) {}
+    };
+
     class DecimalField : public Field {
     public:
-        DecimalField(const String& colName, uint8_t maxDigits, uint8_t decimalPlaces)
-            : Field(colName, Standard::PgDataType::NUMERIC) {
+        DecimalField(const String& colName, uint8_t maxDigits, uint8_t decimalPlaces, bool useDecimalType = false)
+            : Field(colName, useDecimalType ? Standard::PgDataType::DECIMAL : Standard::PgDataType::NUMERIC) {
             def.precision = maxDigits;
             def.scale     = decimalPlaces;
         }
     };
 
-    // ---------------- Campos de Texto, Booleanos, Tiempo y Estructurados ----------------
+    class DecFloatField : public Field {
+    public:
+        explicit DecFloatField(const String& colName) : Field(colName, Standard::PgDataType::DECFLOAT) {}
+    };
 
-    // Crea una columna BOOLEAN en PostgreSQL.
+    // ---------------- 3. Campos Booleanos, Caracteres y Binarios ----------------
+
     class BooleanField : public Field {
     public:
         explicit BooleanField(const String& colName) : Field(colName, Standard::PgDataType::BOOLEAN) {}
     };
 
-    // Crea una columna CHARACTER VARYING(max_length) en PostgreSQL exigiendo max_length obligatorio como en Django.
     class CharField : public Field {
     public:
         CharField(const String& colName, uint16_t maxLength)
@@ -223,26 +256,113 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // Crea una columna TEXT ilimitada en PostgreSQL.
+    class FixedCharField : public Field {
+    public:
+        FixedCharField(const String& colName, uint16_t exactLength)
+            : Field(colName, Standard::PgDataType::CHAR) {
+            def.maxLength = exactLength;
+        }
+    };
+
+    class NationalCharField : public Field {
+    public:
+        NationalCharField(const String& colName, uint16_t maxLength)
+            : Field(colName, Standard::PgDataType::NCHAR) {
+            def.maxLength = maxLength;
+        }
+    };
+
     class TextField : public Field {
     public:
         explicit TextField(const String& colName) : Field(colName, Standard::PgDataType::TEXT) {}
     };
 
-    // Crea una columna TIMESTAMP WITHOUT/WITH TIME ZONE en PostgreSQL.
-    class DateTimeField : public Field {
+    class ClobField : public Field {
     public:
-        explicit DateTimeField(const String& colName, bool useTz = false)
-            : Field(colName, useTz ? Standard::PgDataType::TIMESTAMP_TZ : Standard::PgDataType::TIMESTAMP) {}
+        explicit ClobField(const String& colName) : Field(colName, Standard::PgDataType::CLOB) {}
     };
 
-    // Crea una columna JSON nativa de PostgreSQL.
+    class BitField : public Field {
+    public:
+        BitField(const String& colName, uint16_t bitLength = 1)
+            : Field(colName, Standard::PgDataType::BIT) {
+            def.maxLength = bitLength;
+        }
+    };
+
+    class BinaryField : public Field {
+    public:
+        BinaryField(const String& colName, uint16_t maxBytes = 0, bool fixedLength = false)
+            : Field(colName, fixedLength ? Standard::PgDataType::BINARY : Standard::PgDataType::VARBINARY) {
+            def.maxLength = maxBytes;
+        }
+    };
+
+    class BlobField : public Field {
+    public:
+        explicit BlobField(const String& colName) : Field(colName, Standard::PgDataType::BLOB) {}
+    };
+
+    // ---------------- 4. Campos de Fecha, Hora e Intervalo (ISO-8601 real) ----------------
+
+    class DateField : public Field {
+    public:
+        explicit DateField(const String& colName, bool autoNow = false, bool autoNowAdd = true)
+            : Field(colName, Standard::PgDataType::DATE) {
+            def.autoNow      = autoNow;
+            def.autoNowAdd   = autoNowAdd;
+            def.hasDefault   = (autoNow || autoNowAdd);
+            def.defaultValue = (autoNow || autoNowAdd) ? "CURRENT_DATE" : "";
+        }
+    };
+
+    class TimeField : public Field {
+    public:
+        explicit TimeField(const String& colName, bool useTz = false, bool autoNow = false, bool autoNowAdd = true)
+            : Field(colName, useTz ? Standard::PgDataType::TIME_TZ : Standard::PgDataType::TIME) {
+            def.autoNow      = autoNow;
+            def.autoNowAdd   = autoNowAdd;
+            def.hasDefault   = (autoNow || autoNowAdd);
+            def.defaultValue = (autoNow || autoNowAdd) ? "CURRENT_TIME" : "";
+        }
+    };
+
+    class DateTimeField : public Field {
+    public:
+        explicit DateTimeField(const String& colName, bool useTz = false, bool autoNow = false, bool autoNowAdd = true)
+            : Field(colName, useTz ? Standard::PgDataType::TIMESTAMP_TZ : Standard::PgDataType::TIMESTAMP) {
+            def.autoNow      = autoNow;
+            def.autoNowAdd   = autoNowAdd;
+            def.hasDefault   = (autoNow || autoNowAdd);
+            def.defaultValue = (autoNow || autoNowAdd) ? "CURRENT_TIMESTAMP" : "";
+        }
+    };
+
+    class DurationField : public Field {
+    public:
+        explicit DurationField(const String& colName, Standard::IntervalField precisionField = Standard::IntervalField::SECOND)
+            : Field(colName, Standard::PgDataType::INTERVAL) {
+            def.intervalField = precisionField;
+        }
+    };
+
+    // ---------------- 5. Campos Estructurados, Personalizados y Relacionales ----------------
+
     class JSONField : public Field {
     public:
         explicit JSONField(const String& colName) : Field(colName, Standard::PgDataType::JSON) {}
     };
 
-    // Crea una columna tipada con un ENUM registrado en PostgreSQL.
+    class XMLField : public Field {
+    public:
+        explicit XMLField(const String& colName) : Field(colName, Standard::PgDataType::XML) {}
+    };
+
+    class URLField : public Field {
+    public:
+        explicit URLField(const String& colName) : Field(colName, Standard::PgDataType::URI) {}
+    };
+
     class EnumField : public Field {
     public:
         EnumField(const String& colName, const String& registeredEnumTypeName)
@@ -251,9 +371,21 @@ namespace DbNotRuntime::Models {
         }
     };
 
-    // ---------------- Relaciones Relacionales (ForeignKey / OneToOneField) ----------------
+    class DomainField : public Field {
+    public:
+        DomainField(const String& colName, const String& registeredDomainName)
+            : Field(colName, Standard::PgDataType::DOMAIN_TYPE) {
+            def.customTypeName = registeredDomainName;
+        }
+    };
 
-    // Crea una clave foránea tipada que infiere o verifica el tipo de la PK padre en PostgreSQL.
+    class ArrayField : public Field {
+    public:
+        explicit ArrayField(const String& colName) : Field(colName, Standard::PgDataType::ARRAY) {
+            def.isArray = true;
+        }
+    };
+
     class ForeignKey : public Field {
     public:
         ForeignKey(const String& colName,
@@ -267,6 +399,18 @@ namespace DbNotRuntime::Models {
             def.referencedColumn = toColumn;
             def.onDelete         = onDeleteAction;
             def.onUpdate         = Standard::ReferentialAction::CASCADE;
+        }
+    };
+
+    class OneToOneField : public ForeignKey {
+    public:
+        OneToOneField(const String& colName,
+                      const String& toTable,
+                      const String& toColumn,
+                      Standard::ReferentialAction onDeleteAction = CASCADE,
+                      Standard::PgDataType fkDataType = Standard::PgDataType::INTEGER)
+            : ForeignKey(colName, toTable, toColumn, onDeleteAction, fkDataType) {
+            def.isUnique = true;
         }
     };
 

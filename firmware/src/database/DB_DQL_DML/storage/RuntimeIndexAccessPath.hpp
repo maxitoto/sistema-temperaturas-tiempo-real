@@ -8,7 +8,7 @@
 #include <cstring>
 #include <cstdio>
 #include "RuntimeTypedTuple.hpp"
-#include "../../DB_DDL/engine/PhysicalSchemaCatalog.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 
 namespace DbRuntime::Storage {
 
@@ -148,7 +148,7 @@ namespace DbRuntime::Storage {
 
     class RuntimeStorageAndIndexManager {
     public:
-        static constexpr size_t MAX_SELECT_ROWS_RAM = 64;
+        static constexpr size_t MAX_SELECT_ROWS_RAM = 32;
 
     private:
         // Fallback en RAM usado ÚNICAMENTE si la tarjeta MicroSD no está insertada
@@ -238,7 +238,10 @@ namespace DbRuntime::Storage {
 
         bool synchronizeWithDdlCatalog() {
             auto lk = lockEngine();
-            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            auto& cat = DbCommon::Engine::PhysicalSchemaCatalog::getInstance();
+            if (cat.getAllTables().empty()) {
+                cat.loadCatalogFromSingleFile();
+            }
             for (const auto& pair : cat.getAllTables()) {
                 const auto& schema = pair.second;
                 recoverInterruptedTmpFile(schema.tableName);
@@ -484,21 +487,43 @@ namespace DbRuntime::Storage {
             return fallbackRamRows[norm(tableName)];
         }
 
-        bool persistTableToSd(const String& tableName) {
+        // Reemplaza de forma atómica el contenido de una tabla (en MicroSD o en fallback RAM) y reconstruye sus índices de byte-offset
+        bool replaceTableRows(const String& tableName, const std::vector<PgTuple>& newRows) {
             auto lk = lockEngine();
-            TarjetaSD& sd = TarjetaSD::getInstance();
-            if (!sd.estaInicializada()) return true;
+            flushPendingBatchForTable(tableName);
 
-            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            String key = norm(tableName);
+
+            if (!sd.estaInicializada()) {
+                fallbackRamRows[key] = newRows;
+                return rebuildIndexesForTable(tableName);
+            }
+
+            auto& cat = DbCommon::Engine::PhysicalSchemaCatalog::getInstance();
             String path = cat.tableDataFilePath(tableName);
             String tmpPath = path + ".tmp";
-            const auto& rows = fallbackRamRows[norm(tableName)];
 
             String payload = "";
-            for (const auto& r : rows) payload += r.serializeTsv();
-            if (!sd.escribirArchivo(tmpPath.c_str(), payload.c_str())) return false;
-            if (sd.existeArchivo(path.c_str())) sd.eliminarArchivo(path.c_str());
-            return SD.rename(tmpPath.c_str(), path.c_str());
+            for (const auto& r : newRows) {
+                payload += r.serializeTsv();
+            }
+            if (!sd.escribirArchivo(tmpPath.c_str(), payload.c_str())) {
+                return false;
+            }
+            if (sd.existeArchivo(path.c_str())) {
+                sd.eliminarArchivo(path.c_str());
+            }
+            if (!SD.rename(tmpPath.c_str(), path.c_str())) {
+                return false;
+            }
+            return rebuildIndexesForTable(tableName);
+        }
+
+        bool persistTableToSd(const String& tableName) {
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            if (!sd.estaInicializada()) return true;
+            return replaceTableRows(tableName, fallbackRamRows[norm(tableName)]);
         }
 
         const std::vector<ActiveIndexStructure>& getIndexesOfTable(const String& tableName) const {

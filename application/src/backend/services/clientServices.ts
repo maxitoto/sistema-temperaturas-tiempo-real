@@ -6,6 +6,30 @@ const clienteFirmware = new FirmwareRPCClient();
 let ultimoLoteTiempoReal: LecturaSensorCliente[] = [];
 
 export const clientServices = {
+    obtenerUsuarioPorNombre: (usuario: string) =>
+        clienteFirmware.obtenerUsuarioPorNombre(usuario),
+
+    listarUsuarios: (limiteRegistros = 32, offsetRegistros = 0, soloActivos = false) =>
+        clienteFirmware.listarUsuarios(limiteRegistros, offsetRegistros, soloActivos),
+
+    crearUsuario: (usuario: string, clavePlana: string, rol = 1) =>
+        clienteFirmware.crearUsuario(usuario, clavePlana, rol),
+
+    actualizarRolYEstadoUsuario: (usuario: string, nuevoRol: number, activa: boolean) =>
+        clienteFirmware.actualizarRolYEstadoUsuario(usuario, nuevoRol, activa),
+
+    cambiarContrasenaUsuario: (usuario: string, claveActual: string, claveNueva: string) =>
+        clienteFirmware.cambiarContrasenaUsuario(usuario, claveActual, claveNueva),
+
+    desbloquearUsuario: (usuario: string) =>
+        clienteFirmware.desbloquearUsuario(usuario),
+
+    eliminarUsuario: (usuario: string) =>
+        clienteFirmware.eliminarUsuario(usuario),
+
+    obtenerEstadisticasUsuarios: () =>
+        clienteFirmware.obtenerEstadisticasUsuarios(),
+
     listarPuertosSerie: () => UARTSClient.listarPuertos(),
 
     conectarPorSerie: (rutaPuerto: string) =>
@@ -29,10 +53,13 @@ export const clientServices = {
     cerrarSesion: () =>
         clienteFirmware.cerrarSesion(),
 
-    suscribirSensoresTiempoReal: () =>
-        clienteFirmware.suscribirSensoresTiempoReal(lecturas => {
+    suscribirSensoresTiempoReal: async () => {
+        const loteInicial = await clienteFirmware.suscribirSensoresTiempoReal(lecturas => {
             ultimoLoteTiempoReal = lecturas;
-        }),
+        });
+        ultimoLoteTiempoReal = loteInicial;
+        return loteInicial;
+    },
 
     obtenerUltimoLoteTiempoReal: () =>
         ultimoLoteTiempoReal,
@@ -54,6 +81,9 @@ export const clientServices = {
         claveAp: string
     ) => clienteFirmware.actualizarConfiguracionWiFi(ssidSta, claveSta, ssidAp, claveAp),
 
+    obtenerConfiguracionWiFi: () =>
+        clienteFirmware.obtenerConfiguracionWiFi(),
+
     ejecutarDiagnosticoSistema: () =>
         clienteFirmware.ejecutarDiagnosticoSistema(),
 
@@ -64,5 +94,5 @@ export const clientServices = {
         clienteFirmware.obtenerLogsVisor(),
 
     limpiarLogsVisor: () =>
-        clienteFirmware.limpiarLogsVisor()
+        clienteFirmware.limpiarLogsVisor()  
 };

@@ -11,6 +11,7 @@
 
 #include "database/DB_DDL/models/PhysicalModelsDefinition.hpp"
 #include "database/DB_DQL_DML/orm/DjangoManager.hpp"
+#include "rtos/GestorRTOS.hpp"
 
 // Instancias globales de transporte (L0/L1 físico)
 UARTSRuntime uartsRuntime(Serial);
@@ -31,13 +32,10 @@ MiddlewareInterface middlewareInterfaceL1(
     middlewareMessageL3
 );
 
-uint32_t ultimoChequeoMantenimientoMs = 0;
-uint32_t ultimoCicloStreamingMs = 0;
-
-// ¿Cómo lo hace?: Inicializa primero la base de datos (comentado), luego abre UART-S (115200, 8E1) y levanta WiFi AP+STA junto con los sockets TCP (8443) y UDP (8266).
 void setup() {
     // DbNotRuntime::PhysicalModels::migrateAllPhysicalModels();
     DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog();
+    DbRuntime::Repositories::RepoUsuario::sembrarUsuariosPorDefecto(); //eliminar despues!
 
     // consulta DB (verificar existencia de catálogo físico; si falla, detener el sistema)
 
@@ -47,26 +45,18 @@ void setup() {
         wifiTcpRuntime.iniciarServidorSeguro();
         wifiUdpRuntime.iniciarSocketStreaming();
     }
+
+    // Lanza las 4 tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED y Comunicaciones)
+    RTOS::GestorRTOS::iniciarSistemaCompleto(
+        uartsRuntime,
+        wifiRuntime,
+        middlewareInterfaceL1,
+        middlewareSesionL2,
+        middlewareMessageL3
+    );
 }
 
-// ¿Cómo lo hace?: Procesa la entrada de paquetes en tiempo real, verifica timeouts de keepalive y ocio cada 1 segundo, y emite el lote de streaming cada 500 ms solo si hay suscriptores.
 void loop() {
-    middlewareInterfaceL1.procesarCicloEntrada();
-
-    const uint32_t ahoraMs = millis();
-
-    if (ahoraMs - ultimoChequeoMantenimientoMs >= 1000) {
-        ultimoChequeoMantenimientoMs = ahoraMs;
-        middlewareInterfaceL1.verificarKeepalivesYExpulsarInactivos();
-        middlewareSesionL2.verificarExpiracionSesionesPorOcio();
-    }
-
-    if (ahoraMs - ultimoCicloStreamingMs >= 500) {
-        ultimoCicloStreamingMs = ahoraMs;
-        if (middlewareMessageL3.obtenerMascaraSuscriptores() != 0) {
-            HistorialSensoresDTO loteTiempoReal{};
-            // Aquí se vuelcan las lecturas actuales de los sensores conectados en loteTiempoReal
-            middlewareMessageL3.emitirCicloStreamingSensores(loteTiempoReal);
-        }
-    }
+    // El trabajo pesado vive en las 4 tareas dedicadas de FreeRTOS; cedemos el hilo base de Arduino
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }

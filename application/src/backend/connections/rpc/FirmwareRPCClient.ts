@@ -2,10 +2,16 @@ import { UARTSClient } from "../interfaces/UART-S/UARTSClient";
 import { WiFiClient } from "../interfaces/WiFi/WiFiClient";
 import {
     CodecRPC,
-    ConfirmacionSistemaCliente,
+    ConfiguracionWiFiCliente,
+    DiagnosticoSistemaCliente,
+    EstadisticasUsuariosCliente,
+    hashNombreProcedimiento,
     LecturaSensorCliente,
-    ProcedimientoRPC,
-    ResultadoLoginCliente
+    PerfilEnlaceUartsCliente,
+    PerfilUsuarioCliente,
+    ProcedimientoSistemaRPC,
+    ResumenUsuarioCliente,
+    SesionIniciadaCliente
 } from "./CodecRPC";
 
 export type MedioActivoCliente = "NINGUNO" | "UART-S" | "WIFI";
@@ -17,7 +23,7 @@ interface PeticionPendiente {
 }
 
 export class FirmwareRPCClient {
-    private static readonly INTERVALO_KEEPALIVE_MS = 45000; // Envía pulso cada 45s (el servidor expira a los 120s)
+    private static readonly INTERVALO_KEEPALIVE_MS = 45000;
     private static readonly TIMEOUT_RPC_MS = 6000;
 
     private readonly uarts: UARTSClient;
@@ -26,8 +32,9 @@ export class FirmwareRPCClient {
     private medioActivo: MedioActivoCliente = "NINGUNO";
     private proximoTicket = 1;
     private pendientes = new Map<number, PeticionPendiente>();
+    private listenersStreamPorProc = new Map<number, (payload: Buffer) => void>();
+    private udpWiFiVinculado = false;
     private timerKeepalive?: ReturnType<typeof setInterval>;
-    private listenerStream?: (lecturas: LecturaSensorCliente[]) => void;
 
     private logsVisor: string[] = [];
     private visorConsolaActivo = true;
@@ -73,49 +80,53 @@ export class FirmwareRPCClient {
         this.logsVisor = [];
     }
 
-    // ¿Cómo lo hace?: Abre el puerto serie, sincroniza tramas UART-S, invoca el RPC de handshake (0x0101) y arranca el pulso automático de keepalive.
-    async conectarPorSerie(rutaPuerto: string): Promise<boolean> {
+    // --- L1: Conexión Física ---
+
+    async conectarPorSerie(rutaPuerto: string): Promise<PerfilEnlaceUartsCliente> {
         await this.desconectar();
         await this.uarts.conectar(rutaPuerto);
         this.medioActivo = "UART-S";
 
-        const resp = await this.invocarRPC(
-            ProcedimientoRPC.L1_HANDSHAKE_UARTS,
-            CodecRPC.codificarHandshakeUarts(1)
-        );
-
-        const aceptado = resp.length >= 1 && resp.readUInt8(0) !== 0;
-        if (aceptado) {
+        try {
+            const resp = await this.invocarPorId(
+                ProcedimientoSistemaRPC.L1_HANDSHAKE_UARTS,
+                CodecRPC.codificarHandshakeUarts(1)
+            );
+            const perfil = CodecRPC.decodificarPerfilEnlaceUarts(resp);
             this.iniciarPulsoKeepaliveAutomatico();
-        } else {
+            return perfil;
+        } catch (err) {
             await this.desconectar();
+            throw err;
         }
-        return aceptado;
     }
 
-    // ¿Cómo lo hace?: Abre el socket TCP hacia el ESP32 (puerto 8443), envía el primer keepalive WiFi (0x0104) y arranca el pulso automático.
-    async conectarPorWiFi(ipServidor: string): Promise<boolean> {
+    async conectarPorWiFi(ipServidor: string): Promise<void> {
         await this.desconectar();
         await this.wifi.conectar(ipServidor);
         this.medioActivo = "WIFI";
+        this.udpWiFiVinculado = false;
 
-        await this.invocarRPC(ProcedimientoRPC.L1_KEEPALIVE_WIFI);
-        this.iniciarPulsoKeepaliveAutomatico();
-        return true;
+        try {
+            await this.invocarPorId(ProcedimientoSistemaRPC.L1_KEEPALIVE_WIFI);
+            this.iniciarPulsoKeepaliveAutomatico();
+        } catch (err) {
+            await this.desconectar();
+            throw err;
+        }
     }
 
-    // ¿Cómo lo hace?: Envía el RPC formal de cierre (0x0103 o 0x0106) si estaba conectado y cierra el puerto o los sockets locales.
     async desconectar(): Promise<void> {
         this.detenerPulsoKeepaliveAutomatico();
 
         try {
             if (this.medioActivo === "UART-S" && this.uarts.estaConectado()) {
-                await this.invocarRPC(ProcedimientoRPC.L1_CERRAR_UARTS);
+                await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_UARTS);
             } else if (this.medioActivo === "WIFI" && this.wifi.estaConectado()) {
-                await this.invocarRPC(ProcedimientoRPC.L1_CERRAR_WIFI);
+                await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_WIFI);
             }
         } catch {
-            // Si el cable ya se desconectó físicamente, continuamos con el cierre local
+            // Si el enlace físico ya cayó, continuamos con el cierre local
         }
 
         await this.uarts.cerrar();
@@ -123,19 +134,19 @@ export class FirmwareRPCClient {
         this.limpiarEstadoAlDesconectar();
     }
 
-    // ¿Cómo lo hace?: Envía usuario y clave al procedimiento 0x0201 y devuelve si fue autenticado y qué rol le asignó el servidor.
-    async iniciarSesion(usuario: string, clavePlana: string): Promise<ResultadoLoginCliente> {
-        const payload = await this.invocarRPC(
-            ProcedimientoRPC.L2_LOGIN_USUARIO,
+    // --- L2: Autenticación (RPAuth lanza excepción si falla el login o si está bloqueado) ---
+
+    async iniciarSesion(usuario: string, clavePlana: string): Promise<SesionIniciadaCliente> {
+        const payload = await this.invocarPorId(
+            ProcedimientoSistemaRPC.L2_LOGIN_USUARIO,
             CodecRPC.codificarLogin(usuario, clavePlana)
         );
-        return CodecRPC.decodificarResultadoLogin(payload);
+        return CodecRPC.decodificarSesionIniciada(payload);
     }
 
-    // ¿Cómo lo hace?: Llama al procedimiento 0x0202 (que también cierra la conexión en el servidor) y limpia el cliente local.
     async cerrarSesion(): Promise<void> {
         try {
-            await this.invocarRPC(ProcedimientoRPC.L2_LOGOUT_USUARIO);
+            await this.invocarPorId(ProcedimientoSistemaRPC.L2_LOGOUT_USUARIO);
         } finally {
             await this.uarts.cerrar();
             await this.wifi.cerrar();
@@ -143,72 +154,200 @@ export class FirmwareRPCClient {
         }
     }
 
-    // ¿Cómo lo hace?: Si está en WiFi registra primero su puerto UDP local (0x0105) y luego activa la suscripción de tiempo real en L3 (0x0301).
-    async suscribirSensoresTiempoReal(onNuevasLecturas?: (lecturas: LecturaSensorCliente[]) => void): Promise<boolean> {
-        if (onNuevasLecturas) {
-            this.listenerStream = onNuevasLecturas;
-        }
+    // --- L3: Invocador Semántico Genérico por Nombre (Igual que llamadoSemantico en C++) ---
 
-        if (this.medioActivo === "WIFI") {
+    async llamarProcedimiento<T>(
+        nombreProcedimiento: string,
+        payloadEntrada: Buffer,
+        decodificadorSalida: (raw: Buffer) => T
+    ): Promise<T> {
+        const idProc = hashNombreProcedimiento(nombreProcedimiento);
+        const raw = await this.invocarPorId(idProc, payloadEntrada);
+        return decodificadorSalida(raw);
+    }
+
+    async llamarProcedimientoVoid(
+        nombreProcedimiento: string,
+        payloadEntrada: Buffer = Buffer.alloc(0)
+    ): Promise<void> {
+        const idProc = hashNombreProcedimiento(nombreProcedimiento);
+        await this.invocarPorId(idProc, payloadEntrada);
+    }
+
+    // Suscribe a cualquier procedimiento registrado con llamadoSemantico.talVez en el ESP32
+    async suscribirStreamTalVez<T>(
+        nombreProcedimiento: string,
+        decodificadorSalida: (raw: Buffer) => T,
+        onMensajeStream?: (dato: T) => void
+    ): Promise<T> {
+        if (this.medioActivo === "WIFI" && !this.udpWiFiVinculado) {
             const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
-            await this.invocarRPC(
-                ProcedimientoRPC.L1_SUSCRIBIR_UDP_WIFI,
+            const respUdp = await this.invocarPorId(
+                ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
                 CodecRPC.codificarSuscripcionUdp(puertoUdp)
             );
+            CodecRPC.decodificarCanalStreamingUdp(respUdp);
+            this.udpWiFiVinculado = true;
         }
 
-        const byteDummy = Buffer.alloc(1, 1);
-        const resp = await this.invocarRPC(ProcedimientoRPC.L3_SUSCRIBIR_SENSORES, byteDummy);
-        return resp.length >= 1 && resp.readUInt8(0) !== 0;
+        const idProc = hashNombreProcedimiento(nombreProcedimiento);
+        if (onMensajeStream) {
+            this.listenersStreamPorProc.set(idProc, (payload: Buffer) => {
+                onMensajeStream(decodificadorSalida(payload));
+            });
+        }
+
+        const primerPayload = await this.invocarPorId(idProc, Buffer.alloc(0));
+        const primerDato = decodificadorSalida(primerPayload);
+        onMensajeStream?.(primerDato);
+        return primerDato;
     }
 
-    // ¿Cómo lo hace?: Solicita al procedimiento 0x0302 las últimas N lecturas de una MAC y las devuelve como arreglo de objetos JS.
-    async obtenerCensosPorMac(macHex: string, limiteRegistros = 32): Promise<LecturaSensorCliente[]> {
-        const resp = await this.invocarRPC(
-            ProcedimientoRPC.L3_OBTENER_CENSOS_MAC,
-            CodecRPC.codificarFiltroPorMac(macHex, limiteRegistros)
+    // --- Procedimientos de Dominio (RPSensor y RPSistema) ---
+
+    async suscribirSensoresTiempoReal(
+        onNuevasLecturas?: (lecturas: LecturaSensorCliente[]) => void
+    ): Promise<LecturaSensorCliente[]> {
+        return this.suscribirStreamTalVez(
+            "suscribirSensoresTiempoReal",
+             payload => CodecRPC.decodificarHistorialSensores(payload),
+            onNuevasLecturas
         );
-        return CodecRPC.decodificarHistorialSensores(resp);
     }
 
-    // ¿Cómo lo hace?: Solicita al procedimiento 0x0303 las lecturas de una MAC entre dos fechas Unix y las decodifica.
+    async obtenerCensosPorMac(macHex: string, limiteRegistros = 32): Promise<LecturaSensorCliente[]> {
+        return this.llamarProcedimiento(
+            "obtenerCensosPorMac",
+            CodecRPC.codificarFiltroPorMac(macHex, limiteRegistros),
+            payload => CodecRPC.decodificarHistorialSensores(payload)
+        );
+    }
+
     async obtenerCensosPorMacYFecha(
         macHex: string,
         timestampDesde: number,
         timestampHasta: number,
         limiteRegistros = 32
     ): Promise<LecturaSensorCliente[]> {
-        const resp = await this.invocarRPC(
-            ProcedimientoRPC.L3_OBTENER_CENSOS_FECHA,
-            CodecRPC.codificarFiltroPorMacYFecha(macHex, timestampDesde, timestampHasta, limiteRegistros)
+        return this.llamarProcedimiento(
+            "obtenerCensosPorMacYFecha",
+            CodecRPC.codificarFiltroPorMacYFecha(macHex, timestampDesde, timestampHasta, limiteRegistros),
+            payload => CodecRPC.decodificarHistorialSensores(payload)
         );
-        return CodecRPC.decodificarHistorialSensores(resp);
     }
 
-    // ¿Cómo lo hace?: Envía las nuevas credenciales WiFi al procedimiento 0x0311 (requiere rol ADMIN en el servidor).
     async actualizarConfiguracionWiFi(
         ssidSta: string,
         claveSta: string,
         ssidAp: string,
         claveAp: string
-    ): Promise<ConfirmacionSistemaCliente> {
-        const resp = await this.invocarRPC(
-            ProcedimientoRPC.L3_ACTUALIZAR_CONFIG_WIFI,
-            CodecRPC.codificarConfiguracionWiFi(ssidSta, claveSta, ssidAp, claveAp)
+    ): Promise<ConfiguracionWiFiCliente> {
+        return this.llamarProcedimiento(
+            "actualizarConfiguracionWiFi",
+            CodecRPC.codificarConfiguracionWiFi(ssidSta, claveSta, ssidAp, claveAp),
+            payload => CodecRPC.decodificarConfiguracionWiFi(payload)
         );
-        return CodecRPC.decodificarConfirmacionSistema(resp);
     }
 
-    // ¿Cómo lo hace?: Invoca el procedimiento 0x0312 y devuelve el estado y los bytes de memoria heap libre del ESP32.
-    async ejecutarDiagnosticoSistema(): Promise<ConfirmacionSistemaCliente> {
-        const resp = await this.invocarRPC(ProcedimientoRPC.L3_DIAGNOSTICO_SISTEMA, Buffer.alloc(1, 1));
-        return CodecRPC.decodificarConfirmacionSistema(resp);
+    async obtenerConfiguracionWiFi(): Promise<ConfiguracionWiFiCliente> {
+        return this.llamarProcedimiento(
+            "obtenerConfiguracionWiFi",
+            Buffer.alloc(0),
+            payload => CodecRPC.decodificarConfiguracionWiFi(payload)
+        );
     }
 
-    // ¿Cómo lo hace?: Ordena el reinicio remoto del ESP32 mediante el procedimiento 0x0310.
-    async reiniciarHardware(): Promise<ConfirmacionSistemaCliente> {
-        const resp = await this.invocarRPC(ProcedimientoRPC.L3_REINICIAR_HARDWARE, Buffer.alloc(1, 1));
-        return CodecRPC.decodificarConfirmacionSistema(resp);
+    async ejecutarDiagnosticoSistema(): Promise<DiagnosticoSistemaCliente> {
+        return this.llamarProcedimiento(
+            "ejecutarDiagnosticoSistema",
+            Buffer.alloc(0),
+            payload => CodecRPC.decodificarDiagnosticoSistema(payload)
+        );
+    }
+
+    async reiniciarHardware(): Promise<void> {
+        await this.llamarProcedimientoVoid("reiniciarHardware");
+    }
+
+    // --- Procedimientos de Dominio Usuarios (RPUsuario) ---
+
+    async obtenerUsuarioPorNombre(usuario: string): Promise<PerfilUsuarioCliente> {
+        return this.llamarProcedimiento(
+            "obtenerUsuarioPorNombre",
+            CodecRPC.codificarConsultaUsuarioNombre(usuario),
+            payload => CodecRPC.decodificarPerfilUsuario(payload)
+        );
+    }
+
+    async listarUsuarios(
+        limiteRegistros = 32,
+        offsetRegistros = 0,
+        soloActivos = false
+    ): Promise<ResumenUsuarioCliente[]> {
+        return this.llamarProcedimiento(
+            "listarUsuarios",
+            CodecRPC.codificarFiltroListadoUsuarios(limiteRegistros, offsetRegistros, soloActivos),
+            payload => CodecRPC.decodificarListaUsuarios(payload)
+        );
+    }
+
+    async crearUsuario(
+        usuario: string,
+        clavePlana: string,
+        rol = 1
+    ): Promise<PerfilUsuarioCliente> {
+        return this.llamarProcedimiento(
+            "crearUsuario",
+            CodecRPC.codificarCrearUsuario(usuario, clavePlana, rol),
+            payload => CodecRPC.decodificarPerfilUsuario(payload)
+        );
+    }
+
+    async actualizarRolYEstadoUsuario(
+        usuario: string,
+        nuevoRol: number,
+        activa: boolean
+    ): Promise<PerfilUsuarioCliente> {
+        return this.llamarProcedimiento(
+            "actualizarRolYEstadoUsuario",
+            CodecRPC.codificarActualizarUsuario(usuario, nuevoRol, activa),
+            payload => CodecRPC.decodificarPerfilUsuario(payload)
+        );
+    }
+
+    async cambiarContrasenaUsuario(
+        usuario: string,
+        claveActual: string,
+        claveNueva: string
+    ): Promise<PerfilUsuarioCliente> {
+        return this.llamarProcedimiento(
+            "cambiarContrasenaUsuario",
+            CodecRPC.codificarCambiarContrasena(usuario, claveActual, claveNueva),
+            payload => CodecRPC.decodificarPerfilUsuario(payload)
+        );
+    }
+
+    async desbloquearUsuario(usuario: string): Promise<PerfilUsuarioCliente> {
+        return this.llamarProcedimiento(
+            "desbloquearUsuario",
+            CodecRPC.codificarConsultaUsuarioNombre(usuario),
+            payload => CodecRPC.decodificarPerfilUsuario(payload)
+        );
+    }
+
+    async eliminarUsuario(usuario: string): Promise<void> {
+        await this.llamarProcedimientoVoid(
+            "eliminarUsuario",
+            CodecRPC.codificarConsultaUsuarioNombre(usuario)
+        );
+    }
+
+    async obtenerEstadisticasUsuarios(): Promise<EstadisticasUsuariosCliente> {
+        return this.llamarProcedimiento(
+            "obtenerEstadisticasUsuarios",
+            Buffer.alloc(0),
+            payload => CodecRPC.decodificarEstadisticasUsuarios(payload)
+        );
     }
 
     estaConectado(): boolean {
@@ -219,10 +358,9 @@ export class FirmwareRPCClient {
         return this.medioActivo;
     }
 
-    // ¿Cómo lo hace?: Asigna un idTicket correlativo, envía el paquete por el medio activo y devuelve una Promesa que se resuelve cuando llega ese mismo idTicket.
-    private invocarRPC(idProc: ProcedimientoRPC, payloadDto: Buffer = Buffer.alloc(0)): Promise<Buffer> {
+    private invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0)): Promise<Buffer> {
         if (this.medioActivo === "NINGUNO") {
-            return Promise.reject(new Error("El cliente no está conectado al servidor ESP32."));
+            return Promise.reject(new Error("ConnectionError: el cliente no está conectado al servidor ESP32"));
         }
 
         const idTicket = this.proximoTicket;
@@ -233,7 +371,7 @@ export class FirmwareRPCClient {
         return new Promise<Buffer>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pendientes.delete(idTicket);
-                reject(new Error(`Timeout esperando respuesta del procedimiento 0x${idProc.toString(16)}`));
+                reject(new Error(`TimeoutError: sin respuesta del procedimiento 0x${idProc.toString(16)}`));
             }, FirmwareRPCClient.TIMEOUT_RPC_MS);
 
             this.pendientes.set(idTicket, { resolve, reject, timer });
@@ -245,50 +383,50 @@ export class FirmwareRPCClient {
             if (!enviado) {
                 clearTimeout(timer);
                 this.pendientes.delete(idTicket);
-                reject(new Error("No se pudo escribir el mensaje en el medio de transporte."));
+                reject(new Error("IOError: no se pudo transmitir el paquete en el medio físico"));
             }
         });
     }
 
-    // ¿Cómo lo hace?: Desempaqueta cualquier mensaje entrante; si coincide con un ticket pendiente resuelve su Promesa, y si es un lote de streaming (0x0301) notifica al listener.
     private procesarFrameRecibido(frameCompleto: Buffer): void {
         const desglose = CodecRPC.desempaquetarRespuesta(frameCompleto);
         if (!desglose) {
             return;
         }
 
-        if (desglose.idTicket !== 0) {
-            const pendiente = this.pendientes.get(desglose.idTicket);
-            if (pendiente) {
-                clearTimeout(pendiente.timer);
-                this.pendientes.delete(desglose.idTicket);
-                if (desglose.esError) {
-                    pendiente.reject(CodecRPC.decodificarErrorRPC(desglose.idProc, desglose.payload));
-                } else {
-                    pendiente.resolve(desglose.payload);
-                }
-                return;
+        // 1. Si coincide con un ticket de llamada RPC en espera, resuelve el dato o lanza la excepción cruda
+        const pendiente = this.pendientes.get(desglose.idTicket);
+        if (pendiente) {
+            clearTimeout(pendiente.timer);
+            this.pendientes.delete(desglose.idTicket);
+            if (desglose.esError) {
+                pendiente.reject(CodecRPC.decodificarExcepcionCruda(desglose.idProc, desglose.payload));
+            } else {
+                pendiente.resolve(desglose.payload);
             }
+            return;
         }
 
-        if (!desglose.esError && desglose.idProc === ProcedimientoRPC.L3_SUSCRIBIR_SENSORES && this.listenerStream) {
-            const lecturas = CodecRPC.decodificarHistorialSensores(desglose.payload);
-            this.listenerStream(lecturas);
+        // 2. Si es una emisión periódica de cualquier procedimiento con semántica talVez, notifica a su listener
+        if (!desglose.esError) {
+            const listenerStream = this.listenersStreamPorProc.get(desglose.idProc);
+            if (listenerStream) {
+                listenerStream(desglose.payload);
+            }
         }
     }
 
-    // ¿Cómo lo hace?: Dispara cada 45 segundos el procedimiento notificarEstoyVivo correspondiente al medio conectado sin intervención del usuario.
     private iniciarPulsoKeepaliveAutomatico(): void {
         this.detenerPulsoKeepaliveAutomatico();
         this.timerKeepalive = setInterval(() => {
             const proc = this.medioActivo === "UART-S"
-                ? ProcedimientoRPC.L1_KEEPALIVE_UARTS
+                ? ProcedimientoSistemaRPC.L1_KEEPALIVE_UARTS
                 : this.medioActivo === "WIFI"
-                    ? ProcedimientoRPC.L1_KEEPALIVE_WIFI
+                    ? ProcedimientoSistemaRPC.L1_KEEPALIVE_WIFI
                     : null;
 
             if (proc !== null) {
-                this.invocarRPC(proc).catch(err => {
+                this.invocarPorId(proc).catch(err => {
                     this.registrarLogVisor(`[KEEPALIVE FALLÓ] ${err.message}. Cerrando conexión.`);
                     void this.uarts.cerrar();
                     void this.wifi.cerrar();
@@ -308,10 +446,13 @@ export class FirmwareRPCClient {
     private limpiarEstadoAlDesconectar(): void {
         this.detenerPulsoKeepaliveAutomatico();
         this.medioActivo = "NINGUNO";
+        this.udpWiFiVinculado = false;
+        this.listenersStreamPorProc.clear();
         for (const [, p] of this.pendientes) {
             clearTimeout(p.timer);
-            p.reject(new Error("Conexión cerrada."));
+            p.reject(new Error("ConnectionError: conexión cerrada"));
         }
         this.pendientes.clear();
     }
+
 }

@@ -3,8 +3,9 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include "../../DB_DDL/engine/DdlDiagnosticConsole.hpp"
-#include "../../DB_DDL/engine/PhysicalSchemaCatalog.hpp"
+#include <stdexcept>
+#include "../../common/DiagnosticConsole.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 #include "../telemetry/RuntimeCostProfiler.hpp"
 #include "../standard/PostgresDmlDqlKeywords.hpp"
 #include "../storage/RuntimeIndexAccessPath.hpp"
@@ -132,26 +133,7 @@ namespace DbRuntime::Engine {
 
         // Compara dos celdas según su tipo nativo en hardware (entero 64b, FPU float o lexicográfico) devolviendo <0, 0, >0.
         static int compareTypedCellWithLiteral(const PgCell& cell, const String& literal) {
-            if (cell.type == PgDataType::SMALLINT || cell.type == PgDataType::INTEGER || cell.type == PgDataType::BIGINT) {
-                int64_t a = cell.asInt64();
-                int64_t b = atoll(literal.c_str());
-                return (a < b) ? -1 : ((a > b) ? 1 : 0);
-            }
-            if (cell.type == PgDataType::REAL || cell.type == PgDataType::DOUBLE_PRECISION ||
-                cell.type == PgDataType::NUMERIC || cell.type == PgDataType::DECIMAL) {
-                float a = cell.asFloat();
-                float b = literal.toFloat();
-                if (fabsf(a - b) < 0.0001f) return 0;
-                return (a < b) ? -1 : 1;
-            }
-            if (cell.type == PgDataType::BOOLEAN) {
-                bool a = cell.asBool();
-                String up = literal;
-                up.toUpperCase();
-                bool b = (up == "TRUE" || up == "1" || up == "T");
-                return (a == b) ? 0 : (a ? 1 : -1);
-            }
-            return strcmp(cell.rawText.c_str(), literal.c_str());
+            return DbCommon::Standard::DataTypeUtils::compareUnionWithLiteral(cell.type, cell.num, cell.rawText, literal);
         }
 
     public:
@@ -587,7 +569,18 @@ namespace DbRuntime::Engine {
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
 
             if (!validateQueryColumnsAgainstCatalog(plan)) {
-                return {};
+                throw std::runtime_error(console.last().toPsqlFormat().c_str());
+            }
+
+            // El SGBD impone su propio límite físico de 32 registros por consulta
+            if (plan.limitCount > static_cast<int32_t>(Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM)) {
+                console.raiseError(
+                    SqlState::INVALID_PARAMETER_VALUE, "SELECT LIMIT", plan.fromTable, "",
+                    "limit (" + String(plan.limitCount) + ") exceeds SGBD maximum batch size of " +
+                    String(Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) + " rows",
+                    "Divide the query into batches of at most 32 rows using LIMIT and OFFSET."
+                );
+                throw std::runtime_error(console.last().toPsqlFormat().c_str());
             }
 
             // 1. Resolución de fuente de datos (CTE o Tabla Física con Planificador de Índices)
@@ -963,6 +956,15 @@ namespace DbRuntime::Engine {
 
             lastCost.rowsProduced = static_cast<uint16_t>(workingRows.size());
             console.reportSuccess("SELECT", plan.fromTable, String(workingRows.size()) + " rows");
+            if (workingRows.size() > Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) {
+                console.raiseError(
+                    SqlState::DATA_EXCEPTION, "SELECT", plan.fromTable, "",
+                    "query returned more than " + String(Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) +
+                    " rows without pagination",
+                    "Use .limit(32) and .offset(n) to fetch records in safe batches."
+                );
+                throw std::runtime_error(console.last().toPsqlFormat().c_str());
+            }
             return workingRows;
         }
     };

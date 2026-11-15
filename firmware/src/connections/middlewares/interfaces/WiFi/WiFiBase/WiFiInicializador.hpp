@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <stdint.h>
 #include <string.h>
+#include "../../../../../database/repositories/repoConfiguracionRed.hpp"
 
 struct EstadoRedWiFi {
     char ipPuntoAcceso[16];
@@ -15,35 +16,52 @@ struct EstadoRedWiFi {
 
 class WiFiInicializador {
 public:
-    static constexpr uint32_t TIMEOUT_CONEXION_STA_MS = 15000;
+    static constexpr uint32_t TIMEOUT_CONEXION_STA_MS = 8000;
     inline static WiFiInicializador* instanciaActiva = nullptr;
 
 private:
     EstadoRedWiFi estadoActual{};
-    // Credenciales por defecto de tu router (WiFi STA) y del AP del ESP32:
-    char ssidStaCache[64]  = "Zhone_96F8";
-    char claveStaCache[64] = "Ushuaia30";
-    char ssidApCache[64]   = "ESP32-SecureAP";
-    char claveApCache[64]  = "ESP32SecureAP1234";
+    int32_t idConfiguracionActiva = 0;
 
-public:
-    WiFiInicializador() {
-        memset(&estadoActual, 0, sizeof(EstadoRedWiFi));
-        instanciaActiva = this;
+    char ssidStaCache[36]  = "";
+    char claveStaCache[65] = "";
+    char ssidApCache[36]   = "ESP32-SecureAP";
+    char claveApCache[65]  = "ESP32secure1234@";
+
+    bool cargarConfiguracionDesdeDB() {
+        using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+        using DbRuntime::Orm::runtimeDb;
+        using DbRuntime::Repositories::ConfiguracionRedDTO;
+        using DbRuntime::Repositories::RepoConfiguracionRed;
+
+        if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
+            runtimeDb.bindToPhysicalCatalog();
+        }
+
+        ConfiguracionRedDTO cfg{};
+        if (!RepoConfiguracionRed::obtenerOInicializar(cfg)) {
+            Serial.println("[WiFi][DB] Error al consultar ConfiguracionRed, usando fallback en RAM:");
+            Serial.println(RepoConfiguracionRed::ultimoError());
+            return false;
+        }
+
+        idConfiguracionActiva = cfg.id_configuracion_red;
+        strncpy(ssidStaCache,  cfg.ssid_sta,    sizeof(ssidStaCache) - 1);
+        strncpy(claveStaCache, cfg.password_sta, sizeof(claveStaCache) - 1);
+        if (cfg.ssid_ap[0] != '\0') {
+            strncpy(ssidApCache, cfg.ssid_ap, sizeof(ssidApCache) - 1);
+        }
+        strncpy(claveApCache, cfg.password_ap, sizeof(claveApCache) - 1);
+        return true;
     }
 
-    bool iniciarRedDesdeBaseDeDatos() {
-        // consulta DB
-
+    bool aplicarConfiguracionWiFi() {
         WiFi.mode(WIFI_AP_STA);
         WiFi.setSleep(false);
 
-        bool apLevantado = false;
-        if (strlen(claveApCache) >= 8) {
-            apLevantado = WiFi.softAP(ssidApCache, claveApCache);
-        } else {
-            apLevantado = WiFi.softAP(ssidApCache);
-        }
+        bool apLevantado = (strlen(claveApCache) >= 8)
+            ? WiFi.softAP(ssidApCache, claveApCache)
+            : WiFi.softAP(ssidApCache);
 
         estadoActual.puntoAccesoActivo = apLevantado;
         if (apLevantado) {
@@ -61,7 +79,18 @@ public:
             estadoActual.ipEstacionLAN[0] = '\0';
         }
 
-        return estadoActual.puntoAccesoActivo;
+        return estadoActual.puntoAccesoActivo || estadoActual.conectadoARouter;
+    }
+
+public:
+    WiFiInicializador() {
+        memset(&estadoActual, 0, sizeof(EstadoRedWiFi));
+        instanciaActiva = this;
+    }
+
+    bool iniciarRedDesdeBaseDeDatos() {
+        cargarConfiguracionDesdeDB();
+        return aplicarConfiguracionWiFi();
     }
 
     bool actualizarCredencialesYReconectar(
@@ -82,11 +111,26 @@ public:
             strncpy(ssidApCache, nuevoSsidAp, sizeof(ssidApCache) - 1);
             ssidApCache[sizeof(ssidApCache) - 1] = '\0';
         }
-        if (nuevaClaveAp != nullptr && strlen(nuevaClaveAp) >= 8) {
+        if (nuevaClaveAp != nullptr && (strlen(nuevaClaveAp) >= 8 || nuevaClaveAp[0] == '\0')) {
             strncpy(claveApCache, nuevaClaveAp, sizeof(claveApCache) - 1);
             claveApCache[sizeof(claveApCache) - 1] = '\0';
         }
-        return iniciarRedDesdeBaseDeDatos();
+
+        if (idConfiguracionActiva > 0) {
+            DbRuntime::Repositories::ConfiguracionRedDTO dto{};
+            dto.id_configuracion_red = idConfiguracionActiva;
+            strncpy(dto.ssid_sta,    ssidStaCache,  sizeof(dto.ssid_sta) - 1);
+            strncpy(dto.password_sta, claveStaCache, sizeof(dto.password_sta) - 1);
+            strncpy(dto.ssid_ap,     ssidApCache,   sizeof(dto.ssid_ap) - 1);
+            strncpy(dto.password_ap, claveApCache,  sizeof(dto.password_ap) - 1);
+
+            if (!DbRuntime::Repositories::RepoConfiguracionRed::actualizarTodo(dto)) {
+                Serial.println("[WiFi][DB] Advertencia: no se pudo guardar la nueva config en SD:");
+                Serial.println(DbRuntime::Repositories::RepoConfiguracionRed::ultimoError());
+            }
+        }
+
+        return aplicarConfiguracionWiFi();
     }
 
     bool reconectarEstacionRouter() {

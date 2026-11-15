@@ -1,8 +1,9 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
-#include "../../DB_DDL/engine/DdlDiagnosticConsole.hpp"
-#include "../../DB_DDL/engine/PhysicalSchemaCatalog.hpp"
+#include <algorithm>
+#include "../../common/DiagnosticConsole.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 #include "../telemetry/RuntimeCostProfiler.hpp"
 #include "../standard/PostgresDmlDqlKeywords.hpp"
 #include "../storage/RuntimeIndexAccessPath.hpp"
@@ -14,7 +15,6 @@ namespace DbRuntime::Engine {
     using DbNotRuntime::Standard::PgDataType;
     using DbNotRuntime::Standard::SqlState;
 
-    // Resultado de ejecución de cualquier operación DML con soporte nativo para RETURNING y telemetría de costo.
     struct DmlExecutionResult {
         bool success = false;
         uint16_t affectedRows = 0;
@@ -24,7 +24,6 @@ namespace DbRuntime::Engine {
         explicit operator bool() const { return success; }
     };
 
-    // Especificación de cláusula ON CONFLICT (Upsert de PostgreSQL).
     struct OnConflictClause {
         Standard::ConflictAction action = Standard::ConflictAction::NONE;
         std::vector<String> conflictTargetColumns;
@@ -32,9 +31,8 @@ namespace DbRuntime::Engine {
         std::vector<PredicateCondition> whereCondition;
     };
 
-    // Regla individual para la sentencia estándar MERGE INTO.
     struct MergeWhenClause {
-        bool isMatched = true; // true = WHEN MATCHED, false = WHEN NOT MATCHED
+        bool isMatched = true;
         Standard::MergeActionType action = Standard::MergeActionType::DO_NOTHING;
         std::vector<Storage::PgCell> assignmentsOrValues;
     };
@@ -45,7 +43,6 @@ namespace DbRuntime::Engine {
 
         ModuloDML() = default;
 
-        // Valida que una tupla candidata cumpla todos los tipos, NOT NULL, CHECK y FOREIGN KEY del esquema DDL.
         static bool validateCandidateTuple(const DbNotRuntime::Engine::TablePhysicalSchema& schema,
                                            Storage::PgTuple& candidate,
                                            const char* commandName,
@@ -54,7 +51,6 @@ namespace DbRuntime::Engine {
             auto& storage = Storage::RuntimeStorageAndIndexManager::getInstance();
             auto& console = DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance();
 
-            // 1. Verifica que no se hayan enviado columnas inexistentes en la tabla (SQLSTATE 42703)
             for (const auto& cell : candidate.allCells()) {
                 if (!schema.findColumn(cell.columnName)) {
                     return console.raiseError(
@@ -64,7 +60,6 @@ namespace DbRuntime::Engine {
                 }
             }
 
-            // 2. Completa secuencias IDENTITY, valores DEFAULT y verifica restricciones columna por columna
             for (const auto& colDef : schema.columns) {
                 Storage::PgCell* cell = candidate.findCellMutable(colDef.columnName);
                 bool wasProvided = (cell != nullptr && !cell->rawText.equalsIgnoreCase("DEFAULT"));
@@ -78,39 +73,74 @@ namespace DbRuntime::Engine {
                         );
                     }
                     if (!wasProvided && isInsert) {
-                        // Reserva el slot en orden sin incrementar la secuencia hasta confirmar la inserción
                         candidate.set(colDef.columnName, "NULL", colDef.dataType);
                         continue;
                     }
                 }
 
+                // Si es UPDATE y la columna tiene auto_now=true (y no fue sobrescrita manualmente), estampa la fecha/hora actual
+                if (!isInsert && colDef.autoNow && !wasProvided) {
+                    String kw = (colDef.dataType == PgDataType::DATE) ? "CURRENT_DATE"
+                              : (colDef.dataType == PgDataType::TIME || colDef.dataType == PgDataType::TIME_TZ) ? "CURRENT_TIME"
+                              : "CURRENT_TIMESTAMP";
+                    candidate.set(colDef.columnName, kw, colDef.dataType);
+                    cell = candidate.findCellMutable(colDef.columnName);
+                    wasProvided = true;
+                }
+
                 if (!wasProvided) {
                     if (colDef.hasDefault) {
                         candidate.set(colDef.columnName, colDef.defaultValue, colDef.dataType);
+                    } else if (colDef.dataType == PgDataType::DOMAIN_TYPE) {
+                        const auto* dm = cat.getDomain(colDef.customTypeName);
+                        if (dm && dm->hasDefault) {
+                            candidate.set(colDef.columnName, dm->defaultValue, dm->baseType);
+                        } else {
+                            candidate.set(colDef.columnName, "NULL", colDef.dataType);
+                        }
                     } else {
                         candidate.set(colDef.columnName, "NULL", colDef.dataType);
                     }
                     cell = candidate.findCellMutable(colDef.columnName);
                 } else {
-                    // Asegura que la celda tenga sincronizada la unión numérica con el tipo declarado en el DDL
-                    cell->setValue(cell->rawText, colDef.dataType);
+                    PgDataType effectiveType = colDef.dataType;
+                    if (effectiveType == PgDataType::DOMAIN_TYPE) {
+                        const auto* dm = cat.getDomain(colDef.customTypeName);
+                        if (dm) effectiveType = dm->baseType;
+                    }
+                    cell->setValue(cell->rawText, effectiveType);
                 }
 
-                // Validación NOT NULL (SQLSTATE 23502)
-                if (colDef.isNotNull && (!cell || cell->isNull)) {
+                bool domainNotNull = false;
+                PgDataType typeToValidate = colDef.dataType;
+                uint16_t maxLenToValidate = colDef.maxLength;
+                uint8_t precToValidate    = colDef.precision;
+                uint8_t scaleToValidate   = colDef.scale;
+
+                if (colDef.dataType == PgDataType::DOMAIN_TYPE) {
+                    const auto* dm = cat.getDomain(colDef.customTypeName);
+                    if (dm) {
+                        domainNotNull    = dm->notNull;
+                        typeToValidate   = dm->baseType;
+                        maxLenToValidate = dm->maxLength;
+                        precToValidate   = dm->precision;
+                        scaleToValidate  = dm->scale;
+                    }
+                }
+
+                if ((colDef.isNotNull || domainNotNull) && (!cell || cell->isNull)) {
                     return console.raiseError(
                         SqlState::NOT_NULL_VIOLATION, commandName, schema.tableName, colDef.columnName,
                         "null value in column \"" + colDef.columnName + "\" of relation \"" + schema.tableName + "\" violates not-null constraint"
                     );
                 }
 
-                // Validación de tipo de dato, longitud máxima, precisión/escala y etiquetas ENUM (Clase 22)
                 if (cell && !cell->isNull) {
                     const DbNotRuntime::Standard::EnumTypeDefinition* enumDef =
-                        (colDef.dataType == PgDataType::ENUM) ? cat.getEnum(colDef.customTypeName) : nullptr;
+                        (typeToValidate == PgDataType::ENUM) ? cat.getEnum(colDef.customTypeName) : nullptr;
                     String stateOut, msgOut;
                     if (!DbNotRuntime::Standard::DataTypeUtils::validateLiteral(
-                            colDef.dataType, cell->rawText, colDef.maxLength, colDef.precision, colDef.scale,
+                            typeToValidate, cell->rawText, maxLenToValidate, precToValidate, scaleToValidate,
                             enumDef, stateOut, msgOut)) {
                         return console.raiseError(
                             stateOut.c_str(), commandName, schema.tableName, colDef.columnName, msgOut
@@ -118,7 +148,6 @@ namespace DbRuntime::Engine {
                     }
                 }
 
-                // Validación de predicado CHECK (SQLSTATE 23514)
                 if (colDef.hasCheck && colDef.checkFn && cell && !cell->isNull) {
                     if (!colDef.checkFn(cell->rawText)) {
                         return console.raiseError(
@@ -129,7 +158,6 @@ namespace DbRuntime::Engine {
                     }
                 }
 
-                // Validación de integridad referencial FOREIGN KEY hacia la tabla padre usando su índice (SQLSTATE 23503)
                 if (colDef.isForeignKey && cell && !cell->isNull) {
                     const auto* parentIdx = storage.findBestIndexForColumn(colDef.referencedTable, colDef.referencedColumn);
                     bool parentExists = false;
@@ -156,11 +184,10 @@ namespace DbRuntime::Engine {
             return true;
         }
 
-        // Busca si una tupla colisiona con algún índice UNIQUE o PRIMARY KEY devolviendo el byteOffset en conflicto.
-        static int32_t findUniqueConflictRowIndex(const String& tableName,
-                                                  const Storage::PgTuple& candidate,
-                                                  int32_t ignoreRowOffset,
-                                                  String& outIndexName) {
+        static int32_t findUniqueConflictRowOffset(const String& tableName,
+                                                   const Storage::PgTuple& candidate,
+                                                   int32_t ignoreRowOffset,
+                                                   String& outIndexName) {
             auto& storage = Storage::RuntimeStorageAndIndexManager::getInstance();
             for (const auto& idx : storage.getIndexesOfTable(tableName)) {
                 if (!idx.isUnique && !idx.isPrimary) continue;
@@ -177,7 +204,6 @@ namespace DbRuntime::Engine {
             return -1;
         }
 
-        // Proyecta únicamente las columnas pedidas en la cláusula RETURNING.
         static Storage::PgTuple projectReturning(const Storage::PgTuple& row, const std::vector<String>& returningCols) {
             if (returningCols.empty() || returningCols[0] == "*") return row;
             Storage::PgTuple out;
@@ -189,8 +215,6 @@ namespace DbRuntime::Engine {
             return out;
         }
 
-
-        // Copia las filas de una tabla y, recursivamente, de sus dependientes, para poder revertir.
         static void snapshotTableGraph(const String& tableName, const String& skipTable,
                                        std::map<String, std::vector<Storage::PgTuple>>& snap) {
             if (tableName.equalsIgnoreCase(skipTable) || snap.find(tableName) != snap.end()) return;
@@ -200,18 +224,14 @@ namespace DbRuntime::Engine {
             for (const auto& dep : cat.findDependentTables(tableName)) snapshotTableGraph(dep, skipTable, snap);
         }
 
-        // Restaura las filas del snapshot, reconstruye índices y persiste (no emite diagnósticos).
         static void restoreSnapshot(const std::map<String, std::vector<Storage::PgTuple>>& snap) {
             auto& storage = Storage::RuntimeStorageAndIndexManager::getInstance();
             for (const auto& kv : snap) {
-                storage.getTableRowsMutable(kv.first) = kv.second;
-                storage.rebuildIndexesForTable(kv.first);
-                storage.persistTableToSd(kv.first);
+                storage.replaceTableRows(kv.first, kv.second);
             }
         }
 
     public:
-        // Devuelve la instancia única del motor DML.
         static ModuloDML& getInstance() {
             static ModuloDML instance;
             return instance;
@@ -219,8 +239,6 @@ namespace DbRuntime::Engine {
 
         const Telemetry::OperationCostMetrics& getLastCost() const { return lastCost; }
 
-        // ---------------- INSERT INTO ... [ON CONFLICT ...] [RETURNING ...] ----------------
-        // Inserta una fila validando tipos, constraints, gestionando conflictos Upsert y proyectando RETURNING.
         DmlExecutionResult insertRow(const String& tableName,
                                      Storage::PgTuple inputRow,
                                      const OnConflictClause& onConflict = {},
@@ -246,34 +264,56 @@ namespace DbRuntime::Engine {
                 }
 
                 String conflictIdxName = "";
-                int32_t conflictPos = findUniqueConflictRowIndex(tableName, inputRow, -1, conflictIdxName);
+                int32_t conflictOffset = findUniqueConflictRowOffset(tableName, inputRow, -1, conflictIdxName);
                 lastCost.scanType = Telemetry::AccessScanType::UNIQUE_INDEX_LOOKUP;
                 strncpy(lastCost.indexUsed, conflictIdxName.c_str(), sizeof(lastCost.indexUsed) - 1);
 
-                if (conflictPos >= 0) {
+                if (conflictOffset >= 0) {
                     if (onConflict.action == Standard::ConflictAction::DO_NOTHING) {
                         result.success = true;
                         result.affectedRows = 0;
                         console.reportSuccess("INSERT 0 0", tableName, "ON CONFLICT DO NOTHING");
                     } else if (onConflict.action == Standard::ConflictAction::DO_UPDATE) {
-                        auto& rows = storage.getTableRowsMutable(tableName);
-                        Storage::PgTuple updated = rows[conflictPos];
-                        if (ModuloDQL::evaluatePredicateChain(updated, onConflict.whereCondition)) {
-                            for (const auto& assign : onConflict.updateAssignments) {
-                                const auto* colDef = schema->findColumn(assign.columnName);
-                                updated.set(assign.columnName, assign.rawText, colDef ? colDef->dataType : PgDataType::TEXT);
+                        std::vector<Storage::PgTuple> allRows;
+                        bool updatedOk = false;
+                        bool validationFailed = false;
+                        Storage::PgTuple updatedTuple;
+
+                        storage.forEachRowStreaming(tableName, [&](const Storage::PgTuple& row, uint32_t offset) -> bool {
+                            if (static_cast<int32_t>(offset) == conflictOffset &&
+                                ModuloDQL::evaluatePredicateChain(row, onConflict.whereCondition)) {
+                                Storage::PgTuple candidate = row;
+                                for (const auto& assign : onConflict.updateAssignments) {
+                                    const auto* colDef = schema->findColumn(assign.columnName);
+                                    candidate.set(assign.columnName, assign.rawText, colDef ? colDef->dataType : PgDataType::TEXT);
+                                }
+                                if (!validateCandidateTuple(*schema, candidate, "INSERT ON CONFLICT DO UPDATE", false)) {
+                                    validationFailed = true;
+                                    return false;
+                                }
+                                updatedTuple = candidate;
+                                allRows.push_back(std::move(candidate));
+                                updatedOk = true;
+                            } else {
+                                allRows.push_back(row);
                             }
-                            if (!validateCandidateTuple(*schema, updated, "INSERT ON CONFLICT DO UPDATE", false)) {
+                            return true;
+                        });
+
+                        if (validationFailed) {
+                            probe.finish(); result.cost = lastCost;
+                            return result;
+                        }
+                        if (updatedOk) {
+                            if (!storage.replaceTableRows(tableName, allRows)) {
+                                console.raiseError(SqlState::IO_ERROR, "INSERT ON CONFLICT DO UPDATE", tableName, "", "could not persist updated table to SD");
                                 probe.finish(); result.cost = lastCost;
                                 return result;
                             }
-                            rows[conflictPos] = updated;
-                            storage.rebuildIndexesForTable(tableName);
-                            storage.persistTableToSd(tableName);
                             result.affectedRows = 1;
                             lastCost.rowsProduced = 1;
                             if (!returningColumns.empty()) {
-                                result.returningRows.push_back(projectReturning(updated, returningColumns));
+                                result.returningRows.push_back(projectReturning(updatedTuple, returningColumns));
                             }
                         }
                         result.success = true;
@@ -318,8 +358,6 @@ namespace DbRuntime::Engine {
             return result;
         }
 
-        // ---------------- UPDATE ... SET ... [FROM ...] WHERE ... [RETURNING ...] ----------------
-        // Actualiza filas determinísticamente exigiendo WHERE explícito (salvo allowUnconditional=true) y validando constraints.
         DmlExecutionResult updateRows(const String& tableName,
                                       const std::vector<Storage::PgCell>& assignments,
                                       const std::vector<PredicateCondition>& whereFilters,
@@ -351,70 +389,84 @@ namespace DbRuntime::Engine {
                     return result;
                 }
 
-                auto& rows = storage.getTableRowsMutable(tableName);
-                ChosenAccessPlan accessPlan = AccessPathPlanner::chooseBestAccessPath(tableName, whereFilters, lastCost);
-
-                std::vector<uint32_t> targetIndices;
-                if (accessPlan.indexPtr != nullptr) {
-                    targetIndices = accessPlan.indexPtr->lookupFirstColumnPrefix(accessPlan.lookupValue);
-                    lastCost.rowsExamined = static_cast<uint16_t>(targetIndices.size());
-                } else {
-                    lastCost.rowsExamined = static_cast<uint16_t>(rows.size());
-                    for (uint32_t i = 0; i < rows.size(); ++i) targetIndices.push_back(i);
+                for (const auto& assign : assignments) {
+                    if (!schema->findColumn(assign.columnName)) {
+                        console.raiseError(
+                            SqlState::UNDEFINED_COLUMN, "UPDATE", tableName, assign.columnName,
+                            "column \"" + String(assign.columnName) + "\" of relation \"" + tableName + "\" does not exist"
+                        );
+                        probe.finish(); result.cost = lastCost;
+                        return result;
+                    }
                 }
 
-                const auto& fromRows = storage.getTableRows(fromAuxTable);
-                std::vector<std::pair<uint32_t, Storage::PgTuple>> stagedUpdates; // Fase 1: filas nuevas, sin tocar la tabla
-                for (uint32_t idx : targetIndices) {
-                    if (idx >= rows.size()) continue;
+                ChosenAccessPlan accessPlan = AccessPathPlanner::chooseBestAccessPath(tableName, whereFilters, lastCost);
+                std::vector<uint32_t> indexedOffsets;
+                if (accessPlan.indexPtr != nullptr) {
+                    indexedOffsets = accessPlan.indexPtr->lookupFirstColumnPrefix(accessPlan.lookupValue);
+                }
+
+                const auto& fromRows = fromAuxTable.isEmpty() ? std::vector<Storage::PgTuple>{} : storage.getTableRows(fromAuxTable);
+                std::vector<Storage::PgTuple> finalRows;
+                std::vector<Storage::PgTuple> stagedModified;
+                uint16_t examined = 0;
+                bool aborted = false;
+
+                storage.forEachRowStreaming(tableName, [&](const Storage::PgTuple& currentRow, uint32_t offset) -> bool {
+                    bool inIndex = true;
+                    if (accessPlan.indexPtr != nullptr) {
+                        inIndex = std::find(indexedOffsets.begin(), indexedOffsets.end(), offset) != indexedOffsets.end();
+                    }
+                    if (!inIndex) {
+                        finalRows.push_back(currentRow);
+                        return true;
+                    }
+
+                    examined++;
+                    bool matchesWhere = false;
                     if (!fromAuxTable.isEmpty()) {
-                        // UPDATE ... FROM: la fila se actualiza si existe alguna fila auxiliar que cumple el WHERE
-                        bool matchedAux = false;
                         for (const auto& fr : fromRows) {
-                            Storage::PgTuple joined = rows[idx];
+                            Storage::PgTuple joined = currentRow;
                             for (const auto& fc : fr.allCells()) {
                                 joined.set(fromAuxTable + "." + String(fc.columnName), fc.rawText, fc.type);
                             }
-                            if (ModuloDQL::evaluatePredicateChain(joined, whereFilters)) { matchedAux = true; break; }
+                            if (ModuloDQL::evaluatePredicateChain(joined, whereFilters)) {
+                                matchesWhere = true;
+                                break;
+                            }
                         }
-                        if (!matchedAux) continue;
-                    } else if (!ModuloDQL::evaluatePredicateChain(rows[idx], whereFilters)) {
-                        continue;
+                    } else {
+                        matchesWhere = ModuloDQL::evaluatePredicateChain(currentRow, whereFilters);
                     }
 
-                    Storage::PgTuple candidate = rows[idx];
+                    if (!matchesWhere) {
+                        finalRows.push_back(currentRow);
+                        return true;
+                    }
+
+                    Storage::PgTuple candidate = currentRow;
                     for (const auto& assign : assignments) {
                         const auto* colDef = schema->findColumn(assign.columnName);
-                        if (!colDef) {
-                            console.raiseError(
-                                SqlState::UNDEFINED_COLUMN, "UPDATE", tableName, assign.columnName,
-                                "column \"" + String(assign.columnName) + "\" of relation \"" + tableName + "\" does not exist"
-                            );
-                            probe.finish(); result.cost = lastCost;
-                            return result;
-                        }
                         candidate.set(assign.columnName, assign.rawText, colDef->dataType);
                     }
 
                     if (!validateCandidateTuple(*schema, candidate, "UPDATE", false)) {
-                        probe.finish(); result.cost = lastCost;
-                        return result;
+                        aborted = true;
+                        return false;
                     }
 
-                    // Unicidad contra el estado actual de la tabla (excluye la propia fila)
                     String conflictIdx = "";
                     bool uniqueViolation =
-                        findUniqueConflictRowIndex(tableName, candidate, static_cast<int32_t>(idx), conflictIdx) >= 0;
+                        findUniqueConflictRowOffset(tableName, candidate, static_cast<int32_t>(offset), conflictIdx) >= 0;
 
-                    // Unicidad contra las filas ya preparadas en este mismo UPDATE (1 clave por índice)
-                    if (!uniqueViolation && !stagedUpdates.empty()) {
+                    if (!uniqueViolation && !stagedModified.empty()) {
                         for (const auto& ix : storage.getIndexesOfTable(tableName)) {
                             if (!ix.isUnique && !ix.isPrimary) continue;
                             char kNew[32];
                             if (!ix.buildCompositeKey(candidate, kNew, sizeof(kNew))) continue;
-                            for (const auto& st : stagedUpdates) {
+                            for (const auto& st : stagedModified) {
                                 char kSt[32];
-                                if (ix.buildCompositeKey(st.second, kSt, sizeof(kSt)) && strcmp(kNew, kSt) == 0) {
+                                if (ix.buildCompositeKey(st, kSt, sizeof(kSt)) && strcmp(kNew, kSt) == 0) {
                                     conflictIdx = ix.indexName;
                                     uniqueViolation = true;
                                     break;
@@ -430,29 +482,29 @@ namespace DbRuntime::Engine {
                             "duplicate key value violates unique constraint \"" + conflictIdx + "\"",
                             "", conflictIdx
                         );
-                        probe.finish(); result.cost = lastCost;
-                        return result;
+                        aborted = true;
+                        return false;
                     }
 
-                    stagedUpdates.emplace_back(idx, std::move(candidate));
+                    result.affectedRows++;
+                    if (!returningColumns.empty()) {
+                        result.returningRows.push_back(projectReturning(candidate, returningColumns));
+                    }
+                    stagedModified.push_back(candidate);
+                    finalRows.push_back(std::move(candidate));
+                    return true;
+                });
+
+                lastCost.rowsExamined = examined;
+                if (aborted) {
+                    result.affectedRows = 0;
+                    result.returningRows.clear();
+                    probe.finish(); result.cost = lastCost;
+                    return result;
                 }
 
-                // Fase 2: se aplica todo junto moviendo tuplas en RAM sin copias adicionales
-                if (!stagedUpdates.empty()) {
-                    std::vector<std::pair<uint32_t, Storage::PgTuple>> undo;
-                    undo.reserve(stagedUpdates.size());
-                    for (auto& st : stagedUpdates) {
-                        undo.emplace_back(st.first, std::move(rows[st.first]));
-                        rows[st.first] = std::move(st.second);
-                        result.affectedRows++;
-                        if (!returningColumns.empty()) {
-                            result.returningRows.push_back(projectReturning(rows[st.first], returningColumns));
-                        }
-                    }
-                    storage.rebuildIndexesForTable(tableName);
-                    if (!storage.persistTableToSd(tableName)) {
-                        for (auto& u : undo) rows[u.first] = std::move(u.second);
-                        storage.rebuildIndexesForTable(tableName);
+                if (result.affectedRows > 0) {
+                    if (!storage.replaceTableRows(tableName, finalRows)) {
                         result.affectedRows = 0;
                         result.returningRows.clear();
                         console.raiseError(SqlState::IO_ERROR, "UPDATE", tableName, "",
@@ -461,6 +513,7 @@ namespace DbRuntime::Engine {
                         return result;
                     }
                 }
+
                 lastCost.rowsProduced = result.affectedRows;
                 result.success = true;
                 console.reportSuccess("UPDATE", tableName, String(result.affectedRows) + " rows updated");
@@ -469,8 +522,6 @@ namespace DbRuntime::Engine {
             return result;
         }
 
-        // ---------------- DELETE FROM ... [USING ...] WHERE ... [RETURNING ...] ----------------
-        // Elimina filas aplicando las políticas ON DELETE (RESTRICT, CASCADE, SET NULL, SET DEFAULT) en las tablas hijas.
         DmlExecutionResult deleteRows(const String& tableName,
                                       const std::vector<PredicateCondition>& whereFilters,
                                       const std::vector<String>& returningColumns = {},
@@ -501,20 +552,17 @@ namespace DbRuntime::Engine {
                     return result;
                 }
 
-                // Determina cuál es el camino de acceso para medir el plan en EXPLAIN
                 AccessPathPlanner::chooseBestAccessPath(tableName, whereFilters, lastCost);
 
-                auto& rows = storage.getTableRowsMutable(tableName);
-                lastCost.rowsExamined = static_cast<uint16_t>(rows.size());
-                const auto& usingRows = storage.getTableRows(usingAuxTable);
-                
+                const auto& usingRows = usingAuxTable.isEmpty() ? std::vector<Storage::PgTuple>{} : storage.getTableRows(usingAuxTable);
                 std::vector<Storage::PgTuple> keptRows;
                 std::vector<Storage::PgTuple> toDelete;
+                uint16_t examined = 0;
 
-                for (const auto& r : rows) {
+                storage.forEachRowStreaming(tableName, [&](const Storage::PgTuple& r, uint32_t) -> bool {
+                    examined++;
                     bool matches = false;
                     if (!usingAuxTable.isEmpty()) {
-                        // DELETE ... USING: la fila se elimina si existe alguna fila auxiliar que cumpla el WHERE
                         for (const auto& ur : usingRows) {
                             Storage::PgTuple joined = r;
                             for (const auto& uc : ur.allCells()) {
@@ -534,12 +582,12 @@ namespace DbRuntime::Engine {
                     } else {
                         keptRows.push_back(r);
                     }
-                }
+                    return true;
+                });
 
-                                // Verifica acciones referenciales ON DELETE en todas las tablas hijas que apuntan a esta tabla
+                lastCost.rowsExamined = examined;
                 std::vector<String> childTables = cat.findDependentTables(tableName);
 
-                // FASE 1: solo validación (RESTRICT / NO ACTION). No modifica ninguna tabla.
                 bool hasCascadingActions = false;
                 for (const auto& delRow : toDelete) {
                     for (const auto& childName : childTables) {
@@ -584,7 +632,6 @@ namespace DbRuntime::Engine {
                     }
                 }
 
-                // FASE 2: efectos en hijas (CASCADE / SET NULL / SET DEFAULT) con copia para poder revertir
                 std::map<String, std::vector<Storage::PgTuple>> snapshot;
                 if (hasCascadingActions) {
                     for (const auto& childName : childTables) snapshotTableGraph(childName, tableName, snapshot);
@@ -627,17 +674,11 @@ namespace DbRuntime::Engine {
                     result.affectedRows = 0;
                     result.returningRows.clear();
                     probe.finish(); result.cost = lastCost;
-                    return result;   // el diagnóstico ya lo emitió la llamada anidada
+                    return result;
                 }
 
-                // FASE 3: aplicar en la tabla principal (sin copia: se mueve y se restaura si falla la SD)
                 if (!toDelete.empty()) {
-                    std::vector<Storage::PgTuple> oldRows = std::move(rows);
-                    rows = std::move(keptRows);
-                    storage.rebuildIndexesForTable(tableName);
-                    if (!storage.persistTableToSd(tableName)) {
-                        rows = std::move(oldRows);
-                        storage.rebuildIndexesForTable(tableName);
+                    if (!storage.replaceTableRows(tableName, keptRows)) {
                         restoreSnapshot(snapshot);
                         result.affectedRows = 0;
                         result.returningRows.clear();
@@ -656,8 +697,6 @@ namespace DbRuntime::Engine {
             return result;
         }
 
-        // ---------------- MERGE INTO target USING source ON ... WHEN MATCHED / NOT MATCHED ----------------
-        // Ejecuta la sentencia estándar MERGE combinando inserciones, actualizaciones o borrados en una sola pasada.
         DmlExecutionResult mergeRows(const String& targetTable,
                                      const std::vector<Storage::PgTuple>& sourceRows,
                                      const String& joinKeyTargetCol,
@@ -727,8 +766,6 @@ namespace DbRuntime::Engine {
             return result;
         }
 
-        // ---------------- TRUNCATE TABLE (100% Autónomo en Runtime, CERO dependencia de ModuloDDL) ----------------
-        // Vacía la tabla en RAM, limpia sus índices y trunca el archivo .tbl verificando dependencias FK en el catálogo.
         DmlExecutionResult truncateTable(const String& tableName,
                                          DbNotRuntime::Standard::ReferentialAction behavior = DbNotRuntime::Standard::ReferentialAction::RESTRICT) {
             auto dbLock = Storage::RuntimeStorageAndIndexManager::lockEngine();
@@ -756,16 +793,12 @@ namespace DbRuntime::Engine {
             }
 
             uint16_t countBefore = static_cast<uint16_t>(storage.getTableRows(tableName).size());
-            storage.getTableRowsMutable(tableName).clear();
-            storage.rebuildIndexesForTable(tableName);
-            storage.persistTableToSd(tableName);
+            storage.replaceTableRows(tableName, {});
 
             if (behavior == DbNotRuntime::Standard::ReferentialAction::CASCADE) {
                 for (const auto& dep : dependents) {
                     countBefore += static_cast<uint16_t>(storage.getTableRows(dep).size());
-                    storage.getTableRowsMutable(dep).clear();
-                    storage.rebuildIndexesForTable(dep);
-                    storage.persistTableToSd(dep);
+                    storage.replaceTableRows(dep, {});
                 }
             }
 

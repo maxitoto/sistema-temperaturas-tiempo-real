@@ -152,17 +152,7 @@ namespace DbRuntime::Orm {
     inline RuntimeDbEngine& runtimeDb = RuntimeDbEngine::getInstance();
 
     // Instancias globales de Managers para las 12 tablas del modelo físico (escritura directa como en Django).
-    inline const ModelManager Calibracion("Calibracion");
-    inline const ModelManager Lts("Lts");
-    inline const ModelManager ConfiguracionConectividad("ConfiguracionConectividad");
-    inline const ModelManager ServidoresNtp("ServidoresNtp");
-    inline const ModelManager ConfiguracionSmtp("ConfiguracionSmtp");
-    inline const ModelManager Usuarios("Usuarios");
-    inline const ModelManager Correos("Correos");
-    inline const ModelManager Auditoria("Auditoria");
-    inline const ModelManager Sensor("Sensor");
-    inline const ModelManager Senso("Senso");
-    inline const ModelManager EventoSensor("EventoSensor");
-    inline const ModelManager EventoSistema("EventoSistema");
+    inline const ModelManager ConfiguracionRed("ConfiguracionRed");
+    inline const ModelManager Usuario("Usuario");
 
 } // namespace DbRuntime::Orm

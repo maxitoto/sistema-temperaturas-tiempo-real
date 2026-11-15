@@ -22,8 +22,8 @@ private:
     EstiloLinea estiloActual = NINGUNA;
     bool inicializada = false;
 
-    // Cache de texto de los 6 sensores para evitar redibujar si el valor no cambió
-    char cacheSensores[6][12] = {{0}};
+    // Cache de texto de las 6 celdas para evitar tráfico I2C si el texto no cambió
+    char cacheCeldas[6][12] = {{0}};
 
     Oled() : display(ANCHO, ALTO, &Wire, -1) {}
     ~Oled() = default;
@@ -43,7 +43,6 @@ private:
         uint8_t pagFin = (y + h - 1) / 8;
         if (pagFin > 7) pagFin = 7;
 
-        // Comandos nativos SSD1306 para direccionar solo el bloque modificado
         Wire.beginTransmission(I2C_ADDR);
         Wire.write(0x00);
         Wire.write(SSD1306_COLUMNADDR);
@@ -59,7 +58,7 @@ private:
             uint8_t col = colIni;
             while (col <= colFin) {
                 Wire.beginTransmission(I2C_ADDR);
-                Wire.write(0x40); // Co = 0, D/C# = 1 (Datos de RAM gráfica)
+                Wire.write(0x40);
                 uint8_t bytesEnPaquete = 0;
                 while (col <= colFin && bytesEnPaquete < 16) {
                     Wire.write(buffer[offsetBase + col]);
@@ -121,7 +120,6 @@ public:
     Oled(Oled&&)                 = delete;
     Oled& operator=(Oled&&)      = delete;
 
-    // Se autoinicializa usando los pines de pines_nodemcu32s.hpp
     bool iniciar() {
         if (inicializada) return true;
 
@@ -133,6 +131,7 @@ public:
             return false;
         }
 
+        display.cp437(true); // Activa tabla CP437 estándar (0xF8 = símbolo '°')
         display.clearDisplay();
         display.setTextColor(SSD1306_WHITE);
         display.setTextSize(1);
@@ -144,7 +143,6 @@ public:
 
     bool estaInicializada() const { return inicializada; }
 
-    // Volcado completo (solo cuando se redibuja toda la pantalla)
     void actualizar() {
         if (inicializada) display.display();
     }
@@ -163,74 +161,48 @@ public:
     }
 
     // =======================================================
-    // 1. GRILLA WEB PARA 6 SENSORES (2 Columnas x 3 Filas)
-    //    indice: 0..5 -> Actualiza por I2C SOLO esa celda
+    // 1. GRILLA 2x3 AGNÓSTICA AL CONTENIDO (y = 17..63 sin huecos)
+    //    Fila 0: y=17, h=16 (17..32)
+    //    Fila 1: y=33, h=16 (33..48)
+    //    Fila 2: y=49, h=15 (49..63)
     // =======================================================
-
-    void sensor(const char* mac, const char* texto) {
-        if (!inicializada || !mac || !texto) return;
-        // Combina "MAC + texto" y lo muestra en la fila correspondiente
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%s %s", mac, texto);
-        // Usá la primera fila libre o una fija según tu layout:
-        fila1(buf);
-    }
-
-    void sensor(uint8_t indice, const char* texto) {
+    void celdaGrilla(uint8_t indice, const char* texto) {
         if (!inicializada || indice >= 6 || !texto) return;
 
-        // Si el texto es idéntico al que ya está en pantalla, ahorra el bus I2C
-        if (strncmp(cacheSensores[indice], texto, sizeof(cacheSensores[indice]) - 1) == 0) {
+        if (strncmp(cacheCeldas[indice], texto, sizeof(cacheCeldas[indice]) - 1) == 0) {
             return;
         }
-        strncpy(cacheSensores[indice], texto, sizeof(cacheSensores[indice]) - 1);
-        cacheSensores[indice][sizeof(cacheSensores[indice]) - 1] = '\0';
+        strncpy(cacheCeldas[indice], texto, sizeof(cacheCeldas[indice]) - 1);
+        cacheCeldas[indice][sizeof(cacheCeldas[indice]) - 1] = '\0';
 
-        uint8_t col  = indice % 2; // 0 = Izq (x=0), 1 = Der (x=64)
-        uint8_t fila = indice / 2; // 0, 1, 2
+        uint8_t col  = indice % 2;
+        uint8_t fila = indice / 2;
 
         int x = col * 64;
-        int y = 18 + (fila * 15);
-        motorTexto(x, y, 64, 14, cacheSensores[indice], false, true);
+        int y = (fila == 0) ? 17 : ((fila == 1) ? 33 : 49);
+        int h = (fila < 2)  ? 16 : 15;
+        motorTexto(x, y, 64, h, cacheCeldas[indice], false, true);
     }
 
-    // Helper directo para pasar número de sensor y temperatura formateada
-    void sensorTemperatura(uint8_t indice, const char* mac, float tempC, bool ok = true) {
-        if (indice >= 6 || !mac) return;
-
-        char txt[16];   // 12 quedaba justo con temps negativas
-        if (!ok) {
-            snprintf(txt, sizeof(txt), "%s:--", mac);
-        } else {
-            snprintf(txt, sizeof(txt), "%s:%4.1fC", mac, tempC);
-        }
-        sensor(indice, txt);
+    // Alias retrocompatible
+    void sensor(uint8_t indice, const char* texto) {
+        celdaGrilla(indice, texto);
     }
 
-    // Formatea 10 caracteres exactos (60 px) para entrar sin recorte en la columna de 64 px: "F8E:23C OK"
-    void sensorEstado(uint8_t indice, const char* macCorto, float tempC, int16_t codigoEstado) {
-        if (indice >= 6 || !macCorto) return;
+    void invalidarCacheGrilla() {
+        memset(cacheCeldas, 0, sizeof(cacheCeldas));
+    }
 
-        // Toma los últimos 3 caracteres si se le pasa una MAC más larga
-        size_t lenMac = strlen(macCorto);
-        const char* m3 = (lenMac > 3) ? (macCorto + lenMac - 3) : macCorto;
-
-        char txt[12];
-        int tempRedondeada = static_cast<int>(roundf(tempC));
-        if (codigoEstado == 0) { // EstadoSensor::OK
-            snprintf(txt, sizeof(txt), "%3s:%2dC OK", m3, tempRedondeada);
-        } else if (codigoEstado == 1) { // ALARMA_SUPERIOR
-            snprintf(txt, sizeof(txt), "%3s:%2dCALT", m3, tempRedondeada);
-        } else if (codigoEstado == 2) { // ALARMA_INFERIOR
-            snprintf(txt, sizeof(txt), "%3s:%2dCBAJ", m3, tempRedondeada);
-        } else {
-            snprintf(txt, sizeof(txt), "%3s:---ERR", m3);
-        }
-        sensor(indice, txt);
+    // Limpia exactamente el área debajo del divisor (y = 17..63) al cambiar entre Grilla y Filas
+    void limpiarAreaContenido() {
+        if (!inicializada) return;
+        memset(cacheCeldas, 0, sizeof(cacheCeldas));
+        display.fillRect(0, 17, ANCHO, ALTO - 17, SSD1306_BLACK);
+        enviarVentanaI2C(0, 17, ANCHO, ALTO - 17);
     }
 
     // =======================================================
-    // 2. CABECERA E ICONOS DE ESTADO (Actualización parcial)
+    // 2. CABECERA E ICONOS SUPERIORES (y = 0..15)
     // =======================================================
     void cabeceraIzq(const char* txt) { motorTexto(0, 0, 64, 16, txt, false, true); }
 
@@ -245,21 +217,21 @@ public:
     void limpiarSlotDer1() { display.fillRect(112, 0, 16, 16, SSD1306_BLACK); enviarVentanaI2C(112, 0, 16, 16); }
 
     // =======================================================
-    // 3. FILAS DE ANCHO COMPLETO (Para pantallas de mensajes)
+    // 3. FILAS DE ANCHO COMPLETO CONTIGUAS (y = 17..63 sin huecos)
+    //    fila1: y=17..28 (h=12) | fila2: y=29..40 (h=12)
+    //    fila3: y=41..52 (h=12) | fila4: y=53..63 (h=11)
     // =======================================================
-    void fila1(const char* txt) { motorTexto(0, 18, 128, 11, txt, false, true); }
-    void fila2(const char* txt) { motorTexto(0, 30, 128, 11, txt, false, true); }
-    void fila3(const char* txt) { motorTexto(0, 42, 128, 11, txt, false, true); }
-    void fila4(const char* txt) { motorTexto(0, 54, 128, 10, txt, false, true); }
+    void fila1(const char* txt) { motorTexto(0, 17, 128, 12, txt, false, true); }
+    void fila2(const char* txt) { motorTexto(0, 29, 128, 12, txt, false, true); }
+    void fila3(const char* txt) { motorTexto(0, 41, 128, 12, txt, false, true); }
+    void fila4(const char* txt) { motorTexto(0, 53, 128, 11, txt, false, true); }
 
     // =======================================================
     // 4. PANTALLA COMPLETA / LOGO
     // =======================================================
-    void fullScreen(const unsigned char* icono, int icoW, int icoH,
-                    bool autoRefrescar = true) {
+    void fullScreen(const unsigned char* icono, int icoW, int icoH, bool autoRefrescar = true) {
         if (!inicializada || !icono) return;
         display.clearDisplay();
-        // Centrado vertical; horizontal se dibuja desde x=0
         int cursorY = (ALTO - icoH) / 2;
         display.drawBitmap(0, cursorY, icono, icoW, icoH, SSD1306_WHITE);
         if (autoRefrescar) {
@@ -267,11 +239,7 @@ public:
         }
     }
 
-    // =======================================================
-    // 5. PANTALLA COMPLETA con CABECERA / PARA LOGO y cabecera
-    // =======================================================
-    void fullScreenConCabecera(const unsigned char* icono, int icoW, int icoH,
-                               bool autoRefrescar = true) {
+    void fullScreenConCabecera(const unsigned char* icono, int icoW, int icoH, bool autoRefrescar = true) {
         if (!inicializada || !icono) return;
         display.fillRect(0, 17, ANCHO, ALTO - 17, SSD1306_BLACK);
         int y = 17 + ((ALTO - 17) - icoH) / 2;
@@ -284,14 +252,13 @@ public:
 
     void limpiarTodo() {
         if (!inicializada) return;
-        memset(cacheSensores, 0, sizeof(cacheSensores));
+        memset(cacheCeldas, 0, sizeof(cacheCeldas));
         display.clearDisplay();
         dibujarDivisor(estiloActual);
         display.display();
     }
 };
 
-// Instancia global y función de arranque limpia
 inline Oled& oled = Oled::getInstance();
 
 inline bool iniciarOled() {

@@ -2,11 +2,10 @@
 #include <Arduino.h>
 #include <vector>
 #include "../standard/PostgresReservedWords.hpp"
-#include "../standard/PostgresSqlStates.hpp"
-#include "../standard/PostgresDataTypes.hpp"
-#include "../standard/PostgresConstraints.hpp"
-#include "DdlDiagnosticConsole.hpp"
-#include "PhysicalSchemaCatalog.hpp"
+#include "../../common/PostgresDataTypes.hpp"
+#include "../../common/PostgresConstraints.hpp"
+#include "../../common/DiagnosticConsole.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 #include "DeterministicTableBuilder.hpp"
 
 namespace DbNotRuntime::Engine {

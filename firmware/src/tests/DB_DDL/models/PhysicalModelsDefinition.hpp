@@ -48,22 +48,20 @@ namespace DbNotRuntime::PhysicalModels {
     };
 
     // 3. Modelo físico de la tabla ConfiguracionConectividad.
-    class ConfiguracionConectividadModel final : public Model {
-    public:
-        MetaOptions meta() const override { return { "ConfiguracionConectividad" }; }
-        std::vector<Field> fields() const override {
-            return {
-                AutoField("id_configuracion_conectividad"),
-                CharField("ssid_sta", 64).default_val(""),
-                CharField("sta_password_aes", 128).default_val(""),
-                CharField("ssid_ap", 64).default_val("ESP32-SecureAP"),
-                CharField("ap_password_aes", 128).default_val(""),
-                PositiveIntegerField("puerto_tcp").default_val(8443),
-                PositiveIntegerField("puerto_udp").default_val(8444),
-                PositiveIntegerField("baudios_usb").default_val(115200),
-                BigIntegerField("fecha_modificacion").default_val(0)
-            };
-        }
+    class ConfiguracionRedModel final : public Model {
+        public: 
+            MetaOptions meta() const override {return { "ConfiguracionRed" }; }
+            std::vector<Field> fields() const override {
+                return {
+                    AutoField("id_configuracion_red"),
+                    TextField("ssid_sta", 35).default_val(""),
+                    TextField("password_sta", 64).default_val(""),
+                    TextField("ssid_ap", 35).default_val("ESP32-SecureAP"),
+                    TextField("password_ap", 64).default_val("ESP32secure1234@"),
+                    DateTimeField("creado_el"),
+                    DateTimeField("actualizado_el").auto_now(true)
+                };
+            }
     };
 
     // 4. Modelo físico de la tabla ServidoresNtp.

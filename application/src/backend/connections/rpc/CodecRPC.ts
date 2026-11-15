@@ -1,32 +1,29 @@
-export enum ProcedimientoRPC {
-    L1_HANDSHAKE_UARTS        = 0x0101,
-    L1_KEEPALIVE_UARTS        = 0x0102,
-    L1_CERRAR_UARTS           = 0x0103,
-    L1_KEEPALIVE_WIFI         = 0x0104,
-    L1_SUSCRIBIR_UDP_WIFI     = 0x0105,
-    L1_CERRAR_WIFI            = 0x0106,
+export enum ProcedimientoSistemaRPC {
+    L1_HANDSHAKE_UARTS    = 0x0101,
+    L1_KEEPALIVE_UARTS    = 0x0102,
+    L1_CERRAR_UARTS       = 0x0103,
+    L1_KEEPALIVE_WIFI     = 0x0104,
+    L1_SUSCRIBIR_UDP_WIFI = 0x0105,
+    L1_CERRAR_WIFI        = 0x0106,
 
-    L2_LOGIN_USUARIO          = 0x0201,
-    L2_LOGOUT_USUARIO         = 0x0202,
-
-    L3_SUSCRIBIR_SENSORES     = 0x0301,
-    L3_OBTENER_CENSOS_MAC     = 0x0302,
-    L3_OBTENER_CENSOS_FECHA   = 0x0303,
-    L3_REINICIAR_HARDWARE     = 0x0310,
-    L3_ACTUALIZAR_CONFIG_WIFI = 0x0311,
-    L3_DIAGNOSTICO_SISTEMA    = 0x0312
+    L2_LOGIN_USUARIO      = 0x0201,
+    L2_LOGOUT_USUARIO     = 0x0202
 }
 
 export const BANDERA_ERROR_RPC = 0x8000;
 
-export enum CodigoErrorRPC {
-    OK                          = 0,
-    NO_AUTENTICADO              = 1,
-    SESION_BLOQUEADA            = 2,
-    ROL_INSUFICIENTE            = 3,
-    ARGUMENTOS_INVALIDOS        = 4,
-    PROCEDIMIENTO_NO_ENCONTRADO = 5,
-    SERVIDOR_OCUPADO            = 6
+export interface PerfilEnlaceUartsCliente {
+    versionServidor: number;
+    mtuBytes: number;
+}
+
+export interface CanalStreamingUdpCliente {
+    puertoEmisorServidor: number;
+}
+
+export interface SesionIniciadaCliente {
+    rolAsignado: number;
+    tiempoExpiracionSegundos: number;
 }
 
 export interface LecturaSensorCliente {
@@ -36,20 +33,37 @@ export interface LecturaSensorCliente {
     temperaturaCorregida: number;
 }
 
-export interface ResultadoLoginCliente {
-    autenticado: boolean;
-    rolAsignado: number;
-    tiempoExpiracionSegundos: number;
+export interface DiagnosticoSistemaCliente {
+    heapLibreBytes: number;
+    uptimeSegundos: number;
 }
 
-export interface ConfirmacionSistemaCliente {
-    exito: boolean;
-    codigoEstado: number;
+export interface ConfiguracionWiFiCliente {
+    ssidSta: string;
+    ssidAp: string;
+    ipSta: string;
+    ipAp: string;
+    conectadoARouter: boolean;
+    puntoAccesoActivo: boolean;
+}
+
+// Calcula el mismo hash FNV-1a de 15 bits (0x0300..0x7FFF) que C++ constexpr hashNombreProcedimiento()
+export function hashNombreProcedimiento(nombre: string): number {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < nombre.length; i++) {
+        h ^= nombre.charCodeAt(i) & 0xFF;
+        h = Math.imul(h, 16777619) >>> 0;
+    }
+    const id15 = ((h ^ (h >>> 15)) & 0x7FFF) >>> 0;
+    return id15 < 0x0300 ? (id15 + 0x0300) & 0x7FFF : id15;
 }
 
 export class CodecRPC {
-    // ¿Cómo lo hace?: Antepone la cabecera [longitudPayload:4 BE][idTicket:2 BE][idProc:2 BE] al buffer del DTO de entrada.
-    static empaquetarPeticion(idTicket: number, idProc: ProcedimientoRPC, payloadDto: Buffer = Buffer.alloc(0)): Buffer {
+    static empaquetarPeticion(
+        idTicket: number,
+        idProc: number,
+        payloadDto: Buffer = Buffer.alloc(0)
+    ): Buffer {
         const longitudPayload = 4 + payloadDto.length;
         const frame = Buffer.alloc(8 + payloadDto.length);
 
@@ -63,7 +77,6 @@ export class CodecRPC {
         return frame;
     }
 
-    // ¿Cómo lo hace?: Extrae idTicket, idProc y el sub-buffer del DTO de salida a partir de un frame recibido con cabecera de 8 bytes.
     static desempaquetarRespuesta(frameCompleto: Buffer): {
         idTicket: number;
         idProc: number;
@@ -85,33 +98,71 @@ export class CodecRPC {
         return { idTicket, idProc, esError, payload };
     }
 
-    // ¿Cómo lo hace?: Escribe un string UTF-8 truncado y terminado en '\0' dentro de un segmento de longitud fija.
     private static escribirCString(destino: Buffer, offset: number, maxLen: number, texto: string): void {
         destino.fill(0, offset, offset + maxLen);
         destino.write(texto.slice(0, maxLen - 1), offset, maxLen - 1, "utf8");
     }
 
-    // ¿Cómo lo hace?: Convierte una dirección MAC hexadecimal ("28FF12...") en un arreglo binario de 8 bytes.
+    private static leerCString(origen: Buffer, offset: number, maxLen: number): string {
+        const sub = origen.subarray(offset, offset + maxLen);
+        const fin = sub.indexOf(0);
+        return sub.subarray(0, fin === -1 ? sub.length : fin).toString("utf8").trim();
+    }
+
     static macHexABuffer8(macHex: string): Buffer {
         const limpio = macHex.replace(/[^0-9A-Fa-f]/g, "").padEnd(16, "0").slice(0, 16);
         return Buffer.from(limpio, "hex");
     }
 
-    // ¿Cómo lo hace?: Serializa HandshakeUartsDTO (1 byte: versionProtocolo = 1).
+    // Convierte el mensaje de excepción crudo enviado por el servidor ESP32 en un Error nativo de JS
+    static decodificarExcepcionCruda(idProc: number, payload: Buffer): Error {
+        const finNulo = payload.indexOf(0);
+        const textoCrudo = payload
+            .subarray(0, finNulo === -1 ? payload.length : finNulo)
+            .toString("utf8")
+            .trim();
+
+        if (textoCrudo.length > 0) {
+            return new Error(textoCrudo);
+        }
+        return new Error(`RuntimeError: excepción remota en procedimiento 0x${idProc.toString(16)}`);
+    }
+
+    // --- L1: Transporte y Enlace ---
+
     static codificarHandshakeUarts(version = 1): Buffer {
         const b = Buffer.alloc(1);
         b.writeUInt8(version & 0xFF, 0);
         return b;
     }
 
-    // ¿Cómo lo hace?: Serializa SuscripcionUdpDTO (2 bytes LE: uint16_t puertoEscuchaCliente).
+    static decodificarPerfilEnlaceUarts(payload: Buffer): PerfilEnlaceUartsCliente {
+        if (payload.length < 4) {
+            throw new Error("ProtocolError: respuesta de handshake UART-S incompleta");
+        }
+        return {
+            versionServidor: payload.readUInt8(0),
+            mtuBytes: payload.readUInt16LE(2)
+        };
+    }
+
     static codificarSuscripcionUdp(puertoLocal: number): Buffer {
         const b = Buffer.alloc(2);
         b.writeUInt16LE(puertoLocal & 0xFFFF, 0);
         return b;
     }
 
-    // ¿Cómo lo hace?: Serializa CredencialesLoginDTO (64 bytes: usuario[32] + clavePlana[32]).
+    static decodificarCanalStreamingUdp(payload: Buffer): CanalStreamingUdpCliente {
+        if (payload.length < 2) {
+            throw new Error("ProtocolError: respuesta de suscripción UDP incompleta");
+        }
+        return {
+            puertoEmisorServidor: payload.readUInt16LE(0)
+        };
+    }
+
+    // --- L2: Autenticación (RPAuth) ---
+
     static codificarLogin(usuario: string, clavePlana: string): Buffer {
         const b = Buffer.alloc(64);
         this.escribirCString(b, 0, 32, usuario);
@@ -119,49 +170,19 @@ export class CodecRPC {
         return b;
     }
 
-    static decodificarErrorRPC(idProc: number, payload: Buffer): Error {
-        if (payload.length > 4) {
-            const finTexto = payload.indexOf(0, 4);
-            const detalleServidor = payload
-                .subarray(4, finTexto === -1 ? payload.length : finTexto)
-                .toString("utf8")
-                .trim();
-
-            if (detalleServidor.length > 0) {
-                return new Error(detalleServidor);
-            }
-        }
-
-        const codigo = payload.length >= 1 ? (payload.readUInt8(0) as CodigoErrorRPC) : CodigoErrorRPC.OK;
-        switch (codigo) {
-            case CodigoErrorRPC.NO_AUTENTICADO:
-                return new Error("PROXY_UNAUTHENTICATED: Sesion no autenticada. Inicie sesion primero.");
-            case CodigoErrorRPC.SESION_BLOQUEADA:
-                return new Error("PROXY_SESSION_LOCKED: Sesion bloqueada temporalmente por intentos fallidos.");
-            case CodigoErrorRPC.ROL_INSUFICIENTE:
-                return new Error("RPC_FORBIDDEN_ADMIN: Operacion exclusiva para rol ADMIN");
-            case CodigoErrorRPC.ARGUMENTOS_INVALIDOS:
-                return new Error("RPC_INVALID_ARGS: Argumentos invalidos para el procedimiento.");
-            case CodigoErrorRPC.PROCEDIMIENTO_NO_ENCONTRADO:
-                return new Error("RPC_NOT_FOUND: Endpoint no registrado");
-            default:
-                return new Error(`RPC_ERROR: Fallo en procedimiento 0x${idProc.toString(16)}`);
-        }
-    }
-
-    // ¿Cómo lo hace?: Deserializa ResultadoLoginDTO (8 bytes en ESP32: bool autenticado, uint8_t rol, 2B pad, uint32_t LE expiracion).
-    static decodificarResultadoLogin(payload: Buffer): ResultadoLoginCliente {
+    // SesionIniciadaDTO en ESP32: uint8_t rolAsignado (offset 0), 3B pad, uint32_t LE tiempoExpiracionSegundos (offset 4)
+    static decodificarSesionIniciada(payload: Buffer): SesionIniciadaCliente {
         if (payload.length < 8) {
-            return { autenticado: false, rolAsignado: 0, tiempoExpiracionSegundos: 0 };
+            throw new Error("ProtocolError: SesionIniciadaDTO inválido");
         }
         return {
-            autenticado: payload.readUInt8(0) !== 0,
-            rolAsignado: payload.readUInt8(1),
+            rolAsignado: payload.readUInt8(0),
             tiempoExpiracionSegundos: payload.readUInt32LE(4)
         };
     }
 
-    // ¿Cómo lo hace?: Serializa FiltroPorMacDTO (10 bytes: uint8_t mac[8] + uint16_t LE limiteRegistros).
+    // --- L3: Dominio Sensores (RPSensor) ---
+
     static codificarFiltroPorMac(macHex: string, limiteRegistros: number): Buffer {
         const b = Buffer.alloc(10);
         this.macHexABuffer8(macHex).copy(b, 0);
@@ -169,8 +190,12 @@ export class CodecRPC {
         return b;
     }
 
-    // ¿Cómo lo hace?: Serializa FiltroPorMacYFechaDTO (20 bytes con alineación 32-bit: mac[8], desde:4 LE, hasta:4 LE, limite:2 LE, 2B pad).
-    static codificarFiltroPorMacYFecha(macHex: string, desdeSeg: number, hastaSeg: number, limiteRegistros: number): Buffer {
+    static codificarFiltroPorMacYFecha(
+        macHex: string,
+        desdeSeg: number,
+        hastaSeg: number,
+        limiteRegistros: number
+    ): Buffer {
         const b = Buffer.alloc(20);
         this.macHexABuffer8(macHex).copy(b, 0);
         b.writeUInt32LE(desdeSeg >>> 0, 8);
@@ -179,7 +204,6 @@ export class CodecRPC {
         return b;
     }
 
-    // ¿Cómo lo hace?: Deserializa HistorialSensoresDTO (cantidadLecturas en byte 0, 3B pad, y hasta 32 structs LecturaSensorDTO de 20 bytes cada uno).
     static decodificarHistorialSensores(payload: Buffer): LecturaSensorCliente[] {
         if (payload.length < 4) {
             return [];
@@ -202,8 +226,14 @@ export class CodecRPC {
         return lecturas;
     }
 
-    // ¿Cómo lo hace?: Serializa ConfiguracionWiFiDTO (192 bytes: ssidSta[32], claveSta[64], ssidAp[32], claveAp[64]).
-    static codificarConfiguracionWiFi(ssidSta: string, claveSta: string, ssidAp: string, claveAp: string): Buffer {
+    // --- L3: Dominio Sistema (RPSistema) ---
+
+    static codificarConfiguracionWiFi(
+        ssidSta: string,
+        claveSta: string,
+        ssidAp: string,
+        claveAp: string
+    ): Buffer {
         const b = Buffer.alloc(192);
         this.escribirCString(b, 0, 32, ssidSta);
         this.escribirCString(b, 32, 64, claveSta);
@@ -212,14 +242,157 @@ export class CodecRPC {
         return b;
     }
 
-    // ¿Cómo lo hace?: Deserializa ConfirmacionSistemaDTO (8 bytes: bool exito en byte 0, 3B pad, uint32_t LE codigoEstado en byte 4).
-    static decodificarConfirmacionSistema(payload: Buffer): ConfirmacionSistemaCliente {
-        if (payload.length < 8) {
-            return { exito: false, codigoEstado: 0 };
+    // ResConfiguracionWiFiDTO en ESP32:
+    // ssidSta[32] (0..31) + ssidAp[32] (32..63) + ipSta[16] (64..79) +
+    // ipAp[16] (80..95) + conectadoARouter (96) + puntoAccesoActivo (97) = 98 bytes
+    static decodificarConfiguracionWiFi(payload: Buffer): ConfiguracionWiFiCliente {
+        if (payload.length < 98) {
+            throw new Error(`ProtocolError: ResConfiguracionWiFiDTO incompleto (${payload.length}/98 bytes)`);
         }
         return {
-            exito: payload.readUInt8(0) !== 0,
-            codigoEstado: payload.readUInt32LE(4)
+            ssidSta: this.leerCString(payload, 0, 32),
+            ssidAp: this.leerCString(payload, 32, 32),
+            ipSta: this.leerCString(payload, 64, 16),
+            ipAp: this.leerCString(payload, 80, 16),
+            conectadoARouter: payload.readUInt8(96) !== 0,
+            puntoAccesoActivo: payload.readUInt8(97) !== 0
         };
     }
+
+    // DiagnosticoSistemaDTO en ESP32: uint32_t LE heapLibreBytes (0..3) + uint32_t LE uptimeSegundos (4..7) = 8 bytes
+    static decodificarDiagnosticoSistema(payload: Buffer): DiagnosticoSistemaCliente {
+        if (payload.length < 8) {
+            throw new Error("ProtocolError: DiagnosticoSistemaDTO incompleto");
+        }
+        return {
+            heapLibreBytes: payload.readUInt32LE(0),
+            uptimeSegundos: payload.readUInt32LE(4)
+        };
+    }
+
+    // --- L3: Dominio Usuarios (RPUsuario) ---
+
+    static codificarConsultaUsuarioNombre(usuario: string): Buffer {
+        const b = Buffer.alloc(20);
+        this.escribirCString(b, 0, 20, usuario);
+        return b;
+    }
+
+    static codificarFiltroListadoUsuarios(
+        limiteRegistros = 32,
+        offsetRegistros = 0,
+        soloActivos = false
+    ): Buffer {
+        const b = Buffer.alloc(8);
+        b.writeUInt16LE(limiteRegistros & 0xFFFF, 0);
+        b.writeUInt16LE(offsetRegistros & 0xFFFF, 2);
+        b.writeUInt8(soloActivos ? 1 : 0, 4);
+        return b;
+    }
+
+    static codificarCrearUsuario(usuario: string, clavePlana: string, rol = 1): Buffer {
+        const b = Buffer.alloc(52);
+        this.escribirCString(b, 0, 20, usuario);
+        this.escribirCString(b, 20, 28, clavePlana);
+        b.writeUInt8(rol & 0xFF, 48);
+        return b;
+    }
+
+    static codificarActualizarUsuario(usuario: string, nuevoRol: number, activa: boolean): Buffer {
+        const b = Buffer.alloc(24);
+        this.escribirCString(b, 0, 20, usuario);
+        b.writeUInt8(nuevoRol & 0xFF, 20);
+        b.writeUInt8(activa ? 1 : 0, 21);
+        return b;
+    }
+
+    static codificarCambiarContrasena(usuario: string, claveActual: string, claveNueva: string): Buffer {
+        const b = Buffer.alloc(76);
+        this.escribirCString(b, 0, 20, usuario);
+        this.escribirCString(b, 20, 28, claveActual);
+        this.escribirCString(b, 48, 28, claveNueva);
+        return b;
+    }
+
+    static decodificarPerfilUsuario(payload: Buffer): PerfilUsuarioCliente {
+        if (payload.length < 68) {
+            throw new Error("ProtocolError: PerfilUsuarioDTO incompleto");
+        }
+        return {
+            idUsuario: payload.readInt32LE(0),
+            usuario: this.leerCString(payload, 4, 20),
+            rol: payload.readUInt8(24),
+            intentosFallidos: payload.readUInt8(25),
+            bloqueado: payload.readUInt8(26) !== 0,
+            activa: payload.readUInt8(27) !== 0,
+            creadoEl: this.leerCString(payload, 28, 20),
+            actualizadoEl: this.leerCString(payload, 48, 20)
+        };
+    }
+
+    static decodificarListaUsuarios(payload: Buffer): ResumenUsuarioCliente[] {
+        if (payload.length < 4) {
+            return [];
+        }
+        const cantidad = Math.min(payload.readUInt8(0), 32);
+        const usuarios: ResumenUsuarioCliente[] = [];
+
+        for (let i = 0; i < cantidad; i++) {
+            const base = 4 + i * 28;
+            if (base + 28 > payload.length) {
+                break;
+            }
+            usuarios.push({
+                idUsuario: payload.readInt32LE(base),
+                usuario: this.leerCString(payload, base + 4, 16),
+                rol: payload.readUInt8(base + 20),
+                intentosFallidos: payload.readUInt8(base + 21),
+                bloqueado: payload.readUInt8(base + 22) !== 0,
+                activa: payload.readUInt8(base + 23) !== 0,
+                actualizadoEpoch: payload.readUInt32LE(base + 24)
+            });
+        }
+        return usuarios;
+    }
+
+    static decodificarEstadisticasUsuarios(payload: Buffer): EstadisticasUsuariosCliente {
+        if (payload.length < 16) {
+            throw new Error("ProtocolError: EstadisticasUsuariosDTO incompleto");
+        }
+        return {
+            totalUsuarios: payload.readInt32LE(0),
+            usuariosActivos: payload.readInt32LE(4),
+            usuariosBloqueados: payload.readInt32LE(8),
+            maxIntentosFallidos: payload.readInt32LE(12)
+        };
+    }
+    
+}
+
+export interface PerfilUsuarioCliente {
+    idUsuario: number;
+    usuario: string;
+    rol: number;
+    intentosFallidos: number;
+    bloqueado: boolean;
+    activa: boolean;
+    creadoEl: string;
+    actualizadoEl: string;
+}
+
+export interface ResumenUsuarioCliente {
+    idUsuario: number;
+    usuario: string;
+    rol: number;
+    intentosFallidos: number;
+    bloqueado: boolean;
+    activa: boolean;
+    actualizadoEpoch: number;
+}
+
+export interface EstadisticasUsuariosCliente {
+    totalUsuarios: number;
+    usuariosActivos: number;
+    usuariosBloqueados: number;
+    maxIntentosFallidos: number;
 }

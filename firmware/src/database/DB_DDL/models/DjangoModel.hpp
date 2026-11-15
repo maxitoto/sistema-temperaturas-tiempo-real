@@ -61,6 +61,7 @@ namespace DbNotRuntime::Models {
             for (const auto& f : fList) {
                 const auto& c = f.compiled();
                 builder.column(c.columnName, c.dataType, c.maxLength, c.precision, c.scale, c.customTypeName);
+                builder.configureColumnMeta(c.autoNowAdd, c.autoNow, c.intervalField, c.isArray, c.comment);
 
                 if (c.isPrimaryKey) {
                     builder.primaryKey();

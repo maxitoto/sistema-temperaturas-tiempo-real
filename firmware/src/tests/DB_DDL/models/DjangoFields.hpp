@@ -270,4 +270,12 @@ namespace DbNotRuntime::Models {
         }
     };
 
+    class TextField : public Field {
+    public:
+        explicit TextField(const String& colName, uint16_t maxLength = 128)
+            : Field(colName, Standard::PgDataType::VARCHAR) {
+            def.maxLength = maxLength;
+        }
+    };
+    
 } // namespace DbNotRuntime::Models

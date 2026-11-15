@@ -2,29 +2,29 @@
 #define RP_CONNECT_UARTS_H
 
 #include <stdint.h>
+#include <stdexcept>
+#include "../Controller/abstract/RPC_base.hpp"
 
 struct HandshakeUartsDTO {
     uint8_t versionProtocolo;
 };
 
-struct EstadoEnlaceUartsDTO {
-    bool aceptado;
+struct PerfilEnlaceUartsDTO {
+    uint8_t  versionServidor;
+    uint16_t mtuBytes;
 };
 
 class RPConnectUARTS {
 public:
-    // ¿Cómo lo hace?: Comprueba que versionProtocolo sea 1 y marca aceptado en true para que L1 habilite el slot 0 (UART-S).
-    static void iniciarConversacionSerie(const HandshakeUartsDTO& entrada, EstadoEnlaceUartsDTO& salida) {
-        salida.aceptado = (entrada.versionProtocolo == 1);
+    static PerfilEnlaceUartsDTO iniciarConversacionSerie(const HandshakeUartsDTO& entrada) {
+        if (entrada.versionProtocolo != 1) {
+            throw std::invalid_argument("ProtocolError: version UART-S no soportada (se esperaba 1)");
+        }
+        return PerfilEnlaceUartsDTO{1, static_cast<uint16_t>(RPCBase::CAPACIDAD_BUFFER_COMPARTIDO)};
     }
 
-    // ¿Cómo lo hace?: Actúa como procedimiento vacío de pulso de vida; la recepción del paquete en L1 ya actualiza el temporizador del slot 0.
-    static void notificarEstoyVivoSerie() {
-    }
-
-    // ¿Cómo lo hace?: Actúa como señal formal de desconexión para que L1 notifique a L2 y reinicie el enlace serie en UARTSRuntime.
-    static void cerrarConversacionSerie() {
-    }
+    static void notificarEstoyVivoSerie() {}
+    static void cerrarConversacionSerie() {}
 };
 
 #endif

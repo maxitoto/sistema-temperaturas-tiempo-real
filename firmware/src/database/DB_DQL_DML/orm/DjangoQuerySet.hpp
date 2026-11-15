@@ -1,7 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
-#include "../../DB_DDL/engine/DdlDiagnosticConsole.hpp"
+#include "../../common/DiagnosticConsole.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 #include "../engine/ModuloDQL.hpp"
 #include "../engine/ModuloDML.hpp"
 

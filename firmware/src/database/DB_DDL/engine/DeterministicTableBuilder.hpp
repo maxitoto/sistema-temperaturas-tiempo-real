@@ -1,11 +1,11 @@
 #pragma once
 #include <Arduino.h>
 #include "../standard/PostgresReservedWords.hpp"
-#include "../standard/PostgresSqlStates.hpp"
-#include "../standard/PostgresDataTypes.hpp"
-#include "../standard/PostgresConstraints.hpp"
-#include "DdlDiagnosticConsole.hpp"
-#include "PhysicalSchemaCatalog.hpp"
+#include "../../common/PostgresSqlStates.hpp"
+#include "../../common/PostgresDataTypes.hpp"
+#include "../../common/PostgresConstraints.hpp"
+#include "../../common/DiagnosticConsole.hpp"
+#include "../../common/PhysicalSchemaCatalog.hpp"
 
 namespace DbNotRuntime::Engine {
 
@@ -85,6 +85,7 @@ namespace DbNotRuntime::Engine {
 
             // Validación determinista de modificadores de tipo según PostgreSQL
             bool acceptsMaxLength = (dataType == Standard::PgDataType::VARCHAR ||
+                                     dataType == Standard::PgDataType::TEXT ||
                                      dataType == Standard::PgDataType::CHAR ||
                                      dataType == Standard::PgDataType::NCHAR ||
                                      dataType == Standard::PgDataType::BIT ||
@@ -340,6 +341,22 @@ namespace DbNotRuntime::Engine {
         // Asigna el tablespace o propietario a la tabla en construcción.
         DeterministicTableBuilder& tablespace(const String& tsName) {
             if (!hasAborted) draft.tablespace = tsName;
+            return *this;
+        }
+
+        // Transfiere banderas de comportamiento declarativo (auto_now, auto_now_add, interval, array, comment) a la columna activa.
+        DeterministicTableBuilder& configureColumnMeta(bool autoNowAdd,
+                                                       bool autoNow,
+                                                       Standard::IntervalField intervalFld = Standard::IntervalField::NONE,
+                                                       bool isArr = false,
+                                                       const String& commentTxt = "") {
+            if (!requireActiveColumn("COLUMN META")) return *this;
+            auto& col = draft.columns[currentColIdx];
+            col.autoNowAdd    = autoNowAdd;
+            col.autoNow       = autoNow;
+            col.intervalField = intervalFld;
+            col.isArray       = isArr;
+            col.comment       = commentTxt;
             return *this;
         }
 
