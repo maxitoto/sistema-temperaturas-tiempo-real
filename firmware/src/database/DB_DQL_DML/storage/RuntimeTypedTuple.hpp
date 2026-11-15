@@ -4,37 +4,14 @@
 #include <cstring>
 #include "../../common/PostgresDataTypes.hpp"
 #include "../../common/PhysicalSchemaCatalog.hpp"
+#include "../../common/PgDtoTypes.hpp"
 
 namespace DbRuntime::Storage {
 
     using DbCommon::Standard::PgDataType;
     using DbCommon::Standard::PgValueUnion;
     using DbCommon::Standard::DataTypeUtils;
-
-    template <size_t N>
-    struct PgText {
-        char data[N]{};
-
-        PgText() = default;
-        PgText(const char* str) { asignar(str); }
-        PgText(const String& str) { asignar(str.c_str()); }
-
-        PgText& operator=(const char* str) { asignar(str); return *this; }
-        PgText& operator=(const String& str) { asignar(str.c_str()); return *this; }
-
-        void asignar(const char* str) {
-            if (!str) { data[0] = '\0'; return; }
-            strncpy(data, str, N - 1);
-            data[N - 1] = '\0';
-        }
-
-        operator const char*() const { return data; }
-        operator char*()             { return data; }
-        const char* c_str() const    { return data; }
-        bool empty() const           { return data[0] == '\0'; }
-        char operator[](size_t i) const { return data[i]; }
-        char& operator[](size_t i)      { return data[i]; }
-    };
+    using DbCommon::Dto::PgText;
 
     struct PgCell {
         char columnName[32] = {0};
@@ -50,12 +27,30 @@ namespace DbRuntime::Storage {
             setValue(val, dt);
         }
 
+        PgCell(const char* col, const char* val)
+            : PgCell(String(col ? col : ""), val ? String(val) : String(""), PgDataType::TEXT) {}
+        PgCell(const char* col, const String& val)
+            : PgCell(String(col ? col : ""), val, PgDataType::TEXT) {}
+        PgCell(const char* col, int32_t val)
+            : PgCell(String(col ? col : ""), String(val), PgDataType::INTEGER) {}
+        PgCell(const char* col, uint32_t val)
+            : PgCell(String(col ? col : ""), String(val), PgDataType::BIGINT) {}
+        PgCell(const char* col, int16_t val)
+            : PgCell(String(col ? col : ""), String(val), PgDataType::SMALLINT) {}
+        PgCell(const char* col, bool val)
+            : PgCell(String(col ? col : ""), val ? String("TRUE") : String("FALSE"), PgDataType::BOOLEAN) {}
+        PgCell(const char* col, float val, uint8_t dec = 2)
+            : PgCell(String(col ? col : ""), String(val, static_cast<unsigned int>(dec)), PgDataType::REAL) {}
+
+        template <typename TEnum, typename = std::enable_if_t<std::is_enum_v<TEnum>>>
+        PgCell(const char* col, TEnum val)
+            : PgCell(String(col ? col : ""), String(DbCommon::Dto::PgEnumTraits<TEnum>::toString(val)), PgDataType::ENUM) {}
+
         void setColumnName(const String& col) {
             strncpy(columnName, col.c_str(), sizeof(columnName) - 1);
             columnName[sizeof(columnName) - 1] = '\0';
         }
 
-        // Delega el parseo, normalización de fechas ISO y sincronización de la unión a common/PostgresDataTypes.hpp
         void setValue(const String& literal, PgDataType dt = PgDataType::TEXT) {
             type = dt;
             DataTypeUtils::syncLiteralToUnion(dt, literal, rawText, num, isNull);
@@ -86,21 +81,6 @@ namespace DbRuntime::Storage {
             if (type == PgDataType::BOOLEAN) return num.b;
             return rawText.equalsIgnoreCase("TRUE") || rawText == "1" || rawText.equalsIgnoreCase("T");
         }
-
-        PgCell(const char* col, const char* val)
-            : PgCell(col, val ? String(val) : String(""), PgDataType::TEXT) {}
-        PgCell(const char* col, const String& val)
-            : PgCell(col, val, PgDataType::TEXT) {}
-        PgCell(const char* col, int32_t val)
-            : PgCell(col, String(val), PgDataType::INTEGER) {}
-        PgCell(const char* col, uint32_t val)
-            : PgCell(col, String(val), PgDataType::BIGINT) {}
-        PgCell(const char* col, int16_t val)
-            : PgCell(col, String(val), PgDataType::SMALLINT) {}
-        PgCell(const char* col, bool val)
-            : PgCell(col, val ? "TRUE" : "FALSE", PgDataType::BOOLEAN) {}
-        PgCell(const char* col, float val, uint8_t dec = 2)
-            : PgCell(col, String(val, static_cast<unsigned int>(dec)), PgDataType::REAL) {}
     };
 
     class PgTuple {
@@ -156,6 +136,11 @@ namespace DbRuntime::Storage {
         String getText(const char* colName, const char* fallback = "") const {
             const PgCell* c = findCell(colName);
             return (c && !c->isNull) ? c->rawText : String(fallback);
+        }
+
+        const char* getRawText(const char* colName, const char* defaultVal = "") const {
+            const PgCell* c = findCell(colName);
+            return (c && !c->isNull) ? c->rawText.c_str() : defaultVal;
         }
 
         int16_t getSmallInt(const char* colName, int16_t fallback = 0) const {
@@ -220,47 +205,68 @@ namespace DbRuntime::Storage {
 
         String serializeTsv() const {
             String line = "";
-            line.reserve(cells.size() * 20);
+            line.reserve(cells.size() * 24);
             for (size_t i = 0; i < cells.size(); ++i) {
-                if (i > 0) line += "\t";
-                line += String(cells[i].columnName) + "=" + cells[i].rawText;
+                if (i > 0) line += '\t';
+                line += cells[i].columnName;
+                line += '=';
+                line += cells[i].rawText;
             }
-            line += "\n";
+            line += '\n';
             return line;
         }
 
-        static PgTuple deserializeTsv(const String& line, const DbCommon::Engine::TablePhysicalSchema* schema = nullptr) {
+        static PgTuple deserializeTsvFromCStr(const char* rawLine, const DbCommon::Engine::TablePhysicalSchema* schema = nullptr) {
             PgTuple tuple;
-            String l = line;
-            l.trim();
-            if (l.isEmpty()) return tuple;
+            if (!rawLine) return tuple;
+
+            while (*rawLine == ' ' || *rawLine == '\t' || *rawLine == '\r' || *rawLine == '\n') {
+                ++rawLine;
+            }
+            if (*rawLine == '\0') return tuple;
 
             if (schema) tuple.reserve(schema->columns.size());
 
-            int start = 0;
-            const int len = static_cast<int>(l.length());
-            while (start < len) {
-                int tab = l.indexOf('\t', start);
-                if (tab == -1) tab = len;
-                int eq = l.indexOf('=', start);
-                if (eq != -1 && eq < tab) {
-                    String colName = l.substring(start, eq);
-                    String valStr  = l.substring(eq + 1, tab);
-                    PgDataType dt  = PgDataType::TEXT;
+            const char* p = rawLine;
+            while (*p != '\0' && *p != '\r' && *p != '\n') {
+                const char* tab = strchr(p, '\t');
+                const char* endToken = tab ? tab : (p + strlen(p));
+                while (endToken > p && (*(endToken - 1) == '\r' || *(endToken - 1) == '\n')) {
+                    --endToken;
+                }
+
+                const char* eq = static_cast<const char*>(memchr(p, '=', static_cast<size_t>(endToken - p)));
+                if (eq != nullptr) {
+                    char colBuf[32];
+                    size_t colLen = static_cast<size_t>(eq - p);
+                    if (colLen >= sizeof(colBuf)) colLen = sizeof(colBuf) - 1;
+                    memcpy(colBuf, p, colLen);
+                    colBuf[colLen] = '\0';
+
+                    const char* valStart = eq + 1;
+                    size_t valLen = static_cast<size_t>(endToken - valStart);
+                    String valStr = "";
+                    if (valLen > 0) {
+                        valStr.reserve(valLen);
+                        valStr.concat(valStart, static_cast<unsigned int>(valLen));
+                    }
+
+                    PgDataType dt = PgDataType::TEXT;
                     if (schema) {
-                        const auto* colDef = schema->findColumn(colName);
+                        const auto* colDef = schema->findColumn(colBuf);
                         if (colDef) dt = colDef->dataType;
                     }
-                    tuple.set(colName, valStr, dt);
+                    tuple.set(colBuf, valStr, dt);
                 }
-                start = tab + 1;
+
+                if (!tab) break;
+                p = tab + 1;
             }
             return tuple;
         }
 
-        const char* getRawText(const char* colName, const char* defaultVal = "") const {
-            const PgCell* c = findCell(colName);
-            return (c && !c->isNull) ? c->rawText.c_str() : defaultVal;
+        static PgTuple deserializeTsv(const String& line, const DbCommon::Engine::TablePhysicalSchema* schema = nullptr) {
+            return deserializeTsvFromCStr(line.c_str(), schema);
         }
 
         struct CellView {
@@ -270,13 +276,19 @@ namespace DbRuntime::Storage {
             }
             operator const char*() const { return c_str(""); }
             operator String() const      { return String(c_str("")); }
-            operator int32_t() const     { return (cell && !cell->isNull) ? cell->asInt() : 0; }
-            operator int16_t() const     { return static_cast<int16_t>((cell && !cell->isNull) ? cell->asInt() : 0); }
-            operator uint32_t() const    { return static_cast<uint32_t>((cell && !cell->isNull) ? cell->asBigInt() : 0); }
-            operator uint16_t() const    { return static_cast<uint16_t>((cell && !cell->isNull) ? cell->asInt() : 0); }
-            operator uint8_t() const     { return static_cast<uint8_t>((cell && !cell->isNull) ? cell->asInt() : 0); }
+            operator int64_t() const     { return (cell && !cell->isNull) ? cell->asInt64() : 0; }
+            operator int32_t() const     { return static_cast<int32_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
+            operator int16_t() const     { return static_cast<int16_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
+            operator uint32_t() const    { return static_cast<uint32_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
+            operator uint16_t() const    { return static_cast<uint16_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
+            operator uint8_t() const     { return static_cast<uint8_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator bool() const        { return (cell && !cell->isNull) ? cell->asBool() : false; }
             operator float() const       { return (cell && !cell->isNull) ? cell->asFloat() : 0.0f; }
+            operator double() const      { return (cell && !cell->isNull) ? cell->asDouble() : 0.0; }
+            template <typename TEnum, typename = std::enable_if_t<std::is_enum_v<TEnum>>>
+            operator TEnum() const {
+                return DbCommon::Dto::PgEnumTraits<TEnum>::fromString(c_str(""), static_cast<TEnum>(0));
+            }
 
             template <size_t N>
             operator PgText<N>() const { return PgText<N>(c_str("")); }
@@ -285,6 +297,11 @@ namespace DbRuntime::Storage {
             void operator>>(char (&dest)[N]) const {
                 strncpy(dest, c_str(""), N - 1);
                 dest[N - 1] = '\0';
+            }
+
+            template <typename T>
+            void operator>>(T& dest) const {
+                dest = static_cast<T>(*this);
             }
         };
 

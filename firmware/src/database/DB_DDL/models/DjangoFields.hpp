@@ -4,6 +4,7 @@
 #include <utility>
 #include "../../common/PostgresDataTypes.hpp"
 #include "../../common/PostgresConstraints.hpp"
+#include "../../common/PgDtoTypes.hpp"
 #include "../engine/ModuloDDL.hpp"
 
 namespace DbNotRuntime::Models {
@@ -69,6 +70,15 @@ namespace DbNotRuntime::Models {
         Field&& default_val(const String& literal) {
             def.hasDefault   = true;
             def.defaultValue = literal;
+            return std::move(*this);
+        }
+
+        template <typename TEnum, typename = std::enable_if_t<std::is_enum_v<TEnum>>>
+        Field&& default_val(TEnum enumVal) {
+            static_assert(DbCommon::Dto::PgEnumTraits<TEnum>::isRegistered,
+                          "El enum debe estar registrado con PG_REGISTER_ENUM en PgDtoTypes.hpp");
+            def.hasDefault   = true;
+            def.defaultValue = DbCommon::Dto::PgEnumTraits<TEnum>::toString(enumVal);
             return std::move(*this);
         }
 
@@ -274,7 +284,10 @@ namespace DbNotRuntime::Models {
 
     class TextField : public Field {
     public:
-        explicit TextField(const String& colName) : Field(colName, Standard::PgDataType::TEXT) {}
+        explicit TextField(const String& colName, uint16_t maxLength = 128)
+            : Field(colName, Standard::PgDataType::VARCHAR) {
+            def.maxLength = maxLength;
+        }
     };
 
     class ClobField : public Field {
@@ -363,13 +376,30 @@ namespace DbNotRuntime::Models {
         explicit URLField(const String& colName) : Field(colName, Standard::PgDataType::URI) {}
     };
 
+    template <typename TEnum = void>
     class EnumField : public Field {
     public:
+        // Uso tipado con enum de C++: EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO)
+        explicit EnumField(const String& colName)
+            : Field(colName, Standard::PgDataType::ENUM) {
+            static_assert(DbCommon::Dto::PgEnumTraits<TEnum>::isRegistered,
+                          "El enum debe estar registrado con PG_REGISTER_ENUM en PgDtoTypes.hpp");
+            PgEnumChoices::registerChoices(
+                DbCommon::Dto::PgEnumTraits<TEnum>::typeName(),
+                DbCommon::Dto::PgEnumTraits<TEnum>::labels()
+            );
+            def.customTypeName = DbCommon::Dto::PgEnumTraits<TEnum>::typeName();
+        }
+
+        // Uso legacy por texto: EnumField("rol", "enum_rol_usuario")
         EnumField(const String& colName, const String& registeredEnumTypeName)
             : Field(colName, Standard::PgDataType::ENUM) {
             def.customTypeName = registeredEnumTypeName;
         }
     };
+
+    EnumField(const String&, const String&) -> EnumField<void>;
+    EnumField(const char*, const char*)     -> EnumField<void>;
 
     class DomainField : public Field {
     public:

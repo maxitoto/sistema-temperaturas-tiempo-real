@@ -12,10 +12,9 @@
 
 namespace DbRuntime::Storage {
 
-    // Entrada POD de tamaño fijo (36 bytes): CERO Arduino::String dinámicos, CERO fragmentación de Heap.
     struct IndexEntry {
         char key[32];
-        uint32_t rowPosition; // Byte-offset exacto en /db/<tabla>.tbl (o índice si opera sin SD)
+        uint32_t rowPosition;
 
         IndexEntry() : rowPosition(0) { key[0] = '\0'; }
         IndexEntry(const char* k, uint32_t pos) : rowPosition(pos) {
@@ -40,7 +39,6 @@ namespace DbRuntime::Storage {
         bool isPrimary = false;
         std::vector<IndexEntry> sortedEntries;
 
-        // Normaliza números a ancho fijo con prefijo de signo para que strcmp() ordene numéricamente ("2" < "100")
         static void formatCanonicalComponent(const String& rawVal, char* outBuf, size_t cap) {
             if (rawVal.isEmpty()) {
                 outBuf[0] = '\0';
@@ -58,7 +56,6 @@ namespace DbRuntime::Storage {
                 if (v >= 0) {
                     snprintf(outBuf, cap, "P%010lld", v);
                 } else {
-                    // Complemento para que negativos más pequeños queden antes en orden ASCII
                     long long inv = 9999999999LL + v;
                     if (inv < 0) inv = 0;
                     snprintf(outBuf, cap, "N%010lld", inv);
@@ -92,7 +89,6 @@ namespace DbRuntime::Storage {
             return outKey[0] != '\0';
         }
 
-        // Búsqueda binaria O(log N) por clave exacta (acepta clave cruda o canónica)
         std::vector<uint32_t> lookupEqual(const String& rawTargetKey) const {
             char target[32];
             if (rawTargetKey.indexOf('\x1F') != -1) {
@@ -112,7 +108,6 @@ namespace DbRuntime::Storage {
             return matches;
         }
 
-        // Búsqueda binaria O(log N) por primera columna de un índice simple o compuesto
         std::vector<uint32_t> lookupFirstColumnPrefix(const String& firstColValue) const {
             if (keyColumns.size() <= 1) {
                 return lookupEqual(firstColValue);
@@ -136,7 +131,6 @@ namespace DbRuntime::Storage {
 
         void insertEntry(const char* keyStr, uint32_t pos) {
             if (!keyStr || keyStr[0] == '\0') return;
-            // Si el índice supera las 512 entradas en RAM, descarta la más antigua para acotar memoria
             if (sortedEntries.size() >= 512) {
                 sortedEntries.erase(sortedEntries.begin());
             }
@@ -151,7 +145,6 @@ namespace DbRuntime::Storage {
         static constexpr size_t MAX_SELECT_ROWS_RAM = 32;
 
     private:
-        // Fallback en RAM usado ÚNICAMENTE si la tarjeta MicroSD no está insertada
         std::map<String, std::vector<PgTuple>> fallbackRamRows;
         std::map<String, std::vector<ActiveIndexStructure>> tableIndexes;
         std::map<String, int64_t> sequenceCounters;
@@ -250,7 +243,6 @@ namespace DbRuntime::Storage {
             return true;
         }
 
-        // Lee una única fila directamente desde la MicroSD saltando al byteOffset exacto en O(1)
         bool readRowAtOffset(const String& tableName, uint32_t byteOffset, PgTuple& outTuple) {
             auto lk = lockEngine();
             flushPendingBatchForTable(tableName);
@@ -277,16 +269,20 @@ namespace DbRuntime::Storage {
                 return false;
             }
 
-            String line = f.readStringUntil('\n');
+            char lineBuf[384];
+            size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
             f.close();
 
-            line.trim();
-            if (line.isEmpty()) return false;
-            outTuple = PgTuple::deserializeTsv(line, schema);
+            while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
+                --len;
+            }
+            lineBuf[len] = '\0';
+            if (len == 0) return false;
+
+            outTuple = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
             return true;
         }
 
-        // Recorre una tabla en streaming línea por línea desde la MicroSD (1 sola PgTuple en RAM a la vez)
         template <typename CallbackFn>
         void forEachRowStreaming(const String& tableName, CallbackFn fn) {
             auto lk = lockEngine();
@@ -310,19 +306,22 @@ namespace DbRuntime::Storage {
             File f = SD.open(path.c_str(), FILE_READ);
             if (!f) return;
 
+            char lineBuf[384];
             while (f.available()) {
                 uint32_t offset = static_cast<uint32_t>(f.position());
-                String line = f.readStringUntil('\n');
-                line.trim();
-                if (line.isEmpty()) continue;
+                size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
+                while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
+                    --len;
+                }
+                lineBuf[len] = '\0';
+                if (len == 0) continue;
 
-                PgTuple row = PgTuple::deserializeTsv(line, schema);
+                PgTuple row = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
                 if (!fn(row, offset)) break;
             }
             f.close();
         }
 
-        // Inserta al final del archivo .tbl (FILE_APPEND) y registra su byteOffset exacto en los índices
         bool appendRowAndIndex(const String& tableName, const PgTuple& newRow) {
             auto lk = lockEngine();
             String key = norm(tableName);
@@ -371,7 +370,6 @@ namespace DbRuntime::Storage {
             return true;
         }
 
-        // Reconstruye los índices leyendo en streaming desde la MicroSD sin dejar filas en RAM
         bool rebuildIndexesForTable(const String& tableName) {
             auto lk = lockEngine();
             flushPendingBatchForTable(tableName);
@@ -421,7 +419,6 @@ namespace DbRuntime::Storage {
                 }
             }
 
-            // Escaneo en streaming de 1 sola tupla a la vez para indexar byte-offsets y secuencias IDENTITY
             forEachRowStreaming(tableName, [&](const PgTuple& row, uint32_t offset) -> bool {
                 for (auto& idx : idxList) {
                     char k[32];
@@ -472,7 +469,6 @@ namespace DbRuntime::Storage {
             return current;
         }
 
-        // Carga acotada (máximo MAX_SELECT_ROWS_RAM filas) para operaciones auxiliares
         std::vector<PgTuple> getTableRows(const String& tableName) {
             std::vector<PgTuple> out;
             forEachRowStreaming(tableName, [&](const PgTuple& r, uint32_t) -> bool {
@@ -487,7 +483,6 @@ namespace DbRuntime::Storage {
             return fallbackRamRows[norm(tableName)];
         }
 
-        // Reemplaza de forma atómica el contenido de una tabla (en MicroSD o en fallback RAM) y reconstruye sus índices de byte-offset
         bool replaceTableRows(const String& tableName, const std::vector<PgTuple>& newRows) {
             auto lk = lockEngine();
             flushPendingBatchForTable(tableName);
@@ -504,13 +499,27 @@ namespace DbRuntime::Storage {
             String path = cat.tableDataFilePath(tableName);
             String tmpPath = path + ".tmp";
 
-            String payload = "";
-            for (const auto& r : newRows) {
-                payload += r.serializeTsv();
+            if (sd.existeArchivo(tmpPath.c_str())) {
+                sd.eliminarArchivo(tmpPath.c_str());
             }
-            if (!sd.escribirArchivo(tmpPath.c_str(), payload.c_str())) {
+
+            File fTmp = SD.open(tmpPath.c_str(), FILE_WRITE);
+            if (!fTmp) {
                 return false;
             }
+
+            for (const auto& r : newRows) {
+                String rowTsv = r.serializeTsv();
+                const size_t expected = rowTsv.length();
+                if (expected > 0 && fTmp.write(reinterpret_cast<const uint8_t*>(rowTsv.c_str()), expected) != expected) {
+                    fTmp.close();
+                    sd.eliminarArchivo(tmpPath.c_str());
+                    return false;
+                }
+            }
+            fTmp.flush();
+            fTmp.close();
+
             if (sd.existeArchivo(path.c_str())) {
                 sd.eliminarArchivo(path.c_str());
             }

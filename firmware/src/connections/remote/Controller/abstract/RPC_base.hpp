@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdexcept>
+#include "../../../../database/common/PgDtoTypes.hpp"
 #include "../marshalling/encode.hpp"
 
 using MascaraClientes = uint16_t;
@@ -14,12 +15,6 @@ enum class SemanticaEntrega : uint8_t {
     TAL_VEZ             = 0,
     AL_MENOS_UNA_VEZ    = 1,
     EXACTAMENTE_UNA_VEZ = 2
-};
-
-enum class RolUsuario : uint8_t {
-    NINGUNO  = 0,
-    NO_ADMIN = 1,
-    ADMIN    = 2
 };
 
 enum class CanalSalida : uint8_t {

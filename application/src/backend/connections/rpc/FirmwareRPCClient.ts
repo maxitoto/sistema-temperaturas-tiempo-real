@@ -1,20 +1,50 @@
 import { UARTSClient } from "../interfaces/UART-S/UARTSClient";
 import { WiFiClient } from "../interfaces/WiFi/WiFiClient";
-import {
-    CodecRPC,
-    ConfiguracionWiFiCliente,
-    DiagnosticoSistemaCliente,
-    EstadisticasUsuariosCliente,
-    hashNombreProcedimiento,
-    LecturaSensorCliente,
-    PerfilEnlaceUartsCliente,
-    PerfilUsuarioCliente,
-    ProcedimientoSistemaRPC,
-    ResumenUsuarioCliente,
-    SesionIniciadaCliente
-} from "./CodecRPC";
+import { StructCodec, T, struct, InferDTO } from "./SchemaBuilder";
 
+export enum ProcedimientoSistemaRPC {
+    L1_HANDSHAKE_UARTS    = 0x0101,
+    L1_KEEPALIVE_UARTS    = 0x0102,
+    L1_CERRAR_UARTS       = 0x0103,
+    L1_KEEPALIVE_WIFI     = 0x0104,
+    L1_SUSCRIBIR_UDP_WIFI = 0x0105,
+    L1_CERRAR_WIFI        = 0x0106,
+
+    L2_LOGIN_USUARIO      = 0x0201,
+    L2_LOGOUT_USUARIO     = 0x0202
+}
+
+export const BANDERA_ERROR_RPC = 0x8000;
 export type MedioActivoCliente = "NINGUNO" | "UART-S" | "WIFI";
+
+// DTOs internos de L1
+export const HandshakeUartsDTO = struct({
+    versionProtocolo: T.uint8()
+});
+
+export const PerfilEnlaceUartsDTO = struct({
+    versionServidor: T.uint8(),
+    mtuBytes:        T.posSmallInt()
+});
+export type PerfilEnlaceUartsCliente = InferDTO<typeof PerfilEnlaceUartsDTO>;
+
+const SuscripcionUdpDTO = struct({
+    puertoEscuchaCliente: T.posSmallInt()
+});
+
+const CanalStreamingUdpDTO = struct({
+    puertoEmisorServidor: T.posSmallInt()
+});
+
+export function hashNombreProcedimiento(nombre: string): number {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < nombre.length; i++) {
+        h ^= nombre.charCodeAt(i) & 0xFF;
+        h = Math.imul(h, 16777619) >>> 0;
+    }
+    const id15 = ((h ^ (h >>> 15)) & 0x7FFF) >>> 0;
+    return id15 < 0x0300 ? (id15 + 0x0300) & 0x7FFF : id15;
+}
 
 interface PeticionPendiente {
     resolve: (payload: Buffer) => void;
@@ -61,6 +91,48 @@ export class FirmwareRPCClient {
         });
     }
 
+    static empaquetarPeticion(idTicket: number, idProc: number, payloadDto: Buffer = Buffer.alloc(0)): Buffer {
+        const longitudPayload = 4 + payloadDto.length;
+        const frame = Buffer.alloc(8 + payloadDto.length);
+        frame.writeUInt32BE(longitudPayload, 0);
+        frame.writeUInt16BE(idTicket & 0xFFFF, 4);
+        frame.writeUInt16BE(idProc & 0xFFFF, 6);
+        if (payloadDto.length > 0) {
+            payloadDto.copy(frame, 8);
+        }
+        return frame;
+    }
+
+    static desempaquetarRespuesta(frameCompleto: Buffer): {
+        idTicket: number;
+        idProc: number;
+        esError: boolean;
+        payload: Buffer;
+    } | null {
+        if (frameCompleto.length < 8) return null;
+        const longitudUtil = frameCompleto.readUInt32BE(0);
+        if (frameCompleto.length < 4 + longitudUtil) return null;
+        const idTicket = frameCompleto.readUInt16BE(4);
+        const idProcCrudo = frameCompleto.readUInt16BE(6);
+        const esError = (idProcCrudo & BANDERA_ERROR_RPC) !== 0;
+        const idProc = idProcCrudo & ~BANDERA_ERROR_RPC;
+        const payload = frameCompleto.subarray(8, 4 + longitudUtil);
+        return { idTicket, idProc, esError, payload };
+    }
+
+    static decodificarExcepcionCruda(idProc: number, payload: Buffer): Error {
+        const finNulo = payload.indexOf(0);
+        const textoCrudo = payload
+            .subarray(0, finNulo === -1 ? payload.length : finNulo)
+            .toString("utf8")
+            .trim();
+        return new Error(
+            textoCrudo.length > 0
+                ? textoCrudo
+                : `RuntimeError: excepción remota en procedimiento 0x${idProc.toString(16)}`
+        );
+    }
+
     private registrarLogVisor(linea: string): void {
         const entrada = `${new Date().toISOString()} ${linea}`;
         this.logsVisor.push(entrada);
@@ -80,8 +152,6 @@ export class FirmwareRPCClient {
         this.logsVisor = [];
     }
 
-    // --- L1: Conexión Física ---
-
     async conectarPorSerie(rutaPuerto: string): Promise<PerfilEnlaceUartsCliente> {
         await this.desconectar();
         await this.uarts.conectar(rutaPuerto);
@@ -90,9 +160,9 @@ export class FirmwareRPCClient {
         try {
             const resp = await this.invocarPorId(
                 ProcedimientoSistemaRPC.L1_HANDSHAKE_UARTS,
-                CodecRPC.codificarHandshakeUarts(1)
+                HandshakeUartsDTO.serialize({ versionProtocolo: 1 })
             );
-            const perfil = CodecRPC.decodificarPerfilEnlaceUarts(resp);
+            const perfil = PerfilEnlaceUartsDTO.deserialize(resp);
             this.iniciarPulsoKeepaliveAutomatico();
             return perfil;
         } catch (err) {
@@ -118,7 +188,6 @@ export class FirmwareRPCClient {
 
     async desconectar(): Promise<void> {
         this.detenerPulsoKeepaliveAutomatico();
-
         try {
             if (this.medioActivo === "UART-S" && this.uarts.estaConectado()) {
                 await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_UARTS);
@@ -126,228 +195,17 @@ export class FirmwareRPCClient {
                 await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_WIFI);
             }
         } catch {
-            // Si el enlace físico ya cayó, continuamos con el cierre local
+            // Ignora errores si el medio físico ya se cerró
         }
-
         await this.uarts.cerrar();
         await this.wifi.cerrar();
         this.limpiarEstadoAlDesconectar();
     }
 
-    // --- L2: Autenticación (RPAuth lanza excepción si falla el login o si está bloqueado) ---
-
-    async iniciarSesion(usuario: string, clavePlana: string): Promise<SesionIniciadaCliente> {
-        const payload = await this.invocarPorId(
-            ProcedimientoSistemaRPC.L2_LOGIN_USUARIO,
-            CodecRPC.codificarLogin(usuario, clavePlana)
-        );
-        return CodecRPC.decodificarSesionIniciada(payload);
-    }
-
-    async cerrarSesion(): Promise<void> {
-        try {
-            await this.invocarPorId(ProcedimientoSistemaRPC.L2_LOGOUT_USUARIO);
-        } finally {
-            await this.uarts.cerrar();
-            await this.wifi.cerrar();
-            this.limpiarEstadoAlDesconectar();
-        }
-    }
-
-    // --- L3: Invocador Semántico Genérico por Nombre (Igual que llamadoSemantico en C++) ---
-
-    async llamarProcedimiento<T>(
-        nombreProcedimiento: string,
-        payloadEntrada: Buffer,
-        decodificadorSalida: (raw: Buffer) => T
-    ): Promise<T> {
-        const idProc = hashNombreProcedimiento(nombreProcedimiento);
-        const raw = await this.invocarPorId(idProc, payloadEntrada);
-        return decodificadorSalida(raw);
-    }
-
-    async llamarProcedimientoVoid(
-        nombreProcedimiento: string,
-        payloadEntrada: Buffer = Buffer.alloc(0)
-    ): Promise<void> {
-        const idProc = hashNombreProcedimiento(nombreProcedimiento);
-        await this.invocarPorId(idProc, payloadEntrada);
-    }
-
-    // Suscribe a cualquier procedimiento registrado con llamadoSemantico.talVez en el ESP32
-    async suscribirStreamTalVez<T>(
-        nombreProcedimiento: string,
-        decodificadorSalida: (raw: Buffer) => T,
-        onMensajeStream?: (dato: T) => void
-    ): Promise<T> {
-        if (this.medioActivo === "WIFI" && !this.udpWiFiVinculado) {
-            const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
-            const respUdp = await this.invocarPorId(
-                ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
-                CodecRPC.codificarSuscripcionUdp(puertoUdp)
-            );
-            CodecRPC.decodificarCanalStreamingUdp(respUdp);
-            this.udpWiFiVinculado = true;
-        }
-
-        const idProc = hashNombreProcedimiento(nombreProcedimiento);
-        if (onMensajeStream) {
-            this.listenersStreamPorProc.set(idProc, (payload: Buffer) => {
-                onMensajeStream(decodificadorSalida(payload));
-            });
-        }
-
-        const primerPayload = await this.invocarPorId(idProc, Buffer.alloc(0));
-        const primerDato = decodificadorSalida(primerPayload);
-        onMensajeStream?.(primerDato);
-        return primerDato;
-    }
-
-    // --- Procedimientos de Dominio (RPSensor y RPSistema) ---
-
-    async suscribirSensoresTiempoReal(
-        onNuevasLecturas?: (lecturas: LecturaSensorCliente[]) => void
-    ): Promise<LecturaSensorCliente[]> {
-        return this.suscribirStreamTalVez(
-            "suscribirSensoresTiempoReal",
-             payload => CodecRPC.decodificarHistorialSensores(payload),
-            onNuevasLecturas
-        );
-    }
-
-    async obtenerCensosPorMac(macHex: string, limiteRegistros = 32): Promise<LecturaSensorCliente[]> {
-        return this.llamarProcedimiento(
-            "obtenerCensosPorMac",
-            CodecRPC.codificarFiltroPorMac(macHex, limiteRegistros),
-            payload => CodecRPC.decodificarHistorialSensores(payload)
-        );
-    }
-
-    async obtenerCensosPorMacYFecha(
-        macHex: string,
-        timestampDesde: number,
-        timestampHasta: number,
-        limiteRegistros = 32
-    ): Promise<LecturaSensorCliente[]> {
-        return this.llamarProcedimiento(
-            "obtenerCensosPorMacYFecha",
-            CodecRPC.codificarFiltroPorMacYFecha(macHex, timestampDesde, timestampHasta, limiteRegistros),
-            payload => CodecRPC.decodificarHistorialSensores(payload)
-        );
-    }
-
-    async actualizarConfiguracionWiFi(
-        ssidSta: string,
-        claveSta: string,
-        ssidAp: string,
-        claveAp: string
-    ): Promise<ConfiguracionWiFiCliente> {
-        return this.llamarProcedimiento(
-            "actualizarConfiguracionWiFi",
-            CodecRPC.codificarConfiguracionWiFi(ssidSta, claveSta, ssidAp, claveAp),
-            payload => CodecRPC.decodificarConfiguracionWiFi(payload)
-        );
-    }
-
-    async obtenerConfiguracionWiFi(): Promise<ConfiguracionWiFiCliente> {
-        return this.llamarProcedimiento(
-            "obtenerConfiguracionWiFi",
-            Buffer.alloc(0),
-            payload => CodecRPC.decodificarConfiguracionWiFi(payload)
-        );
-    }
-
-    async ejecutarDiagnosticoSistema(): Promise<DiagnosticoSistemaCliente> {
-        return this.llamarProcedimiento(
-            "ejecutarDiagnosticoSistema",
-            Buffer.alloc(0),
-            payload => CodecRPC.decodificarDiagnosticoSistema(payload)
-        );
-    }
-
-    async reiniciarHardware(): Promise<void> {
-        await this.llamarProcedimientoVoid("reiniciarHardware");
-    }
-
-    // --- Procedimientos de Dominio Usuarios (RPUsuario) ---
-
-    async obtenerUsuarioPorNombre(usuario: string): Promise<PerfilUsuarioCliente> {
-        return this.llamarProcedimiento(
-            "obtenerUsuarioPorNombre",
-            CodecRPC.codificarConsultaUsuarioNombre(usuario),
-            payload => CodecRPC.decodificarPerfilUsuario(payload)
-        );
-    }
-
-    async listarUsuarios(
-        limiteRegistros = 32,
-        offsetRegistros = 0,
-        soloActivos = false
-    ): Promise<ResumenUsuarioCliente[]> {
-        return this.llamarProcedimiento(
-            "listarUsuarios",
-            CodecRPC.codificarFiltroListadoUsuarios(limiteRegistros, offsetRegistros, soloActivos),
-            payload => CodecRPC.decodificarListaUsuarios(payload)
-        );
-    }
-
-    async crearUsuario(
-        usuario: string,
-        clavePlana: string,
-        rol = 1
-    ): Promise<PerfilUsuarioCliente> {
-        return this.llamarProcedimiento(
-            "crearUsuario",
-            CodecRPC.codificarCrearUsuario(usuario, clavePlana, rol),
-            payload => CodecRPC.decodificarPerfilUsuario(payload)
-        );
-    }
-
-    async actualizarRolYEstadoUsuario(
-        usuario: string,
-        nuevoRol: number,
-        activa: boolean
-    ): Promise<PerfilUsuarioCliente> {
-        return this.llamarProcedimiento(
-            "actualizarRolYEstadoUsuario",
-            CodecRPC.codificarActualizarUsuario(usuario, nuevoRol, activa),
-            payload => CodecRPC.decodificarPerfilUsuario(payload)
-        );
-    }
-
-    async cambiarContrasenaUsuario(
-        usuario: string,
-        claveActual: string,
-        claveNueva: string
-    ): Promise<PerfilUsuarioCliente> {
-        return this.llamarProcedimiento(
-            "cambiarContrasenaUsuario",
-            CodecRPC.codificarCambiarContrasena(usuario, claveActual, claveNueva),
-            payload => CodecRPC.decodificarPerfilUsuario(payload)
-        );
-    }
-
-    async desbloquearUsuario(usuario: string): Promise<PerfilUsuarioCliente> {
-        return this.llamarProcedimiento(
-            "desbloquearUsuario",
-            CodecRPC.codificarConsultaUsuarioNombre(usuario),
-            payload => CodecRPC.decodificarPerfilUsuario(payload)
-        );
-    }
-
-    async eliminarUsuario(usuario: string): Promise<void> {
-        await this.llamarProcedimientoVoid(
-            "eliminarUsuario",
-            CodecRPC.codificarConsultaUsuarioNombre(usuario)
-        );
-    }
-
-    async obtenerEstadisticasUsuarios(): Promise<EstadisticasUsuariosCliente> {
-        return this.llamarProcedimiento(
-            "obtenerEstadisticasUsuarios",
-            Buffer.alloc(0),
-            payload => CodecRPC.decodificarEstadisticasUsuarios(payload)
-        );
+    async cerrarTransporteLocal(): Promise<void> {
+        await this.uarts.cerrar();
+        await this.wifi.cerrar();
+        this.limpiarEstadoAlDesconectar();
     }
 
     estaConectado(): boolean {
@@ -358,15 +216,30 @@ export class FirmwareRPCClient {
         return this.medioActivo;
     }
 
-    private invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0)): Promise<Buffer> {
+    async asegurarCanalUdpStream(): Promise<void> {
+        if (this.medioActivo === "WIFI" && !this.udpWiFiVinculado) {
+            const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
+            const respUdp = await this.invocarPorId(
+                ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
+                SuscripcionUdpDTO.serialize({ puertoEscuchaCliente: puertoUdp })
+            );
+            CanalStreamingUdpDTO.deserialize(respUdp);
+            this.udpWiFiVinculado = true;
+        }
+    }
+
+    registrarListenerStream(idProc: number, cb: (payload: Buffer) => void): void {
+        this.listenersStreamPorProc.set(idProc, cb);
+    }
+
+    invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0)): Promise<Buffer> {
         if (this.medioActivo === "NINGUNO") {
             return Promise.reject(new Error("ConnectionError: el cliente no está conectado al servidor ESP32"));
         }
 
         const idTicket = this.proximoTicket;
         this.proximoTicket = (this.proximoTicket % 65530) + 1;
-
-        const frame = CodecRPC.empaquetarPeticion(idTicket, idProc, payloadDto);
+        const frame = FirmwareRPCClient.empaquetarPeticion(idTicket, idProc, payloadDto);
 
         return new Promise<Buffer>((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -389,25 +262,21 @@ export class FirmwareRPCClient {
     }
 
     private procesarFrameRecibido(frameCompleto: Buffer): void {
-        const desglose = CodecRPC.desempaquetarRespuesta(frameCompleto);
-        if (!desglose) {
-            return;
-        }
+        const desglose = FirmwareRPCClient.desempaquetarRespuesta(frameCompleto);
+        if (!desglose) return;
 
-        // 1. Si coincide con un ticket de llamada RPC en espera, resuelve el dato o lanza la excepción cruda
         const pendiente = this.pendientes.get(desglose.idTicket);
         if (pendiente) {
             clearTimeout(pendiente.timer);
             this.pendientes.delete(desglose.idTicket);
             if (desglose.esError) {
-                pendiente.reject(CodecRPC.decodificarExcepcionCruda(desglose.idProc, desglose.payload));
+                pendiente.reject(FirmwareRPCClient.decodificarExcepcionCruda(desglose.idProc, desglose.payload));
             } else {
                 pendiente.resolve(desglose.payload);
             }
             return;
         }
 
-        // 2. Si es una emisión periódica de cualquier procedimiento con semántica talVez, notifica a su listener
         if (!desglose.esError) {
             const listenerStream = this.listenersStreamPorProc.get(desglose.idProc);
             if (listenerStream) {
@@ -428,9 +297,7 @@ export class FirmwareRPCClient {
             if (proc !== null) {
                 this.invocarPorId(proc).catch(err => {
                     this.registrarLogVisor(`[KEEPALIVE FALLÓ] ${err.message}. Cerrando conexión.`);
-                    void this.uarts.cerrar();
-                    void this.wifi.cerrar();
-                    this.limpiarEstadoAlDesconectar();
+                    void this.cerrarTransporteLocal();
                 });
             }
         }, FirmwareRPCClient.INTERVALO_KEEPALIVE_MS);
@@ -454,5 +321,84 @@ export class FirmwareRPCClient {
         }
         this.pendientes.clear();
     }
-
 }
+
+export const clienteFirmware = new FirmwareRPCClient();
+
+/**
+ * Constructor Declarativo de Procedimientos Remotos Cliente (Espejo de llamadoSemantico en C++)
+ */
+class ConstructorLlamadoCliente {
+    constructor(private readonly transporte: FirmwareRPCClient) {}
+
+    alMenosUnaVez<Out = void>(
+        nombre: string,
+        entradaCodec?: null,
+        salidaCodec?: { deserialize(b: Buffer): Out } | null
+    ): () => Promise<Out>;
+    alMenosUnaVez<In extends Record<string, any>, Out = void>(
+        nombre: string,
+        entradaCodec: StructCodec<In>,
+        salidaCodec?: { deserialize(b: Buffer): Out } | null
+    ): (entrada: In) => Promise<Out>;
+    alMenosUnaVez(
+        nombre: string,
+        entradaCodec: StructCodec<any> | null = null,
+        salidaCodec: { deserialize(b: Buffer): any } | null = null
+    ) {
+        const idProc = hashNombreProcedimiento(nombre);
+        return async (entrada?: any): Promise<any> => {
+            const payload = entradaCodec && entrada !== undefined
+                ? entradaCodec.serialize(entrada)
+                : Buffer.alloc(0);
+            const raw = await this.transporte.invocarPorId(idProc, payload);
+            return salidaCodec ? salidaCodec.deserialize(raw) : undefined;
+        };
+    }
+
+    exactamenteUnaVez<Out = void>(
+        nombre: string,
+        entradaCodec?: null,
+        salidaCodec?: { deserialize(b: Buffer): Out } | null
+    ): () => Promise<Out>;
+    exactamenteUnaVez<In extends Record<string, any>, Out = void>(
+        nombre: string,
+        entradaCodec: StructCodec<In>,
+        salidaCodec?: { deserialize(b: Buffer): Out } | null
+    ): (entrada: In) => Promise<Out>;
+    exactamenteUnaVez(
+        nombre: string,
+        entradaCodec: StructCodec<any> | null = null,
+        salidaCodec: { deserialize(b: Buffer): any } | null = null
+    ) {
+        const idProc = hashNombreProcedimiento(nombre);
+        return async (entrada?: any): Promise<any> => {
+            const payload = entradaCodec && entrada !== undefined
+                ? entradaCodec.serialize(entrada)
+                : Buffer.alloc(0);
+            const raw = await this.transporte.invocarPorId(idProc, payload);
+            return salidaCodec ? salidaCodec.deserialize(raw) : undefined;
+        };
+    }
+
+    talVez<Out>(
+        nombre: string,
+        salidaCodec: { deserialize(b: Buffer): Out }
+    ) {
+        const idProc = hashNombreProcedimiento(nombre);
+        return async (onStreamUpdate?: (dato: Out) => void): Promise<Out> => {
+            await this.transporte.asegurarCanalUdpStream();
+            if (onStreamUpdate) {
+                this.transporte.registrarListenerStream(idProc, raw => {
+                    onStreamUpdate(salidaCodec.deserialize(raw));
+                });
+            }
+            const primerRaw = await this.transporte.invocarPorId(idProc, Buffer.alloc(0));
+            const primerDato = salidaCodec.deserialize(primerRaw);
+            onStreamUpdate?.(primerDato);
+            return primerDato;
+        };
+    }
+}
+
+export const llamadoCliente = new ConstructorLlamadoCliente(clienteFirmware);

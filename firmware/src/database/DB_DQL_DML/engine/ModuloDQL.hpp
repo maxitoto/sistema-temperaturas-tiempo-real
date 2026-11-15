@@ -955,7 +955,7 @@ namespace DbRuntime::Engine {
             }
 
             lastCost.rowsProduced = static_cast<uint16_t>(workingRows.size());
-            console.reportSuccess("SELECT", plan.fromTable, String(workingRows.size()) + " rows");
+            console.reportSuccess("SELECT", plan.fromTable.c_str(), "OK");
             if (workingRows.size() > Storage::RuntimeStorageAndIndexManager::MAX_SELECT_ROWS_RAM) {
                 console.raiseError(
                     SqlState::DATA_EXCEPTION, "SELECT", plan.fromTable, "",

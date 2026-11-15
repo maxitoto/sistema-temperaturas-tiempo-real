@@ -42,7 +42,7 @@ namespace DbNotRuntime::PhysicalModels {
                     CharField("usuario", 16).unique(true),
                     CharField("salt", 8).default_val("SALT"),
                     TextField("contrasena_hash"),
-                    EnumField("rol", "enum_rol_usuario").default_val("NINGUNO"),
+                    EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO),
                     SmallIntegerField("intentos_fallidos")
                         .check(
                             "intentos_fallidos >= 0 AND intentos_fallidos <= 3",

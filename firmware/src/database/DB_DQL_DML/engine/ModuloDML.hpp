@@ -516,7 +516,7 @@ namespace DbRuntime::Engine {
 
                 lastCost.rowsProduced = result.affectedRows;
                 result.success = true;
-                console.reportSuccess("UPDATE", tableName, String(result.affectedRows) + " rows updated");
+                console.reportSuccess("UPDATE", tableName.c_str(), "OK");
             }
             result.cost = lastCost;
             return result;
@@ -691,7 +691,7 @@ namespace DbRuntime::Engine {
 
                 lastCost.rowsProduced = result.affectedRows;
                 result.success = true;
-                console.reportSuccess("DELETE", tableName, String(result.affectedRows) + " rows deleted");
+                console.reportSuccess("DELETE", tableName.c_str(), "OK");
             }
             result.cost = lastCost;
             return result;
@@ -760,7 +760,7 @@ namespace DbRuntime::Engine {
                 }
                 lastCost.rowsProduced = result.affectedRows;
                 result.success = true;
-                console.reportSuccess("MERGE", targetTable, String(result.affectedRows) + " rows merged");
+                console.reportSuccess("MERGE", targetTable.c_str(), "OK");
             }
             result.cost = lastCost;
             return result;

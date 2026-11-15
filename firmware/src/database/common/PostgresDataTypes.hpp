@@ -461,9 +461,10 @@ namespace DbCommon::Standard {
                 }
 
                 case PgDataType::BOOLEAN: {
-                    String up = literal;
-                    up.toUpperCase();
-                    if (up == "TRUE" || up == "FALSE" || up == "1" || up == "0" || up == "T" || up == "F") {
+                    const char* s = literal.c_str();
+                    if (strcasecmp(s, "TRUE") == 0 || strcasecmp(s, "FALSE") == 0 ||
+                        strcmp(s, "1") == 0 || strcmp(s, "0") == 0 ||
+                        strcasecmp(s, "T") == 0 || strcasecmp(s, "F") == 0) {
                         return true;
                     }
                     outSqlState = SqlState::INVALID_TEXT_REPRESENTATION;
@@ -637,9 +638,8 @@ namespace DbCommon::Standard {
                     break;
 
                 case PgDataType::BOOLEAN: {
-                    String up = outNormalizedText;
-                    up.toUpperCase();
-                    outUnion.b        = (up == "TRUE" || up == "1" || up == "T");
+                    const char* s = outNormalizedText.c_str();
+                    outUnion.b        = (strcasecmp(s, "TRUE") == 0 || strcmp(s, "1") == 0 || strcasecmp(s, "T") == 0);
                     outNormalizedText = outUnion.b ? "TRUE" : "FALSE";
                     break;
                 }
@@ -689,20 +689,25 @@ namespace DbCommon::Standard {
             }
             if (dt == PgDataType::BOOLEAN) {
                 bool a = cellUnion.b;
-                String up = rhsLiteral;
-                up.toUpperCase();
-                bool b = (up == "TRUE" || up == "1" || up == "T");
+                const char* s = rhsLiteral.c_str();
+                bool b = (strcasecmp(s, "TRUE") == 0 || strcmp(s, "1") == 0 || strcasecmp(s, "T") == 0);
                 return (a == b) ? 0 : (a ? 1 : -1);
             }
             if (isTemporalOrEpochComparable(dt)) {
-                String normRhs;
-                PgValueUnion rhsUnion;
-                bool rhsNull = false;
-                syncLiteralToUnion(dt, rhsLiteral, normRhs, rhsUnion, rhsNull);
-                if (cellUnion.i64 != 0 && rhsUnion.i64 != 0) {
-                    return (cellUnion.i64 < rhsUnion.i64) ? -1 : ((cellUnion.i64 > rhsUnion.i64) ? 1 : 0);
+                String dummyState, dummyErr;
+                int64_t rhsEpoch = 0;
+                bool ok = false;
+                if (dt == PgDataType::DATE)              ok = parseIsoDate(rhsLiteral, rhsEpoch, dummyState, dummyErr);
+                else if (dt == PgDataType::TIME)         ok = parseIsoTime(rhsLiteral, false, rhsEpoch, dummyState, dummyErr);
+                else if (dt == PgDataType::TIME_TZ)      ok = parseIsoTime(rhsLiteral, true, rhsEpoch, dummyState, dummyErr);
+                else if (dt == PgDataType::TIMESTAMP)    ok = parseIsoTimestamp(rhsLiteral, false, rhsEpoch, dummyState, dummyErr);
+                else if (dt == PgDataType::TIMESTAMP_TZ) ok = parseIsoTimestamp(rhsLiteral, true, rhsEpoch, dummyState, dummyErr);
+                else if (dt == PgDataType::INTERVAL)     ok = parseIntervalSeconds(rhsLiteral, rhsEpoch, dummyState, dummyErr);
+
+                if (ok && cellUnion.i64 != 0 && rhsEpoch != 0) {
+                    return (cellUnion.i64 < rhsEpoch) ? -1 : ((cellUnion.i64 > rhsEpoch) ? 1 : 0);
                 }
-                return strcmp(cellRawText.c_str(), normRhs.c_str());
+                return strcmp(cellRawText.c_str(), rhsLiteral.c_str());
             }
             return strcmp(cellRawText.c_str(), rhsLiteral.c_str());
         }
