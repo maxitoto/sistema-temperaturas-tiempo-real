@@ -16,8 +16,8 @@ struct SnapshotSensor {
     char         mac2[3];
     float        tempCruda;
     float        tempCorregida;
-    float        umbralSuperior;
-    float        umbralInferior;
+    float        umbral_sup;
+    float        umbral_inf;
     float        offset;
     float        medicionAguaHirviendo;
     float        medicionAguaHelada;
@@ -56,6 +56,7 @@ public:
     static constexpr float UMBRAL_MAX_DEFAULT = 126.0f;
     static constexpr float UMBRAL_MIN_DEFAULT = -55.0f;
     static constexpr float OFFSET_DEFAULT     = 0.0f;
+    static constexpr float TEMP_MIN_C = -55.0f, TEMP_MAX_C = 126.0f, OFFSET_MAX_ABS_C = 20.0f;
 
 private:
     bool          activo                = false;
@@ -66,11 +67,11 @@ private:
     char          mac[17]               = "0000000000000000";
     char          mac3[4]               = "000";
     char          mac2[3]               = "00";
-    float         umbralSuperior        = UMBRAL_MAX_DEFAULT;
-    float         umbralInferior        = UMBRAL_MIN_DEFAULT;
+    float         umbral_sup            = UMBRAL_MAX_DEFAULT;
+    float         umbral_inf            = UMBRAL_MIN_DEFAULT;
     float         offset                = OFFSET_DEFAULT;
-    float         correccionSuperior    = 0.0f; // Temperatura medida en agua hirviendo (3 min)
-    float         correccionInferior    = 0.0f; // Temperatura medida en agua con hielo (3 min)
+    float         error_sup    = 0.0f; // Temperatura medida en agua hirviendo (3 min)
+    float         error_inf    = 0.0f; // Temperatura medida en agua con hielo (3 min)
     float         escalaM               = 1.0f; // Pendiente precalculada O(1)
     float         ordenadaB             = 0.0f; // Ordenada precalculada O(1)
     EstadoSensor  estado                = EstadoSensor::SLOT_VACIO;
@@ -82,7 +83,6 @@ private:
     uint8_t       resolucionBits        = 12;
     bool          alimentacionParasita  = false;
     bool          enAlarma              = false;
-    int16_t       datoUsuario           = 0;
     uint32_t      ultimoTimestampMs     = 0;
     uint8_t       scratchpad[9]         = {0};
 
@@ -99,11 +99,11 @@ public:
         strncpy(mac, "0000000000000000", sizeof(mac));
         strncpy(mac3, "000", sizeof(mac3));
         strncpy(mac2, "00", sizeof(mac2));
-        umbralSuperior        = UMBRAL_MAX_DEFAULT;
-        umbralInferior        = UMBRAL_MIN_DEFAULT;
+        umbral_sup        = UMBRAL_MAX_DEFAULT;
+        umbral_inf        = UMBRAL_MIN_DEFAULT;
         offset                = OFFSET_DEFAULT;
-        correccionSuperior    = 0.0f;
-        correccionInferior    = 0.0f;
+        error_sup    = 0.0f;
+        error_inf    = 0.0f;
         escalaM               = 1.0f;
         ordenadaB             = 0.0f;
         estado                = EstadoSensor::SLOT_VACIO;
@@ -115,7 +115,6 @@ public:
         resolucionBits        = 12;
         alimentacionParasita  = false;
         enAlarma              = false;
-        datoUsuario           = 0;
         ultimoTimestampMs     = 0;
         memset(scratchpad, 0, sizeof(scratchpad));
     }
@@ -142,10 +141,10 @@ public:
 
     // Precalcula m y b una sola vez para que cada lectura sea O(1): T_corr = m * T_cruda + b
     void recalcularRectaCalibracion(float refCongelacion = 0.0f, float refEbullicion = 100.0f) {
-        float deltaMedido = correccionSuperior - correccionInferior;
+        float deltaMedido = error_sup - error_inf;
         if (fabsf(deltaMedido) > 1.0f && fabsf(refEbullicion - refCongelacion) > 1.0f) {
             escalaM   = (refEbullicion - refCongelacion) / deltaMedido;
-            ordenadaB = refCongelacion - (escalaM * correccionInferior) + offset;
+            ordenadaB = refCongelacion - (escalaM * error_inf) + offset;
         } else {
             escalaM   = 1.0f;
             ordenadaB = offset;
@@ -164,16 +163,18 @@ public:
     void setHidratadoDB(bool h)                { hidratadoDB = h; }
     void setIdSensorDB(int32_t id)             { idSensorDB = id; }
     void setIndiceSlot(uint8_t s)              { indiceSlot = s; }
-    void setUmbralSuperior(float v)            { umbralSuperior = v; }
-    void setUmbralInferior(float v)            { umbralInferior = v; }
-    void setUmbrales(float sup, float inf)     { umbralSuperior = sup; umbralInferior = inf; }
+    static float limitarTemp(float v)   { return fminf(fmaxf(v, TEMP_MIN_C), TEMP_MAX_C); }
+    static float limitarOffset(float v) { return fminf(fmaxf(v, -OFFSET_MAX_ABS_C), OFFSET_MAX_ABS_C); }
+    void setUmbralSuperior(float v) { umbral_sup = limitarTemp(v); }
+    void setUmbralInferior(float v) { umbral_inf = limitarTemp(v); }
+    void setUmbrales(float sup, float inf) { umbral_sup = limitarTemp(sup); umbral_inf = limitarTemp(inf); }
     void setOffset(float v, float refCong = 0.0f, float refEbull = 100.0f) {
-        offset = v;
+        offset = limitarOffset(v);
         recalcularRectaCalibracion(refCong, refEbull);
     }
     void setCorrecciones(float medSupHirviendo, float medInfHielo, float refCong = 0.0f, float refEbull = 100.0f) {
-        correccionSuperior = medSupHirviendo;
-        correccionInferior = medInfHielo;
+        error_sup = limitarTemp(medSupHirviendo);
+        error_inf = limitarTemp(medInfHielo);
         recalcularRectaCalibracion(refCong, refEbull);
     }
     void setEstado(EstadoSensor nuevoEstado) {
@@ -208,7 +209,6 @@ public:
     void setResolucionBits(uint8_t b)          { resolucionBits = b; }
     void setAlimentacionParasita(bool p)       { alimentacionParasita = p; }
     void setEnAlarma(bool a)                   { enAlarma = a; }
-    void setDatoUsuario(int16_t d)             { datoUsuario = d; }
 
     bool           estaActivo()                const { return activo; }
     bool           estaHidratadoDB()           const { return hidratadoDB; }
@@ -219,11 +219,11 @@ public:
     const char*    obtenerMAC()                const { return mac; }
     const char*    obtenerMAC3()               const { return mac3; }
     const char*    obtenerMAC2()               const { return mac2; }
-    float          obtenerUmbralSuperior()     const { return umbralSuperior; }
-    float          obtenerUmbralInferior()     const { return umbralInferior; }
+    float          obtenerUmbralSuperior()     const { return umbral_sup; }
+    float          obtenerUmbralInferior()     const { return umbral_inf; }
     float          obtenerOffset()             const { return offset; }
-    float          obtenerCorreccionSuperior() const { return correccionSuperior; }
-    float          obtenerCorreccionInferior() const { return correccionInferior; }
+    float          obtenerErrorSuperior() const { return error_sup; }
+    float          obtenerErrorInferior() const { return error_inf; }
     EstadoSensor   obtenerEstado()             const { return estado; }
     EstadoSensor   obtenerEstadoPrevio()       const { return estadoPrevio; }
     float          obtenerTempCruda()          const { return tempCruda; }
@@ -232,7 +232,6 @@ public:
     uint8_t        obtenerResolucionBits()     const { return resolucionBits; }
     bool           esAlimentacionParasita()    const { return alimentacionParasita; }
     bool           estaEnAlarma()              const { return enAlarma; }
-    int16_t        obtenerDatoUsuario()        const { return datoUsuario; }
     uint32_t       obtenerTimestampLectura()   const { return ultimoTimestampMs; }
     uint8_t*       obtenerScratchpad()               { return scratchpad; }
     const uint8_t* obtenerScratchpad()         const { return scratchpad; }
@@ -248,11 +247,11 @@ public:
         strncpy(snap.mac2, mac2, sizeof(snap.mac2));
         snap.tempCruda            = tempCruda;
         snap.tempCorregida        = tempCelsius;
-        snap.umbralSuperior       = umbralSuperior;
-        snap.umbralInferior       = umbralInferior;
+        snap.umbral_sup       = umbral_sup;
+        snap.umbral_inf       = umbral_inf;
         snap.offset               = offset;
-        snap.medicionAguaHirviendo= correccionSuperior;
-        snap.medicionAguaHelada   = correccionInferior;
+        snap.medicionAguaHirviendo= error_sup;
+        snap.medicionAguaHelada   = error_inf;
         snap.estado               = estado;
         snap.estadoPrevio         = estadoPrevio;
         snap.enAlarma             = enAlarma;

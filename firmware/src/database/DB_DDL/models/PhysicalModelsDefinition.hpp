@@ -250,7 +250,7 @@ namespace DbNotRuntime::PhysicalModels {
         std::vector<Field> fields() const override {
             return {
                 AutoField("id_sensor"),
-                FixedCharField("mac", 25).unique(true),
+                FixedCharField("mac", 16).unique(true),
                 TextField("nombre", 32).default_val(""),
                 TextField("ubicacion", 32).default_val(""),
                 TextField("descripcion", 128).default_val(""),

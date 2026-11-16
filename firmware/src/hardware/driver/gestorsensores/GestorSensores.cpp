@@ -21,8 +21,8 @@ bool GestorSensores::esFamiliaValida(uint8_t fam) {
 
 int8_t GestorSensores::clampToInt8(float val) {
     float r = roundf(val);
-    if (r > 126.0f) return 126;
-    if (r < -55.0f) return -55;
+    if (r > Sensor::TEMP_MAX_C) return Sensor::TEMP_MAX_C;
+    if (r < Sensor::TEMP_MIN_C) return Sensor::TEMP_MIN_C;
     return static_cast<int8_t>(r);
 }
 
@@ -248,8 +248,6 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
                 escribirScratchpadNativo(romDetectada, pad, guardarEnEeprom);
             }
             s.setResolucionBits(extraerResolucion(romDetectada, pad));
-            int16_t usr = static_cast<int16_t>((static_cast<uint16_t>(pad[2]) << 8) | pad[3]);
-            s.setDatoUsuario(usr);
         } else {
             s.setResolucionBits(resolucionGlobal);
         }
@@ -658,6 +656,8 @@ bool GestorSensores::configurarAlarmasSlot(uint8_t slot, float thAltoC, float tl
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     Sensor& s = sensores[slot];
 
+    if (tlBajoC > thAltoC) return false;
+
     s.setUmbrales(thAltoC, tlBajoC);
     reevaluarAlarmaSlotInterno(s);
     SensorInicializador::persistirConfiguracionSensor(s);
@@ -720,21 +720,6 @@ bool GestorSensores::restaurarEepromSlot(uint8_t slot) {
     uint8_t* pad = s.obtenerScratchpad();
     if (!leerScratchpadNativo(s.obtenerROM(), pad)) return false;
     s.setResolucionBits(extraerResolucion(s.obtenerROM(), pad));
-    return true;
-}
-
-bool GestorSensores::escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom) {
-    ScopedSensorLock lk(mutexSensores);
-    if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
-    Sensor& s = sensores[slot];
-    uint8_t* pad = s.obtenerScratchpad();
-    if (!leerScratchpadNativo(s.obtenerROM(), pad)) return false;
-
-    pad[2] = static_cast<uint8_t>((idCustom >> 8) & 0xFF);
-    pad[3] = static_cast<uint8_t>(idCustom & 0xFF);
-    if (!escribirScratchpadNativo(s.obtenerROM(), pad, false)) return false;
-
-    s.setDatoUsuario(idCustom);
     return true;
 }
 

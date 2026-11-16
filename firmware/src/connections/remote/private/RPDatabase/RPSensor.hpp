@@ -272,6 +272,10 @@ namespace RPSensor {
                 dto.errorInf,
                 dto.offset
             );
+            // bool enRam = gestorSensores.configurarUmbralesPorMAC(mac, sup, inf, false)
+            //           && gestorSensores.calibrarPuntosPorMAC(mac, errorSup, errorInf, offset);  // ambos persisten vía SensorInicializador
+            // if (!enRam) RepoSensor::actualizarCalibracionYUmbralesPorMac(...);                 // sensor no conectado: solo BD
+            // SensorDTO act = RepoSensor::exigirPorMac(mac);
             return aPerfilSensor(act);
         },
         RolUsuario::ADMIN
@@ -280,7 +284,7 @@ namespace RPSensor {
     inline auto eliminarSensorPorMac = llamadoSemantico.exactamenteUnaVez<ConsultaSensorMacDTO, void>(
         "eliminarSensorPorMac",
         [](const ConsultaSensorMacDTO& dto) {
-            RepoSensor::eliminarPorMac(dto.mac.c_str());
+            RepoSensor::cambiarEstadoActivoPorMac(dto.mac.c_str(), false);
         },
         RolUsuario::ADMIN
     );

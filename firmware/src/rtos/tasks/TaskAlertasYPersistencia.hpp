@@ -54,6 +54,7 @@ namespace RTOS::Tasks {
                             DbRuntime::Repositories::TransaccionBatch tx;
                             for (uint8_t i = 0; i < cant; ++i) {
                                 // consulta DB (INSERT en tabla Senso para cada sensor conectado en el lote de 2 min)
+                                if (lista[i].idSensorDB <= 0) continue;
                                 const bool lecturaValida = estadoTieneLecturaValida(lista[i].estado);
                                 DbRuntime::Repositories::RepoSenso::registrarLectura(
                                     lista[i].idSensorDB,
@@ -69,19 +70,30 @@ namespace RTOS::Tasks {
                     }
 
                     case TipoRegistroDB::EVENTO_CAMBIO_SENSOR: {
-                        // consulta DB (INSERT en tabla Senso + INSERT en tabla EventoSensor por anomalía del sensor)
+                        // 1) SensoDTO s = RepoSenso::registrarLectura(reg.idRelacionado, valida ? reg.tempCruda : 0, valida ? reg.tempCorregida : 0,
+                        //      (EstadoSensor)reg.estadoNuevo, reg.timestampUnix);   // valida = estadoTieneLecturaValida(estadoNuevo)
+                        // 2) RepoAuditoriaSensores::registrarEvento(reg.idRelacionado, s.idSenso, (EstadoSensor)reg.estadoPrevio,
+                        //      (EstadoSensor)reg.estadoNuevo, gestorSensores.obtenerEstadoBus(), tipo, criticidad);
+                        // tipo/criticidad: ALARMA_* -> ADVERTENCIA/ALTA | DESCONECTADO, CRC, timeout... -> EXCEPCION/MEDIA
+                        //                  CORTOCIRCUITO_*, CIRCUITO_ABIERTO -> EXCEPCION/ALTA | volver a OK -> INFORMATIVO/BAJA
+                        // Va en este orden porque AuditoriaSensores.id_senso es FK a Senso.
                         
                         break;
                     }
 
                     case TipoRegistroDB::EVENTO_SISTEMA_BUS: {
-                        // consulta DB (INSERT en tabla EventoSistema: fallo OneWire / cambio topología / heap / SD libre)
+                        // AuditoriaSistemaDTO a; a.estadoBus = (EstadoBus)reg.estadoNuevo; a.detalle = reg.detalle;
+                        // a.tipoEventoSistema = (estadoBus==OK) ? INFORMATIVO : (TOPOLOGIA_MODIFICADA ? ADVERTENCIA : EXCEPCION);
+                        // a.criticidad según tipo; a.heapLibreBytes = ESP.getFreeHeap(); a.espacioSdLibreKb = (libre de la SD);
+                        // a.bootId, a.uptimeS = millis()/1000; a.fuenteTiempo = (la de RelojSistema); a.internet = (WiFi.status()==WL_CONNECTED);
+                        // RepoAuditoriaSistema::registrarEvento(a);
                         break;
                     }
 
                     case TipoRegistroDB::AUDITORIA_TRANSACCION:
                     case TipoRegistroDB::AUDITORIA_RED: {
-                        // consulta DB (INSERT en tabla Auditoria: registro de red o acción de usuario)
+                        // AuditoriaAuthDTO a; a.idUsuario = reg.idRelacionado; a.origenRemoto = reg.origenOClave; a.accion/detalle = reg.detalle;
+                        // a.medioConexion = (según tipo: AUDITORIA_RED -> WIFI_*/UART_S); RepoAuditoriaAuth::registrarEvento(a);
                         break;
                     }
                 }

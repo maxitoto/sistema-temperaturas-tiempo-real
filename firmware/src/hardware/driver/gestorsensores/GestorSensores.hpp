@@ -121,7 +121,6 @@ public:
     bool configurarResolucionSlot(uint8_t slot, uint8_t bits, bool guardarEeprom = false);
     bool guardarEepromSlot(uint8_t slot);
     bool restaurarEepromSlot(uint8_t slot);
-    bool escribirIdUsuarioSlot(uint8_t slot, int16_t idCustom);
     uint8_t procesarBusquedaAlarmasHardware();
 
 

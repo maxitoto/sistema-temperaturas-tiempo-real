@@ -24,7 +24,7 @@ namespace DbRuntime::Repositories {
         PgChar<32>  nombre            = "";
         PgChar<32>  ubicacion         = "";
         PgChar<128> descripcion       = "";
-        PgFloat     umbralSup         = 125.0f;
+        PgFloat     umbralSup         = 126.0f;
         PgFloat     umbralInf         = -55.0f;
         PgFloat     errorSup          = 0.0f;
         PgFloat     errorInf          = 0.0f;
@@ -119,12 +119,14 @@ namespace DbRuntime::Repositories {
                 return existente;
             }
 
+            if (!macHex || strlen(macHex) != 16) throw std::invalid_argument("ValueError: mac debe tener 16 caracteres hex");
+
             SensorDTO nuevo{};
             nuevo.mac         = macHex ? macHex : "";
             nuevo.nombre      = nombreInicial ? nombreInicial : "Sensor DS18B20";
             nuevo.ubicacion   = ubicacionInicial ? ubicacionInicial : "Sin asignar";
             nuevo.descripcion = "";
-            nuevo.umbralSup   = 125.0f;
+            nuevo.umbralSup   = 126.0f;
             nuevo.umbralInf   = -55.0f;
             nuevo.errorSup    = 0.0f;
             nuevo.errorInf    = 0.0f;

@@ -112,7 +112,7 @@ namespace RTOS::Tasks {
             char f1[22], f2[22], f3[22], f4[22];
             snprintf(f1, sizeof(f1), "S%u:%s", static_cast<unsigned>(s.slot + 1), s.mac);
             snprintf(f2, sizeof(f2), "Cor:%.1fc\xF8 Cru:%.1fc\xF8", s.tempCorregida, s.tempCruda);
-            snprintf(f3, sizeof(f3), "TH:%.1fc\xF8  TL:%.1fc\xF8", s.umbralSuperior, s.umbralInferior);
+            snprintf(f3, sizeof(f3), "TH:%.1fc\xF8  TL:%.1fc\xF8", s.umbral_sup, s.umbral_inf);
             snprintf(f4, sizeof(f4), "%s [%u/%u]",
                      GestorSensores::nombreEstadoSensor(s.estado),
                      static_cast<unsigned>(posActual + 1),

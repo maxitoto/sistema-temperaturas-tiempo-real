@@ -17,7 +17,7 @@ namespace DbRuntime::Repositories {
 
     struct CalibracionDTO {
         PgInt    idCalibracion       = 1;
-        PgFloat  altura              = 0.0f;
+        PgFloat  altura              = 115.0f;
         PgFloat  presionAtmosferica  = 1013.25f;
         PgFloat  tempCongelacionRef  = 0.0f;
         PgFloat  tempEbullicionRef   = 100.0f;
