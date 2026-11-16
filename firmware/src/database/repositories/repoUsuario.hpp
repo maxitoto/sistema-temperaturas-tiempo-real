@@ -1,157 +1,178 @@
 #pragma once
 #include <Arduino.h>
-#include <stdint.h>
-#include <string.h>
-#include <vector>
+#include <time.h>
 #include <stdexcept>
-
-#include "RepositorioBase.hpp"
-#include "../../connections/remote/Controller/abstract/RPC_base.hpp"
+#include <vector>
+#include "../common/PgDtoTypes.hpp"
+#include "../common/DiagnosticConsole.hpp"
+#include "../DB_DQL_DML/orm/DjangoManager.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::ModelManager;
-    using DbRuntime::Orm::QuerySet;
-    using DbRuntime::Storage::PgTuple;
+    using DbRuntime::Orm::Usuario;
+    using DbRuntime::Orm::runtimeDb;
     using DbRuntime::Storage::PgCell;
+    using DbRuntime::Storage::PgTuple;
     using DbRuntime::Standard::FilterOp;
     using DbRuntime::Standard::AggregateFunc;
-    using DbRuntime::Standard::WindowFunc;
-    using DbRuntime::Standard::ConflictAction;
-    using DbRuntime::Engine::OnConflictClause;
-    using DbRuntime::Engine::PredicateCondition;
-    using DbRuntime::Engine::DmlExecutionResult;
-    using DbCommon::Standard::PgDataType;
-    using DbCommon::Standard::SortDirection;
-    using DbCommon::Engine::DdlDiagnosticConsole;
-
-    inline const ModelManager Usuario("Usuario");
+    using DbNotRuntime::Engine::DdlDiagnosticConsole;
+    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
 
     struct UsuarioDTO {
-        int32_t    idUsuario;
-        char       usuario[20];
-        char       salt[9];
-        char       contrasenaHash[65];
-        RolUsuario rol;
-        int16_t    intentosFallidos;
-        bool       bloqueado;
-        bool       activa;
-        char       creadoEl[20];
-        char       actualizadoEl[20];
-        uint32_t   actualizadoEpoch;
+        PgAuto     idUsuario           = 0;
+        PgChar<20> usuario             = "";
+        PgChar<32> salt                = "SALT";
+        PgChar<64> contrasenaHash      = "";
+        RolUsuario rol                 = RolUsuario::NINGUNO;
+        PgSmallInt intentosFallidos    = 0;
+        PgBool     bloqueado           = false;
+        PgBigInt   bloqueadoDesde      = 0;
+        PgBigInt   bloqueadoHasta      = 0;
+        PgBigInt   fechaUltimoLogin    = 0;
+        PgBigInt   fechaCambioPassword = 0;
+        PgBool     activa              = true;
+        PgDateTime creadoEl            = "";
+        PgDateTime actualizadoEl       = "";
+        PgEpoch    actualizadoEpoch    = 0;
     };
 
     struct EstadisticasUsuariosDTO {
-        int32_t totalUsuarios;
-        int32_t usuariosActivos;
-        int32_t usuariosBloqueados;
-        int32_t maxIntentosFallidos;
+        PgInt totalUsuarios       = 0;
+        PgInt usuariosActivos     = 0;
+        PgInt usuariosBloqueados  = 0;
+        PgInt maxIntentosFallidos = 0;
     };
 
     class RepoUsuario {
-    public:
-        static constexpr int16_t MAX_INTENTOS_LOGIN = 3;
-
     private:
-        static RolUsuario textoARol(const String& txt) {
-            if (txt.equalsIgnoreCase("ADMIN"))    return RolUsuario::ADMIN;
-            if (txt.equalsIgnoreCase("NO_ADMIN")) return RolUsuario::NO_ADMIN;
-            return RolUsuario::NINGUNO;
+        static constexpr int64_t DURACION_BLOQUEO_SEGUNDOS = 600;
+
+        static int64_t epochActual() {
+            const time_t t = time(nullptr);
+            return (t > 100000) ? static_cast<int64_t>(t) : static_cast<int64_t>(millis() / 1000UL);
         }
 
-        static const char* rolATexto(RolUsuario rol) {
-            switch (rol) {
-                case RolUsuario::ADMIN:    return "ADMIN";
-                case RolUsuario::NO_ADMIN: return "NO_ADMIN";
-                default:                   return "NINGUNO";
+        static void asegurarCatalogo() {
+            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
+                runtimeDb.bindToPhysicalCatalog();
             }
         }
 
-        static void exigirExitoDml(const DmlExecutionResult& res) {
-            if (!res.success) {
-                throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-            }
+        static void lanzarUltimoErrorDB() {
+            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
         }
 
-        static String calcularHashConSalt(const char* salt, const char* clavePlana) {
-            uint64_t h = 14695981039346656037ULL;
-            const char* s = salt ? salt : "SALT";
-            while (*s) {
-                h ^= static_cast<uint8_t>(*s++);
-                h *= 1099511628211ULL;
+        static String calcularHashConSalt(const char* clavePlana, const char* salt) {
+            uint32_t h1 = 2166136261u;
+            uint32_t h2 = 0x9E3779B9u;
+
+            if (salt != nullptr) {
+                for (size_t i = 0; salt[i] != '\0'; ++i) {
+                    h1 ^= static_cast<uint8_t>(salt[i]);
+                    h1 *= 16777619u;
+                    h2 = (h2 ^ static_cast<uint8_t>(salt[i])) * 0x85EBCA6Bu;
+                }
             }
-            const char* p = clavePlana ? clavePlana : "";
-            while (*p) {
-                h ^= static_cast<uint8_t>(*p++);
-                h *= 1099511628211ULL;
+            if (clavePlana != nullptr) {
+                for (size_t i = 0; clavePlana[i] != '\0'; ++i) {
+                    h1 ^= static_cast<uint8_t>(clavePlana[i]);
+                    h1 *= 16777619u;
+                    h2 = (h2 ^ static_cast<uint8_t>(clavePlana[i])) * 0xC2B2AE35u;
+                }
             }
-            char buf[17];
-            snprintf(buf, sizeof(buf), "%08lX%08lX",
-                     static_cast<unsigned long>((h >> 32) & 0xFFFFFFFFUL),
-                     static_cast<unsigned long>(h & 0xFFFFFFFFUL));
-            return String(buf);
+
+            char hex[17]{};
+            snprintf(hex, sizeof(hex), "%08lX%08lX", static_cast<unsigned long>(h1), static_cast<unsigned long>(h2));
+            return String(hex);
         }
 
-        static bool verificarContrasena(const UsuarioDTO& u, const char* clavePlana) {
-            if (!clavePlana || clavePlana[0] == '\0') return false;
-            String hashCalculado = calcularHashConSalt(u.salt, clavePlana);
-            if (hashCalculado.equalsIgnoreCase(u.contrasenaHash)) {
+        static String generarSaltDeterminista(const char* usuario) {
+            uint32_t acc = 0xA5A5F00Du;
+            if (usuario != nullptr) {
+                for (size_t i = 0; usuario[i] != '\0'; ++i) {
+                    acc = (acc * 33u) ^ static_cast<uint8_t>(usuario[i]);
+                }
+            }
+            acc ^= static_cast<uint32_t>(millis());
+            char s[9]{};
+            snprintf(s, sizeof(s), "S%07lX", static_cast<unsigned long>(acc & 0x0FFFFFFFu));
+            return String(s);
+        }
+
+        static bool coincideClave(const UsuarioDTO& u, const char* clavePlana) {
+            if (clavePlana == nullptr) return false;
+            const String hashCalculado = calcularHashConSalt(clavePlana, u.salt.c_str());
+            if (hashCalculado.equalsIgnoreCase(u.contrasenaHash.c_str())) {
                 return true;
             }
-            return strcmp(u.contrasenaHash, clavePlana) == 0;
+            return strcmp(u.contrasenaHash.c_str(), clavePlana) == 0;
         }
 
-        static UsuarioDTO mapear(const PgTuple& fila) {
-            UsuarioDTO dto{};
-            dto.idUsuario        = fila.getInt("id_usuario", -1);
-            dto.rol              = textoARol(fila.getText("rol", "NINGUNO"));
-            dto.intentosFallidos = fila.getSmallInt("intentos_fallidos", 0);
-            dto.bloqueado        = fila.getBool("bloqueado", false);
-            dto.activa           = fila.getBool("activa", true);
-            dto.actualizadoEpoch = static_cast<uint32_t>(fila.getEpochSeconds("actualizado_el", 0));
+        static void asegurarSemillaPorDefecto() {
+            if (Usuario.objects().exists()) {
+                return;
+            }
+            const int64_t ahora = epochActual();
+            const String saltAdmin = "SALTADM1";
+            const String hashAdmin = calcularHashConSalt("admin1234", saltAdmin.c_str());
+            Usuario.create({
+                PgCell("usuario",               "admin"),
+                PgCell("salt",                  saltAdmin),
+                PgCell("contrasena_hash",       hashAdmin),
+                PgCell("rol",                   RolUsuario::ADMIN),
+                PgCell("intentos_fallidos",     static_cast<int16_t>(0)),
+                PgCell("bloqueado",             false),
+                PgCell("bloqueado_desde",       static_cast<int64_t>(0)),
+                PgCell("bloqueado_hasta",       static_cast<int64_t>(0)),
+                PgCell("fecha_ultimo_login",    static_cast<int64_t>(0)),
+                PgCell("fecha_cambio_password", ahora),
+                PgCell("activa",                true)
+            });
 
-            strncpy(dto.usuario, fila.getText("usuario", "").c_str(), sizeof(dto.usuario) - 1);
-            strncpy(dto.salt, fila.getText("salt", "SALT").c_str(), sizeof(dto.salt) - 1);
-            strncpy(dto.contrasenaHash, fila.getText("contrasena_hash", "").c_str(), sizeof(dto.contrasenaHash) - 1);
-            strncpy(dto.creadoEl, fila.getText("creado_el", "1970-01-01 00:00:00").c_str(), sizeof(dto.creadoEl) - 1);
-            strncpy(dto.actualizadoEl, fila.getText("actualizado_el", "1970-01-01 00:00:00").c_str(), sizeof(dto.actualizadoEl) - 1);
-            return dto;
+            const String saltOp = "SALTOPE1";
+            const String hashOp = calcularHashConSalt("operador1234", saltOp.c_str());
+            Usuario.create({
+                PgCell("usuario",               "operador"),
+                PgCell("salt",                  saltOp),
+                PgCell("contrasena_hash",       hashOp),
+                PgCell("rol",                   RolUsuario::NO_ADMIN),
+                PgCell("intentos_fallidos",     static_cast<int16_t>(0)),
+                PgCell("bloqueado",             false),
+                PgCell("bloqueado_desde",       static_cast<int64_t>(0)),
+                PgCell("bloqueado_hasta",       static_cast<int64_t>(0)),
+                PgCell("fecha_ultimo_login",    static_cast<int64_t>(0)),
+                PgCell("fecha_cambio_password", ahora),
+                PgCell("activa",                true)
+            });
         }
 
     public:
-        static bool sembrarUsuariosPorDefecto() {
-            TransaccionBatch tx;
-
-            String hashAdmin = calcularHashConSalt("SALT_ADM", "admin");
-            String hashOper  = calcularHashConSalt("SALT_OPE", "operador");
-
-            auto r1 = Usuario.upsert({
-                {"usuario",           "admin",    PgDataType::VARCHAR},
-                {"salt",              "SALT_ADM", PgDataType::CHAR},
-                {"contrasena_hash",   hashAdmin,  PgDataType::TEXT},
-                {"rol",               "ADMIN",    PgDataType::ENUM},
-                {"intentos_fallidos", "0",        PgDataType::SMALLINT},
-                {"bloqueado",         "FALSE",    PgDataType::BOOLEAN},
-                {"activa",            "TRUE",     PgDataType::BOOLEAN}
-            }, ConflictAction::DO_NOTHING);
-
-            auto r2 = Usuario.upsert({
-                {"usuario",           "operador", PgDataType::VARCHAR},
-                {"salt",              "SALT_OPE", PgDataType::CHAR},
-                {"contrasena_hash",   hashOper,   PgDataType::TEXT},
-                {"rol",               "NO_ADMIN", PgDataType::ENUM},
-                {"intentos_fallidos", "0",        PgDataType::SMALLINT},
-                {"bloqueado",         "FALSE",    PgDataType::BOOLEAN},
-                {"activa",            "TRUE",     PgDataType::BOOLEAN}
-            }, ConflictAction::DO_NOTHING);
-
-            return tx.confirmar() && r1.success && r2.success;
+        static UsuarioDTO mapear(const PgTuple& r) {
+            UsuarioDTO u{};
+            r["id_usuario"]            >> u.idUsuario;
+            r["usuario"]               >> u.usuario;
+            r["salt"]                  >> u.salt;
+            r["contrasena_hash"]       >> u.contrasenaHash;
+            r["rol"]                   >> u.rol;
+            r["intentos_fallidos"]     >> u.intentosFallidos;
+            r["bloqueado"]             >> u.bloqueado;
+            r["bloqueado_desde"]       >> u.bloqueadoDesde;
+            r["bloqueado_hasta"]       >> u.bloqueadoHasta;
+            r["fecha_ultimo_login"]    >> u.fechaUltimoLogin;
+            r["fecha_cambio_password"] >> u.fechaCambioPassword;
+            r["activa"]                >> u.activa;
+            r["creado_el"]             >> u.creadoEl;
+            r["actualizado_el"]        >> u.actualizadoEl;
+            u.actualizadoEpoch = static_cast<PgEpoch>(r.getEpochSeconds("actualizado_el", 0));
+            return u;
         }
 
         static bool obtenerPorNombreUsuario(const char* nombreUsuario, UsuarioDTO& outDto) {
-            if (!nombreUsuario || nombreUsuario[0] == '\0') return false;
+            asegurarCatalogo();
+            asegurarSemillaPorDefecto();
+
             PgTuple fila;
-            if (!Usuario.filter_eq("usuario", String(nombreUsuario)).first(fila)) {
+            if (!Usuario.filter_eq("usuario", String(nombreUsuario ? nombreUsuario : "")).first(fila)) {
                 return false;
             }
             outDto = mapear(fila);
@@ -168,188 +189,237 @@ namespace DbRuntime::Repositories {
 
         static UsuarioDTO autenticarUsuario(const char* nombreUsuario, const char* clavePlana) {
             UsuarioDTO u{};
-            if (!obtenerPorNombreUsuario(nombreUsuario, u) || !u.activa) {
+            if (!obtenerPorNombreUsuario(nombreUsuario, u)) {
                 throw std::runtime_error("AuthenticationError: credenciales invalidas");
             }
 
-            if (u.bloqueado) {
-                throw std::runtime_error("AuthenticationError: cuenta bloqueada en base de datos por intentos fallidos");
+            if (!u.activa) {
+                throw std::runtime_error("PermissionError: la cuenta de usuario esta desactivada");
             }
 
-            if (!verificarContrasena(u, clavePlana)) {
-                int16_t nuevosIntentos = static_cast<int16_t>(u.intentosFallidos + 1);
-                if (nuevosIntentos > MAX_INTENTOS_LOGIN) {
-                    nuevosIntentos = MAX_INTENTOS_LOGIN;
+            const int64_t ahora = epochActual();
+            if (u.bloqueado) {
+                if (u.bloqueadoHasta == 0 || ahora < u.bloqueadoHasta) {
+                    throw std::runtime_error("AuthenticationError: usuario bloqueado por maximo de intentos fallidos");
                 }
-                const bool bloquearAhora = (nuevosIntentos >= MAX_INTENTOS_LOGIN);
+            }
 
-                auto resUpd = Usuario
-                    .filter_eq("id_usuario", u.idUsuario)
-                    .update({
-                        {"intentos_fallidos", String(nuevosIntentos),          PgDataType::SMALLINT},
-                        {"bloqueado",         bloquearAhora ? "TRUE" : "FALSE", PgDataType::BOOLEAN}
-                    });
-                exigirExitoDml(resUpd);
+            if (!coincideClave(u, clavePlana)) {
+                const int16_t nuevosIntentos = static_cast<int16_t>((u.intentosFallidos < 3) ? (u.intentosFallidos + 1) : 3);
+                const bool bloquearAhora     = (nuevosIntentos >= 3);
+                const int64_t desde          = bloquearAhora ? ahora : u.bloqueadoDesde;
+                const int64_t hasta          = bloquearAhora ? (ahora + DURACION_BLOQUEO_SEGUNDOS) : u.bloqueadoHasta;
+
+                Usuario.filter_eq("id_usuario", u.idUsuario).update({
+                    PgCell("intentos_fallidos", nuevosIntentos),
+                    PgCell("bloqueado",         bloquearAhora),
+                    PgCell("bloqueado_desde",   desde),
+                    PgCell("bloqueado_hasta",   hasta)
+                });
 
                 if (bloquearAhora) {
-                    throw std::runtime_error("AuthenticationError: usuario bloqueado tras alcanzar 3 intentos fallidos");
+                    throw std::runtime_error("AuthenticationError: usuario bloqueado tras 3 intentos fallidos");
                 }
                 throw std::runtime_error("AuthenticationError: credenciales invalidas");
             }
 
-            if (u.intentosFallidos > 0) {
-                auto resReset = Usuario
-                    .filter_eq("id_usuario", u.idUsuario)
-                    .update({
-                        {"intentos_fallidos", "0",     PgDataType::SMALLINT},
-                        {"bloqueado",         "FALSE", PgDataType::BOOLEAN}
-                    });
-                exigirExitoDml(resReset);
-                u.intentosFallidos = 0;
-            }
+            auto res = Usuario.filter_eq("id_usuario", u.idUsuario)
+                .returning({"*"})
+                .update({
+                    PgCell("intentos_fallidos",  static_cast<int16_t>(0)),
+                    PgCell("bloqueado",          false),
+                    PgCell("bloqueado_desde",    static_cast<int64_t>(0)),
+                    PgCell("bloqueado_hasta",    static_cast<int64_t>(0)),
+                    PgCell("fecha_ultimo_login", ahora)
+                });
 
+            if (res.success && !res.returningRows.empty()) {
+                return mapear(res.returningRows[0]);
+            }
+            u.intentosFallidos = 0;
+            u.bloqueado        = false;
+            u.fechaUltimoLogin = ahora;
             return u;
         }
 
-        // Lista usuarios delegando el control del límite de 32 registros directamente al SGBD (ModuloDQL)
-        static std::vector<UsuarioDTO> listarUsuariosPaginados(int32_t limite, int32_t offset = 0, bool soloActivos = false) {
-            QuerySet qs = Usuario.objects();
+        static std::vector<UsuarioDTO> listarUsuariosPaginados(
+            uint16_t limite = 32,
+            uint16_t offset = 0,
+            bool soloActivos = false
+        ) {
+            asegurarCatalogo();
+            asegurarSemillaPorDefecto();
+
+            auto q = Usuario.objects();
             if (soloActivos) {
-                qs.filter_eq("activa", "TRUE");
+                q.filter_eq("activa", "TRUE");
             }
-            return qs
-                .order_by("id_usuario")
-                .offset(offset)
-                .limit(limite)
-                .all_as<UsuarioDTO>(&RepoUsuario::mapear);
+            return q.order_by("id_usuario")
+                    .limit(static_cast<int32_t>(limite))
+                    .offset(static_cast<int32_t>(offset))
+                    .all_as<UsuarioDTO>(&RepoUsuario::mapear);
         }
 
-        static UsuarioDTO crearUsuario(const char* nombreUsuario,
-                                       const char* clavePlana,
-                                       RolUsuario rol = RolUsuario::NO_ADMIN) {
-            if (!nombreUsuario || nombreUsuario[0] == '\0' || !clavePlana || clavePlana[0] == '\0') {
-                throw std::invalid_argument("ValueError: usuario y contrasena no pueden estar vacios");
+        static UsuarioDTO crearUsuario(const char* nombreUsuario, const char* clavePlana, RolUsuario rol) {
+            asegurarCatalogo();
+            asegurarSemillaPorDefecto();
+
+            if (nombreUsuario == nullptr || nombreUsuario[0] == '\0') {
+                throw std::invalid_argument("ValueError: el nombre de usuario no puede estar vacio");
+            }
+            if (clavePlana == nullptr || strlen(clavePlana) < 4) {
+                throw std::invalid_argument("ValueError: la contrasena debe tener al menos 4 caracteres");
             }
 
-            const char* salt = "SALT_USR";
-            String hash = calcularHashConSalt(salt, clavePlana);
+            const int64_t ahora    = epochActual();
+            const String nuevoSalt = generarSaltDeterminista(nombreUsuario);
+            const String nuevoHash = calcularHashConSalt(clavePlana, nuevoSalt.c_str());
 
-            auto res = Usuario.create({
-                {"usuario",           String(nombreUsuario), PgDataType::VARCHAR},
-                {"salt",              String(salt),          PgDataType::CHAR},
-                {"contrasena_hash",   hash,                  PgDataType::TEXT},
-                {"rol",               rolATexto(rol),        PgDataType::ENUM},
-                {"intentos_fallidos", "0",                   PgDataType::SMALLINT},
-                {"bloqueado",         "FALSE",               PgDataType::BOOLEAN},
-                {"activa",            "TRUE",                PgDataType::BOOLEAN}
-            }, {"*"});
+            auto res = Usuario.create(
+                {
+                    PgCell("usuario",               nombreUsuario),
+                    PgCell("salt",                  nuevoSalt),
+                    PgCell("contrasena_hash",       nuevoHash),
+                    PgCell("rol",                   rol),
+                    PgCell("intentos_fallidos",     static_cast<int16_t>(0)),
+                    PgCell("bloqueado",             false),
+                    PgCell("bloqueado_desde",       static_cast<int64_t>(0)),
+                    PgCell("bloqueado_hasta",       static_cast<int64_t>(0)),
+                    PgCell("fecha_ultimo_login",    static_cast<int64_t>(0)),
+                    PgCell("fecha_cambio_password", ahora),
+                    PgCell("activa",                true)
+                },
+                {"*"}
+            );
 
-            exigirExitoDml(res);
-            if (res.returningRows.empty()) {
-                throw std::runtime_error("RuntimeError: no se pudo recuperar el usuario creado");
+            if (!res.success || res.returningRows.empty()) {
+                lanzarUltimoErrorDB();
             }
             return mapear(res.returningRows[0]);
         }
 
         static UsuarioDTO actualizarRolYEstado(const char* nombreUsuario, RolUsuario nuevoRol, bool activa) {
-            auto res = Usuario
-                .filter_eq("usuario", String(nombreUsuario))
+            asegurarCatalogo();
+
+            auto res = Usuario.filter_eq("usuario", String(nombreUsuario ? nombreUsuario : ""))
                 .returning({"*"})
                 .update({
-                    {"rol",    rolATexto(nuevoRol),      PgDataType::ENUM},
-                    {"activa", activa ? "TRUE" : "FALSE", PgDataType::BOOLEAN}
+                    PgCell("rol",    nuevoRol),
+                    PgCell("activa", activa)
                 });
 
-            exigirExitoDml(res);
+            if (!res.success) {
+                lanzarUltimoErrorDB();
+            }
             if (res.returningRows.empty()) {
-                throw std::runtime_error("LookupError: usuario no encontrado para actualizar");
+                throw std::runtime_error("LookupError: el usuario a actualizar no existe");
             }
             return mapear(res.returningRows[0]);
         }
 
-        static UsuarioDTO cambiarContrasena(const char* nombreUsuario,
-                                            const char* claveActual,
-                                            const char* claveNueva,
-                                            bool exigirClaveActual) {
-            if (!claveNueva || claveNueva[0] == '\0') {
-                throw std::invalid_argument("ValueError: la nueva contrasena no puede estar vacia");
+        static UsuarioDTO cambiarContrasena(
+            const char* nombreUsuario,
+            const char* claveActual,
+            const char* claveNueva,
+            bool verificarClaveActual = true
+        ) {
+            if (claveNueva == nullptr || strlen(claveNueva) < 4) {
+                throw std::invalid_argument("ValueError: la nueva contrasena debe tener al menos 4 caracteres");
             }
 
-            UsuarioDTO u = exigirPorNombreUsuario(nombreUsuario);
-            if (exigirClaveActual && !verificarContrasena(u, claveActual)) {
-                throw std::runtime_error("AuthenticationError: la contrasena actual no coincide");
+            UsuarioDTO actual = exigirPorNombreUsuario(nombreUsuario);
+            if (verificarClaveActual && !coincideClave(actual, claveActual)) {
+                throw std::runtime_error("AuthenticationError: la contrasena actual es incorrecta");
             }
 
-            String nuevoHash = calcularHashConSalt(u.salt, claveNueva);
-            auto res = Usuario
-                .filter_eq("id_usuario", u.idUsuario)
+            const int64_t ahora    = epochActual();
+            const String nuevoSalt = generarSaltDeterminista(nombreUsuario);
+            const String nuevoHash = calcularHashConSalt(claveNueva, nuevoSalt.c_str());
+
+            auto res = Usuario.filter_eq("id_usuario", actual.idUsuario)
                 .returning({"*"})
                 .update({
-                    {"contrasena_hash",   nuevoHash, PgDataType::TEXT},
-                    {"intentos_fallidos", "0",       PgDataType::SMALLINT},
-                    {"bloqueado",         "FALSE",   PgDataType::BOOLEAN}
+                    PgCell("salt",                  nuevoSalt),
+                    PgCell("contrasena_hash",       nuevoHash),
+                    PgCell("intentos_fallidos",     static_cast<int16_t>(0)),
+                    PgCell("bloqueado",             false),
+                    PgCell("bloqueado_desde",       static_cast<int64_t>(0)),
+                    PgCell("bloqueado_hasta",       static_cast<int64_t>(0)),
+                    PgCell("fecha_cambio_password", ahora)
                 });
 
-            exigirExitoDml(res);
+            if (!res.success || res.returningRows.empty()) {
+                lanzarUltimoErrorDB();
+            }
             return mapear(res.returningRows[0]);
         }
 
         static UsuarioDTO desbloquearPorNombre(const char* nombreUsuario) {
-            auto res = Usuario
-                .filter_eq("usuario", String(nombreUsuario))
+            asegurarCatalogo();
+
+            auto res = Usuario.filter_eq("usuario", String(nombreUsuario ? nombreUsuario : ""))
                 .returning({"*"})
                 .update({
-                    {"intentos_fallidos", "0",     PgDataType::SMALLINT},
-                    {"bloqueado",         "FALSE", PgDataType::BOOLEAN}
+                    PgCell("intentos_fallidos", static_cast<int16_t>(0)),
+                    PgCell("bloqueado",         false),
+                    PgCell("bloqueado_desde",   static_cast<int64_t>(0)),
+                    PgCell("bloqueado_hasta",   static_cast<int64_t>(0))
                 });
-            exigirExitoDml(res);
+
+            if (!res.success) {
+                lanzarUltimoErrorDB();
+            }
             if (res.returningRows.empty()) {
-                throw std::runtime_error("LookupError: usuario no encontrado para desbloquear");
+                throw std::runtime_error("LookupError: el usuario a desbloquear no existe");
             }
             return mapear(res.returningRows[0]);
         }
 
         static void eliminarPorNombre(const char* nombreUsuario) {
-            if (!nombreUsuario || nombreUsuario[0] == '\0') {
-                throw std::invalid_argument("ValueError: nombre de usuario vacio");
+            asegurarCatalogo();
+
+            if (nombreUsuario != nullptr && strcasecmp(nombreUsuario, "admin") == 0) {
+                throw std::runtime_error("PermissionError: no se puede eliminar la cuenta principal admin");
             }
-            if (strcmp(nombreUsuario, "admin") == 0) {
-                throw std::runtime_error("PermissionError: no se permite eliminar la cuenta principal 'admin'");
+
+            auto res = Usuario.filter_eq("usuario", String(nombreUsuario ? nombreUsuario : "")).remove();
+            if (!res.success) {
+                lanzarUltimoErrorDB();
             }
-            auto res = Usuario.filter_eq("usuario", String(nombreUsuario)).remove();
-            exigirExitoDml(res);
             if (res.affectedRows == 0) {
                 throw std::runtime_error("LookupError: el usuario a eliminar no existe");
             }
         }
 
         static EstadisticasUsuariosDTO obtenerEstadisticasGlobales() {
-            PredicateCondition filtroActivos;
+            asegurarCatalogo();
+            asegurarSemillaPorDefecto();
+
+            DbRuntime::Engine::PredicateCondition filtroActivos;
             filtroActivos.columnOrExpr = "activa";
             filtroActivos.op           = FilterOp::EQ;
             filtroActivos.valueA       = "TRUE";
 
-            PredicateCondition filtroBloqueados;
+            DbRuntime::Engine::PredicateCondition filtroBloqueados;
             filtroBloqueados.columnOrExpr = "bloqueado";
             filtroBloqueados.op           = FilterOp::EQ;
             filtroBloqueados.valueA       = "TRUE";
 
-            std::vector<PgTuple> res = Usuario.objects()
-                .annotate("total_usr", AggregateFunc::COUNT_ALL)
-                .annotate_filtered("total_activos", AggregateFunc::COUNT_COL, "id_usuario", filtroActivos)
-                .annotate_filtered("total_bloqueados", AggregateFunc::COUNT_COL, "id_usuario", filtroBloqueados)
-                .annotate("max_fallos", AggregateFunc::MAX, "intentos_fallidos")
-                .all();
-
-            EstadisticasUsuariosDTO stats{0, 0, 0, 0};
-            if (!res.empty()) {
-                stats.totalUsuarios       = res[0].getInt("total_usr", 0);
-                stats.usuariosActivos     = res[0].getInt("total_activos", 0);
-                stats.usuariosBloqueados  = res[0].getInt("total_bloqueados", 0);
-                stats.maxIntentosFallidos = res[0].getInt("max_fallos", 0);
+            PgTuple r;
+            EstadisticasUsuariosDTO out{};
+            if (Usuario.objects()
+                    .annotate("total",        AggregateFunc::COUNT_ALL)
+                    .annotate_filtered("activos",    AggregateFunc::COUNT_COL, "id_usuario", filtroActivos)
+                    .annotate_filtered("bloqueados", AggregateFunc::COUNT_COL, "id_usuario", filtroBloqueados)
+                    .annotate("max_intentos", AggregateFunc::MAX, "intentos_fallidos")
+                    .first(r)) {
+                r["total"]        >> out.totalUsuarios;
+                r["activos"]      >> out.usuariosActivos;
+                r["bloqueados"]   >> out.usuariosBloqueados;
+                r["max_intentos"] >> out.maxIntentosFallidos;
             }
-            return stats;
+            return out;
         }
     };
 
-} // namespace DbRuntime::Repositories
+}

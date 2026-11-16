@@ -35,7 +35,21 @@ namespace DbRuntime::Storage {
             : PgCell(String(col ? col : ""), String(val), PgDataType::INTEGER) {}
         PgCell(const char* col, uint32_t val)
             : PgCell(String(col ? col : ""), String(val), PgDataType::BIGINT) {}
+        PgCell(const char* col, int64_t val) {
+            char buf[24]{};
+            snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(val));
+            setColumnName(String(col ? col : ""));
+            setValue(String(buf), PgDataType::BIGINT);
+        }
+        PgCell(const char* col, uint64_t val) {
+            char buf[24]{};
+            snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(val));
+            setColumnName(String(col ? col : ""));
+            setValue(String(buf), PgDataType::BIGINT);
+        }
         PgCell(const char* col, int16_t val)
+            : PgCell(String(col ? col : ""), String(val), PgDataType::SMALLINT) {}
+        PgCell(const char* col, uint16_t val)
             : PgCell(String(col ? col : ""), String(val), PgDataType::SMALLINT) {}
         PgCell(const char* col, bool val)
             : PgCell(String(col ? col : ""), val ? String("TRUE") : String("FALSE"), PgDataType::BOOLEAN) {}

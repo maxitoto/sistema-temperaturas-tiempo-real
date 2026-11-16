@@ -164,6 +164,13 @@ public:
 
                 enrutarPaqueteCompleto(slot, acc.buffer + 4, acc.longitudEsperada);
 
+                // Si el procedimiento cerró la conexión (ej. PROC_L1_CERRAR_WIFI), bytesAcumulados ya fue puesto en 0
+                if (acc.bytesAcumulados < tamanoTotalFrame) {
+                    acc.bytesAcumulados = 0;
+                    acc.longitudEsperada = 0;
+                    break;
+                }
+
                 const size_t sobrantes = acc.bytesAcumulados - tamanoTotalFrame;
                 if (sobrantes > 0) {
                     memmove(acc.buffer, acc.buffer + tamanoTotalFrame, sobrantes);

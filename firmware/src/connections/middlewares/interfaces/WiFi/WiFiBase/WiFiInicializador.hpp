@@ -46,12 +46,12 @@ private:
         }
 
         idConfiguracionActiva = cfg.id_configuracion_red;
-        strncpy(ssidStaCache,  cfg.ssid_sta,    sizeof(ssidStaCache) - 1);
-        strncpy(claveStaCache, cfg.password_sta, sizeof(claveStaCache) - 1);
-        if (cfg.ssid_ap[0] != '\0') {
-            strncpy(ssidApCache, cfg.ssid_ap, sizeof(ssidApCache) - 1);
+        strncpy(ssidStaCache,  cfg.ssid_sta.c_str(),     sizeof(ssidStaCache) - 1);
+        strncpy(claveStaCache, cfg.password_sta.c_str(), sizeof(claveStaCache) - 1);
+        if (!cfg.ssid_ap.vacio()) {
+            strncpy(ssidApCache, cfg.ssid_ap.c_str(), sizeof(ssidApCache) - 1);
         }
-        strncpy(claveApCache, cfg.password_ap, sizeof(claveApCache) - 1);
+        strncpy(claveApCache, cfg.password_ap.c_str(), sizeof(claveApCache) - 1);
         return true;
     }
 
@@ -119,10 +119,10 @@ public:
         if (idConfiguracionActiva > 0) {
             DbRuntime::Repositories::ConfiguracionRedDTO dto{};
             dto.id_configuracion_red = idConfiguracionActiva;
-            strncpy(dto.ssid_sta,    ssidStaCache,  sizeof(dto.ssid_sta) - 1);
-            strncpy(dto.password_sta, claveStaCache, sizeof(dto.password_sta) - 1);
-            strncpy(dto.ssid_ap,     ssidApCache,   sizeof(dto.ssid_ap) - 1);
-            strncpy(dto.password_ap, claveApCache,  sizeof(dto.password_ap) - 1);
+            dto.ssid_sta             = ssidStaCache;
+            dto.password_sta         = claveStaCache;
+            dto.ssid_ap              = ssidApCache;
+            dto.password_ap          = claveApCache;
 
             if (!DbRuntime::Repositories::RepoConfiguracionRed::actualizarTodo(dto)) {
                 Serial.println("[WiFi][DB] Advertencia: no se pudo guardar la nueva config en SD:");

@@ -9,7 +9,7 @@
  * Constante: CAPACIDAD_COLA_SALIDA
  * ¿Para qué sirve?: Define cuántos segmentos pueden estar en tránsito o esperando confirmación simultáneamente.
  */
-static const uint8_t CAPACIDAD_COLA_SALIDA = 16;
+static const uint8_t CAPACIDAD_COLA_SALIDA = 32;
 
 /**
  * Constante: MAXIMO_INTENTOS_RETRANSMISION
@@ -99,6 +99,13 @@ public:
         reiniciarColaSalida();
     }
 
+    uint8_t obtenerRanurasLibres() {
+        compactarCabezaCola();
+        return (cantidadEnCola < CAPACIDAD_COLA_SALIDA)
+               ? static_cast<uint8_t>(CAPACIDAD_COLA_SALIDA - cantidadEnCola)
+               : 0;
+    }
+
     bool encolarSegmentoParaEnvio(const TramaSegmentoUARTS& trama) {
         compactarCabezaCola();
         if (cantidadEnCola >= CAPACIDAD_COLA_SALIDA) {
@@ -150,18 +157,32 @@ public:
             turnoTransmisionActivo = true;
         }
 
-        for (uint8_t k = 0; k < cantidadEnCola; k++) {
-            uint8_t i = static_cast<uint8_t>((idxCabeza + k) % CAPACIDAD_COLA_SALIDA);
-            if (colaSalida[i].ocupada && colaSalida[i].trama.numeroSecuencia == numAckRecibido) {
-                if (banderasRecibidas & BANDERA_ACK) {
-                    colaSalida[i].ocupada = false;
-                    turnoTransmisionActivo = true;
-                } else if (banderasRecibidas & BANDERA_NACK) {
-                    colaSalida[i].enviadoAlCable        = true;
-                    colaSalida[i].instanteUltimoEnvioMs = 0;
-                    turnoTransmisionActivo              = true;
+        if (banderasRecibidas & BANDERA_ACK) {
+            // Confirmación acumulativa: libera cualquier segmento enviado con secuencia <= numAckRecibido
+            for (uint8_t k = 0; k < cantidadEnCola; k++) {
+                uint8_t i = static_cast<uint8_t>((idxCabeza + k) % CAPACIDAD_COLA_SALIDA);
+                if (colaSalida[i].ocupada && colaSalida[i].enviadoAlCable) {
+                    const int16_t diff = static_cast<int16_t>(colaSalida[i].trama.numeroSecuencia - numAckRecibido);
+                    if (diff <= 0) {
+                        colaSalida[i].ocupada = false;
+                        turnoTransmisionActivo = true;
+                    }
                 }
-                break;
+            }
+        } else if (banderasRecibidas & BANDERA_NACK) {
+            // Go-Back-N: marca desde la secuencia pedida por el receptor en adelante para reenvío en orden
+            for (uint8_t k = 0; k < cantidadEnCola; k++) {
+                uint8_t i = static_cast<uint8_t>((idxCabeza + k) % CAPACIDAD_COLA_SALIDA);
+                if (colaSalida[i].ocupada && colaSalida[i].enviadoAlCable) {
+                    const int16_t diff = static_cast<int16_t>(colaSalida[i].trama.numeroSecuencia - numAckRecibido);
+                    if (diff == 0) {
+                        colaSalida[i].instanteUltimoEnvioMs = 0;
+                        turnoTransmisionActivo = true;
+                    } else if (diff > 0) {
+                        colaSalida[i].enviadoAlCable        = false;
+                        colaSalida[i].instanteUltimoEnvioMs = 0;
+                    }
+                }
             }
         }
         compactarCabezaCola();

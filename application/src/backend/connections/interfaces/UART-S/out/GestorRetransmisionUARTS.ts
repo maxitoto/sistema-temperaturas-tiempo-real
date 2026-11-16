@@ -23,7 +23,7 @@ interface SegmentoPendiente {
 
 export class GestorRetransmisionUARTS {
 
-    private static readonly CAPACIDAD_COLA = 16;
+    private static readonly CAPACIDAD_COLA = 32;
     private static readonly MAXIMO_INTENTOS = 5;
     private static readonly RTO_MS = 250;
 

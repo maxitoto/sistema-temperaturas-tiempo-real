@@ -21,7 +21,11 @@ export interface UARTSClientEvents {
 export class UARTSClient {
     private static readonly BAUDIOS_SERVIDOR = 115200;
     private static readonly INTERVALO_PROTOCOLO_MS = 10;
-    private static readonly TIMEOUT_SINCRONIZACION_MS = 5000;
+    private static readonly TIMEOUT_SINCRONIZACION_MS = 12000;
+
+    // Puerto físico persistente a nivel proceso para evitar que el SO pulse DTR/RTS y reinicie el ESP32
+    private static puertoFisicoCompartido: SerialPort | null = null;
+    private static rutaFisicaAbierta = "";
 
     private puerto: SerialPort | null = null;
     private estado = EstadoConexionUARTS.DESCONECTADO;
@@ -38,6 +42,28 @@ export class UARTSClient {
     private temporizadorReintentoSync?: ReturnType<typeof setInterval>;
     private resolverSyncPendiente?: () => void;
 
+    private readonly onDataHandler = (datos: Buffer) => {
+        const tramas = this.deserializador.procesarBytes(datos);
+        for (const trama of tramas) {
+            this.registrarLogTrama("RX <", SerializadorTramasUARTS.serializar(trama));
+            this.procesarTrama(trama);
+        }
+    };
+
+    private readonly onErrorHandler = (error: Error) => {
+        this.eventos.onError?.(error);
+        this.actualizarEstado(EstadoConexionUARTS.ERROR);
+    };
+
+    private readonly onCloseHandler = () => {
+        UARTSClient.puertoFisicoCompartido = null;
+        UARTSClient.rutaFisicaAbierta = "";
+        this.puerto = null;
+        this.limpiarTemporizadores();
+        this.reiniciarEstadoInterno();
+        this.actualizarEstado(EstadoConexionUARTS.DESCONECTADO);
+    };
+
     constructor(private readonly eventos: UARTSClientEvents = {}) {
         this.gestorSalida = new GestorRetransmisionUARTS({
             escribir: (datos: Buffer): boolean => {
@@ -53,7 +79,7 @@ export class UARTSClient {
                 return true;
             },
             onFalloEnlace: () => {
-                this.eventos.onDebugLog?.("[UART-S] Enlace perdido (máximo de reintentos sin ACK). Cerrando puerto.");
+                this.eventos.onDebugLog?.("[UART-S] Enlace perdido (máximo de reintentos sin ACK). Cerrando sesión.");
                 void this.cerrar();
             }
         });
@@ -82,39 +108,66 @@ export class UARTSClient {
             this.eventos.onDebugLog?.(
                 `[UART-S ${direccion}] [${flags}] SEQ:${seq} ACK:${ack} WIN:${win} LEN:${len} | ${hex}`
             );
-        } else {
-            this.eventos.onDebugLog?.(`[UART-S ${direccion} RAW] (${raw.length}B) ${raw.toString("hex").toUpperCase()}`);
         }
     }
 
-    static async listarPuertos(): Promise<string[]> {
-        const puertos = await SerialPort.list();
-        return puertos.map(p => p.path);
-    }
-
-    async conectar(rutaPuerto: string): Promise<void> {
-        if (this.puerto) {
-            await this.cerrar();
+    private static async obtenerOAbrirPuertoFisico(rutaPuerto: string): Promise<SerialPort> {
+        if (
+            this.puertoFisicoCompartido &&
+            this.puertoFisicoCompartido.isOpen &&
+            this.rutaFisicaAbierta === rutaPuerto
+        ) {
+            return this.puertoFisicoCompartido;
         }
 
-        this.puerto = new SerialPort({
+        if (this.puertoFisicoCompartido && this.puertoFisicoCompartido.isOpen) {
+            await new Promise<void>(resolve => this.puertoFisicoCompartido!.close(() => resolve()));
+        }
+
+        const nuevoPuerto = new SerialPort({
             path: rutaPuerto,
             baudRate: UARTSClient.BAUDIOS_SERVIDOR,
             dataBits: 8,
             parity: "even",
             stopBits: 1,
+            hupcl: false,
             autoOpen: false,
             highWaterMark: 4096
         });
 
-        this.configurarEventosPuerto(this.puerto);
+        await new Promise<void>((resolve, reject) => {
+            nuevoPuerto.open(error => (error ? reject(error) : resolve()));
+        });
+
+        await new Promise<void>(resolve => {
+            nuevoPuerto.set({ dtr: false, rts: false }, () => resolve());
+        });
+
+        this.puertoFisicoCompartido = nuevoPuerto;
+        this.rutaFisicaAbierta = rutaPuerto;
+        return nuevoPuerto;
+    }
+
+    static async listarPuertos(): Promise<string[]> {
+        const puertos = await SerialPort.list();
+        const rutas = puertos.map(p => p.path);
+
+        // Pre-abre en segundo plano el puerto USB del ESP32 para que al pulsar "Conectar" nunca se reinicie
+        const candidatoEsp32 = rutas.find(r => /usbserial|SLAB_USBtoUART|wchusbserial|ttyUSB|COM/i.test(r));
+        if (candidatoEsp32 && (!this.puertoFisicoCompartido || !this.puertoFisicoCompartido.isOpen)) {
+            this.obtenerOAbrirPuertoFisico(candidatoEsp32).catch(() => {});
+        }
+        return rutas;
+    }
+
+    async conectar(rutaPuerto: string): Promise<void> {
+        this.limpiarTemporizadores();
+        this.desvincularListenersPuerto();
         this.actualizarEstado(EstadoConexionUARTS.CONECTANDO);
 
         try {
-            await new Promise<void>((resolve, reject) => {
-                this.puerto!.open(error => (error ? reject(error) : resolve()));
-            });
-
+            this.puerto = await UARTSClient.obtenerOAbrirPuertoFisico(rutaPuerto);
+            this.vincularListenersPuerto(this.puerto);
             this.iniciarTemporizadorProtocolo();
 
             await new Promise<void>((resolve, reject) => {
@@ -165,32 +218,21 @@ export class UARTSClient {
         }
     }
 
-    private configurarEventosPuerto(puerto: SerialPort): void {
-        puerto.on("data", (datos: Buffer) => {
-            const tramas = this.deserializador.procesarBytes(datos);
-            if (tramas.length === 0) {
-                this.registrarLogTrama("RX <", datos);
-            }
-            for (const trama of tramas) {
-                this.registrarLogTrama("RX <", SerializadorTramasUARTS.serializar(trama));
-                this.procesarTrama(trama);
-            }
-        });
+    private vincularListenersPuerto(puerto: SerialPort): void {
+        puerto.on("data", this.onDataHandler);
+        puerto.on("error", this.onErrorHandler);
+        puerto.on("close", this.onCloseHandler);
+    }
 
-        puerto.on("error", error => {
-            this.eventos.onError?.(error);
-            this.actualizarEstado(EstadoConexionUARTS.ERROR);
-        });
-
-        puerto.on("close", () => {
-            this.limpiarTemporizadores();
-            this.reiniciarEstadoInterno();
-            this.actualizarEstado(EstadoConexionUARTS.DESCONECTADO);
-        });
+    private desvincularListenersPuerto(): void {
+        if (this.puerto) {
+            this.puerto.off("data", this.onDataHandler);
+            this.puerto.off("error", this.onErrorHandler);
+            this.puerto.off("close", this.onCloseHandler);
+        }
     }
 
     private procesarTrama(trama: TramaSegmentoUARTS): void {
-        
         if (trama.banderas & BanderasControlTrama.CERRAR) {
             this.eventos.onDebugLog?.("[UART-S] Trama CERRAR recibida desde el servidor ESP32.");
             void this.cerrar();
@@ -260,7 +302,7 @@ export class UARTSClient {
             TAMANO_MAXIMO_PAYLOAD_ESTATICO
         );
 
-        if (segmentos.length === 0 || segmentos.length > 16) {
+        if (segmentos.length === 0 || segmentos.length > 32) {
             return false;
         }
 
@@ -275,11 +317,10 @@ export class UARTSClient {
         return true;
     }
 
+    // Cierra la sesión lógica UART-S SIN cerrar el descriptor físico del SO para no resetear el ESP32
     async cerrar(): Promise<void> {
         this.limpiarTemporizadores();
-        if (this.puerto && this.puerto.isOpen) {
-            await new Promise<void>(resolve => this.puerto!.close(() => resolve()));
-        }
+        this.desvincularListenersPuerto();
         this.puerto = null;
         this.reiniciarEstadoInterno();
         this.actualizarEstado(EstadoConexionUARTS.DESCONECTADO);
@@ -294,7 +335,7 @@ export class UARTSClient {
     }
 
     obtenerRutaPuerto(): string {
-        return this.puerto?.path ?? "";
+        return this.puerto?.path ?? UARTSClient.rutaFisicaAbierta;
     }
 
     private iniciarTemporizadorProtocolo(): void {

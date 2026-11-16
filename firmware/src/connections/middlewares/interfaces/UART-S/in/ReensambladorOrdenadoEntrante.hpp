@@ -8,7 +8,7 @@
  * Constante: CAPACIDAD_BUFFER_MENSAJE_COMPLETO
  * ¿Para qué sirve?: Define el tamaño máximo en bytes que puede tener un mensaje reensamblado para la aplicación.
  */
-static const size_t CAPACIDAD_BUFFER_MENSAJE_COMPLETO = 1024;
+static const size_t CAPACIDAD_BUFFER_MENSAJE_COMPLETO = 1536;
 
 /**
  * Clase: ReensambladorOrdenadoEntrante
@@ -16,23 +16,20 @@ static const size_t CAPACIDAD_BUFFER_MENSAJE_COMPLETO = 1024;
  */
 class ReensambladorOrdenadoEntrante {
 private:
-    // ¿Para qué sirve?: Almacena los bytes acumulados de los segmentos recibidos en orden.
     uint8_t bufferReensamblado[CAPACIDAD_BUFFER_MENSAJE_COMPLETO];
-    // ¿Para qué sirve?: Indica cuántos bytes se han acumulado del mensaje actual.
     size_t longitudAcumulada;
-    // ¿Para qué sirve?: Registra el número de secuencia que debe tener el próximo segmento entrante válido.
     uint16_t secuenciaEsperada;
-    // ¿Para qué sirve?: Indica si ya se recibió el último fragmento y el mensaje está listo para ser leído por la aplicación.
     bool mensajeCompletoListo;
 
 public:
-    /**
-     * Constructor: ReensambladorOrdenadoEntrante
-     * ¿Para qué sirve?: Inicializa los contadores de secuencia y limpia el buffer de reensamblaje.
-     * ¿Cómo lo hace?: Fija longitudAcumulada en 0, secuenciaEsperada en 0 y mensajeCompletoListo en falso.
-     */
     ReensambladorOrdenadoEntrante()
         : longitudAcumulada(0), secuenciaEsperada(0), mensajeCompletoListo(false) {}
+
+    void reiniciar() {
+        longitudAcumulada = 0;
+        secuenciaEsperada = 0;
+        mensajeCompletoListo = false;
+    }
 
     /**
      * Función: procesarSegmentoDatosOrdenado

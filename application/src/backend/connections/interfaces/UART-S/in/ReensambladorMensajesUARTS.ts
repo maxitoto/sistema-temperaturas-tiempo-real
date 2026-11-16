@@ -5,7 +5,7 @@ import {
 
 export class ReensambladorMensajesUARTS {
 
-    private static readonly CAPACIDAD_BUFFER = 1024;
+    private static readonly CAPACIDAD_BUFFER = 1536;
 
     private buffer: Buffer = Buffer.alloc(
         ReensambladorMensajesUARTS.CAPACIDAD_BUFFER

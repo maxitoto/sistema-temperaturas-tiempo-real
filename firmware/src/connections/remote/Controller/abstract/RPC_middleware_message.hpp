@@ -75,7 +75,7 @@ public:
     // Emite un ciclo de todos los servicios registrados con semántica talVez que tengan clientes suscritos
     static void emitirStreamsTalVezActivos(FuncionDifusionL1 callbackDifusion) {
         if (!callbackDifusion) return;
-        uint8_t bufferStream[CAPACIDAD_BUFFER_COMPARTIDO];
+        static uint8_t bufferStream[CAPACIDAD_BUFFER_COMPARTIDO];;
 
         for (size_t i = 0; i < totalRegistrados; ++i) {
             if (registro[i].semantica == SemanticaEntrega::TAL_VEZ &&
@@ -153,6 +153,9 @@ public:
                         sobre.idTicket, sobre.idProcedimiento, resultado,
                         bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
                     );
+                    if (longitudSalidaCompartida == 0) {
+                        throw std::runtime_error("OverflowError: SalidaDTO excede CAPACIDAD_BUFFER_COMPARTIDO");
+                    }
                 }
             } else {
                 EntradaDTO dtoEntrada{};
@@ -172,6 +175,9 @@ public:
                         sobre.idTicket, sobre.idProcedimiento, resultado,
                         bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
                     );
+                    if (longitudSalidaCompartida == 0) {
+                        throw std::runtime_error("OverflowError: SalidaDTO excede CAPACIDAD_BUFFER_COMPARTIDO");
+                    }
                 }
             }
 

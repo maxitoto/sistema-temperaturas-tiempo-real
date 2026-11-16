@@ -4,10 +4,18 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <type_traits>
 
 static constexpr uint16_t BANDERA_ERROR_RPC = 0x8000;
 
 class CodificadorRPC {
+private:
+    template <typename T, typename = void>
+    struct TieneBytesActivos : std::false_type {};
+
+    template <typename T>
+    struct TieneBytesActivos<T, std::void_t<decltype(std::declval<const T&>().bytesActivos())>> : std::true_type {};
+
 public:
     static constexpr size_t TAMANO_CABECERA_MENSAJE_RPC = 8;
 
@@ -19,7 +27,11 @@ public:
         uint8_t* bufferDestino,
         size_t capacidadMaxima
     ) {
-        const size_t tamanoDto = sizeof(SalidaDTO);
+        size_t tamanoDto = sizeof(SalidaDTO);
+        if constexpr (TieneBytesActivos<SalidaDTO>::value) {
+            tamanoDto = dto.bytesActivos();
+        }
+
         const size_t totalRequerido = TAMANO_CABECERA_MENSAJE_RPC + tamanoDto;
 
         if (bufferDestino == nullptr || capacidadMaxima < totalRequerido) {
@@ -38,7 +50,9 @@ public:
         bufferDestino[6] = static_cast<uint8_t>((idProcedimiento >> 8) & 0xFF);
         bufferDestino[7] = static_cast<uint8_t>(idProcedimiento & 0xFF);
 
-        memcpy(bufferDestino + TAMANO_CABECERA_MENSAJE_RPC, &dto, tamanoDto);
+        if (tamanoDto > 0) {
+            memcpy(bufferDestino + TAMANO_CABECERA_MENSAJE_RPC, &dto, tamanoDto);
+        }
         return totalRequerido;
     }
 

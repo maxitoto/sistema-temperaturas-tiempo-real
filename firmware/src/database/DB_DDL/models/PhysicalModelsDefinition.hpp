@@ -5,314 +5,625 @@ namespace DbNotRuntime::PhysicalModels {
 
     using namespace DbNotRuntime::Models;
 
-    // Registra en PostgreSQL todos los tipos ENUM nativos requeridos por el modelo físico antes de migrar las tablas.
+    template <typename TEnum>
+    inline bool registerTypedEnum() {
+        return PgEnumChoices::registerChoices(
+            DbCommon::Dto::PgEnumTraits<TEnum>::typeName(),
+            DbCommon::Dto::PgEnumTraits<TEnum>::labels()
+        );
+    }
+
     inline bool registerAllPostgresEnums() {
-        return PgEnumChoices::registerChoices("enum_rol_usuario", {"ADMIN","NO_ADMIN","NINGUNO"})
-            && PgEnumChoices::registerChoices("criticidad_evento_enum", {"BAJA", "MEDIA", "CRITICA"})
-            && PgEnumChoices::registerChoices("tipo_recepcion_correo_enum", {"TODOS", "EVENTOS", "CRITICOS"})
-            && PgEnumChoices::registerChoices("estado_envio_correo_enum", {"PENDIENTE", "ENVIADO", "FALLIDO"})
-            && PgEnumChoices::registerChoices("medio_conexion_enum", {"INTERNO", "USB", "WIFI_STA", "WIFI_AP"})
-            && PgEnumChoices::registerChoices("resultado_auditoria_enum", {
-                   "EXITO", "DENEGADO_ROL", "CREDENCIAL_INVALIDA", "INTRUSION_TERMINAL", "ERROR_VALIDACION"
-               });
+        return registerTypedEnum<RolUsuario>()
+            && registerTypedEnum<CriticidadEvento>()
+            && registerTypedEnum<TipoEvento>()
+            && registerTypedEnum<TipoRecepcionCorreo>()
+            && registerTypedEnum<EstadoEnvioCorreo>()
+            && registerTypedEnum<MedioConexion>()
+            && registerTypedEnum<ResultadoAuditoria>()
+            && registerTypedEnum<FuenteTiempo>()
+            && registerTypedEnum<EstadoSensor>()
+            && registerTypedEnum<EstadoBus>();
     }
 
     class ConfiguracionRedModel final : public Model {
-        public: 
-            MetaOptions meta() const override {return { "ConfiguracionRed" }; }
-            std::vector<Field> fields() const override {
-                return {
-                    AutoField("id_configuracion_red"),
-                    CharField("ssid_sta", 35).default_val(""),
-                    CharField("password_sta", 64).default_val(""),
-                    CharField("ssid_ap", 35).default_val("ESP32-SecureAP"),
-                    CharField("password_ap", 64).default_val("ESP32secure1234@"),
-                    DateTimeField("creado_el"),
-                    DateTimeField("actualizado_el").auto_now(true)
-                };
-            }
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "ConfiguracionRed";
+            m.db_tablespace = "pg_default";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_configuracion_red"),
+                CharField("ssid_sta", 35).default_val(""),
+                CharField("password_sta", 64).default_val(""),
+                CharField("ssid_ap", 35).default_val("ESP32-SecureAP"),
+                CharField("password_ap", 64).default_val("ESP32secure1234@"),
+                DateTimeField("creado_el"),
+                DateTimeField("actualizado_el").auto_now(true)
+            };
+        }
+    };
+
+    class ConfiguracionConectividadModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "ConfiguracionConectividad";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                IntegerField("id_configuracion_conectividad")
+                    .primary_key(true)
+                    .default_val(1)
+                    .check(
+                        "id_configuracion_conectividad = 1",
+                        +[](const String& v) -> bool { return v.toInt() == 1; }
+                    ),
+                CharField("ssid_sta", 33).default_val(""),
+                CharField("sta_password", 160).default_val(""),
+                CharField("ssid_ap", 33).default_val("ESP32-SecureAP"),
+                CharField("ap_password", 160).default_val(""),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion"),
+                DateTimeField("fecha_modificacion").auto_now(true)
+            };
+        }
+    };
+
+    class ConfiguracionSmtpModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "ConfiguracionSmtp";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                IntegerField("id_configuracion_smtp")
+                    .primary_key(true)
+                    .default_val(1)
+                    .check(
+                        "id_configuracion_smtp = 1",
+                        +[](const String& v) -> bool { return v.toInt() == 1; }
+                    ),
+                CharField("host_smtp", 40).default_val(""),
+                PositiveIntegerField("puerto").default_val(465),
+                BooleanField("usar_tls").default_val("TRUE"),
+                CharField("usuario", 48).default_val(""),
+                CharField("password_cifrado", 160).default_val(""),
+                CharField("email_remitente", 48).default_val(""),
+                CharField("nombre_remitente", 32).default_val("Laboratorio UNTDF"),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion"),
+                DateTimeField("fecha_modificacion").auto_now(true)
+            };
+        }
+    };
+
+    class CalibracionModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Calibracion";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                IntegerField("id_calibracion")
+                    .primary_key(true)
+                    .default_val(1)
+                    .check(
+                        "id_calibracion = 1",
+                        +[](const String& v) -> bool { return v.toInt() == 1; }
+                    ),
+                FloatField("altura")
+                    .default_val(0.0f)
+                    .check(
+                        "altura >= -500.0 AND altura <= 9000.0",
+                        +[](const String& v) -> bool {
+                            const float a = v.toFloat();
+                            return a >= -500.0f && a <= 9000.0f;
+                        }
+                    ),
+                FloatField("presion_atmosferica")
+                    .default_val(1013.25f)
+                    .check(
+                        "presion_atmosferica >= 300.0 AND presion_atmosferica <= 1100.0",
+                        +[](const String& v) -> bool {
+                            const float p = v.toFloat();
+                            return p >= 300.0f && p <= 1100.0f;
+                        }
+                    ),
+                FloatField("temp_congelacion_ref").default_val(0.0f),
+                FloatField("temp_ebullicion_ref").default_val(100.0f),
+                BooleanField("activa").default_val("TRUE"),
+                BigIntegerField("fecha_creacion").default_val(0),
+                BigIntegerField("fecha_modificacion").default_val(0)
+            };
+        }
+    };
+
+    class ServidoresNtpModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "ServidoresNtp";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_ntp_activa_prioridad", {"activa", "prioridad"}, false)
+            };
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_server"),
+                CharField("server", 40).unique(true),
+                SmallIntegerField("prioridad")
+                    .default_val(1)
+                    .check(
+                        "prioridad >= 1 AND prioridad <= 10",
+                        +[](const String& v) -> bool {
+                            const int p = v.toInt();
+                            return p >= 1 && p <= 10;
+                        }
+                    ),
+                BooleanField("activa").default_val("TRUE"),
+                BigIntegerField("fecha_creacion").default_val(0),
+                BigIntegerField("fecha_modificacion").default_val(0)
+            };
+        }
+    };
+
+    class ConfiguracionSistemaModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "ConfiguracionSistema";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                IntegerField("id_configuracion_sistema")
+                    .primary_key(true)
+                    .default_val(1)
+                    .check(
+                        "id_configuracion_sistema = 1",
+                        +[](const String& v) -> bool { return v.toInt() == 1; }
+                    ),
+                IntegerField("zona_horaria_min").default_val(-180),
+                PositiveIntegerField("retencion_senso_dias").default_val(365),
+                PositiveIntegerField("retencion_eventos_dias").default_val(730),
+                PositiveIntegerField("retencion_auditoria_dias").default_val(1095),
+                PositiveIntegerField("sd_libre_minimo_kb").default_val(51200),
+                PositiveIntegerField("correo_cooldown_s").default_val(900),
+                BooleanField("activa").default_val("TRUE"),
+                BigIntegerField("fecha_modificacion").default_val(0)
+            };
+        }
     };
 
     class UsuarioModel final : public Model {
-        public: 
-            MetaOptions meta() const override {return { "Usuario" }; }
-            std::vector<Field> fields() const override {
-                return {
-                    AutoField("id_usuario"),
-                    CharField("usuario", 16).unique(true),
-                    CharField("salt", 8).default_val("SALT"),
-                    TextField("contrasena_hash"),
-                    EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO),
-                    SmallIntegerField("intentos_fallidos")
-                        .check(
-                            "intentos_fallidos >= 0 AND intentos_fallidos <= 3",
-                            +[](const String& v) -> bool { int n = v.toInt(); return n >= 0 && n <= 3; }
-                        )
-                        .default_val(0),
-                    BooleanField("bloqueado").default_val("FALSE"),
-                    BooleanField("activa").default_val("TRUE"),
-                    DateTimeField("creado_el"),
-                    DateTimeField("actualizado_el").auto_now(true)
-                };
-            }
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Usuario";
+            m.db_tablespace = "tbs_seguridad";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_usuario_activa", {"activa"}, false)
+            };
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_usuario"),
+                CharField("usuario", 20).unique(true),
+                CharField("salt", 32).default_val("SALT"),
+                TextField("contrasena_hash", 64),
+                EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO),
+                SmallIntegerField("intentos_fallidos")
+                    .check(
+                        "intentos_fallidos >= 0 AND intentos_fallidos <= 3",
+                        +[](const String& v) -> bool {
+                            const int n = v.toInt();
+                            return n >= 0 && n <= 3;
+                        }
+                    )
+                    .default_val(0),
+                BooleanField("bloqueado").default_val("FALSE"),
+                BigIntegerField("bloqueado_desde").null(true).default_val(0),
+                BigIntegerField("bloqueado_hasta").null(true).default_val(0),
+                BigIntegerField("fecha_ultimo_login").null(true).default_val(0),
+                BigIntegerField("fecha_cambio_password").null(true).default_val(0),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("creado_el"),
+                DateTimeField("actualizado_el").auto_now(true)
+            };
+        }
     };
 
-    // 1. Modelo físico de la tabla Calibracion.
-    // class CalibracionModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "Calibracion" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_calibracion"),
-    //             FloatField("altura").default_val(0.0f),
-    //             FloatField("presion_atmosferica").default_val(1013.25f),
-    //             FloatField("temp_congelacion_ref").default_val(0.0f),
-    //             FloatField("temp_ebullicion_ref").default_val(100.0f),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+    class SensorModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Sensor";
+            m.db_tablespace = "tbs_sensores";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_sensor_activo",    {"activa"},    false),
+                Index("idx_sensor_ubicacion", {"ubicacion"}, false)
+            };
+            return m;
+        }
 
-    // // 2. Modelo físico de la tabla Lts.
-    // class LtsModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "Lts" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_lts"),
-    //             CharField("version_firmware", 32).default_val("1.0.0"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_sensor"),
+                FixedCharField("mac", 25).unique(true),
+                TextField("nombre", 32).default_val(""),
+                TextField("ubicacion", 32).default_val(""),
+                TextField("descripcion", 128).default_val(""),
+                FloatField("umbral_sup")
+                    .default_val(126.0f)
+                    .check(
+                        "umbral_sup >= -55.0 AND umbral_sup <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float t = v.toFloat();
+                            return t >= -55.0f && t <= 126.0f;
+                        }
+                    ),
+                FloatField("umbral_inf")
+                    .default_val(-55.0f)
+                    .check(
+                        "umbral_inf >= -55.0 AND umbral_inf <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float t = v.toFloat();
+                            return t >= -55.0f && t <= 126.0f;
+                        }
+                    ),
+                FloatField("error_sup")
+                    .default_val(0.0f)
+                    .check(
+                        "error_sup >= -55.0 AND error_sup <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float e = v.toFloat();
+                            return e >= -55.0f && e <= 126.0f;
+                        }
+                    ),
+                FloatField("error_inf")
+                    .default_val(0.0f)
+                    .check(
+                        "error_inf >= -55.0 AND error_inf <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float e = v.toFloat();
+                            return e >= -55.0f && e <= 126.0f;
+                        }
+                    ),
+                FloatField("offset")
+                    .default_val(0.0f)
+                    .check(
+                        "offset >= -20.0 AND offset <= 20.0",
+                        +[](const String& v) -> bool {
+                            const float o = v.toFloat();
+                            return o >= -20.0f && o <= 20.0f;
+                        }
+                    ),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion"),
+                DateTimeField("fecha_modificacion").auto_now(true)
+            };
+        }
+    };
 
-    // // 3. Modelo físico de la tabla ConfiguracionConectividad.
-    // class ConfiguracionConectividadModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "ConfiguracionConectividad" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_configuracion_conectividad"),
-    //             CharField("ssid_sta", 64).default_val(""),
-    //             CharField("sta_password_aes", 128).default_val(""),
-    //             CharField("ssid_ap", 64).default_val("ESP32-SecureAP"),
-    //             CharField("ap_password_aes", 128).default_val(""),
-    //             PositiveIntegerField("puerto_tcp").default_val(8443),
-    //             PositiveIntegerField("puerto_udp").default_val(8444),
-    //             PositiveIntegerField("baudios_usb").default_val(115200),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+    class SensoModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Senso";
+            m.db_tablespace = "tbs_sensores";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_senso_sensor_fecha", {"id_sensor", "fecha_creacion"}, false),
+                Index("idx_senso_fecha",        {"fecha_creacion"},              false)
+            };
+            return m;
+        }
 
-    // // 4. Modelo físico de la tabla ServidoresNtp.
-    // class ServidoresNtpModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "ServidoresNtp" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_server"),
-    //             CharField("server", 96).unique(),
-    //             SmallIntegerField("prioridad").default_val(1).check("prioridad >= 1 AND prioridad <= 10"),
-    //             PositiveIntegerField("timeout_ms").default_val(2500),
-    //             PositiveIntegerField("fallos_consecutivos").default_val(0),
-    //             BigIntegerField("ultimo_sync_exitoso").default_val(0),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_senso"),
+                ForeignKey("id_sensor", "Sensor", "id_sensor", RESTRICT),
+                FloatField("temperatura_cruda")
+                    .default_val(0.0f)
+                    .check(
+                        "temperatura_cruda >= -55.0 AND temperatura_cruda <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float t = v.toFloat();
+                            return t >= -55.0f && t <= 126.0f;
+                        }
+                    ),
+                FloatField("temperatura_corregida")
+                    .default_val(0.0f)
+                    .check(
+                        "temperatura_corregida >= -55.0 AND temperatura_corregida <= 126.0",
+                        +[](const String& v) -> bool {
+                            const float t = v.toFloat();
+                            return t >= -55.0f && t <= 126.0f;
+                        }
+                    ),
+                EnumField<EstadoSensor>("estado_sensor").default_val(EstadoSensor::OK),
+                BigIntegerField("fecha_creacion").default_val(0)
+            };
+        }
+    };
 
-    // // 5. Modelo físico de la tabla ConfiguracionSmtp.
-    // class ConfiguracionSmtpModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "ConfiguracionSmtp" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_configuracion_smtp"),
-    //             CharField("host_smtp", 96).default_val(""),
-    //             PositiveIntegerField("puerto").default_val(465),
-    //             BooleanField("usar_tls").default_val("TRUE"),
-    //             CharField("usuario", 96).default_val(""),
-    //             CharField("password_aes", 128).default_val(""),
-    //             CharField("email_remitente", 96).default_val(""),
-    //             CharField("nombre_remitente", 64).default_val(""),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+    class AuditoriaSensoresModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "AuditoriaSensores";
+            m.db_tablespace = "tbs_auditoria";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_aud_sensor_fecha",      {"id_sensor", "fecha_creacion"}, false),
+                Index("idx_aud_sensor_reporte",    {"estado_reporte"},              false),
+                Index("idx_aud_sensor_criticidad", {"criticidad_sensor"},           false)
+            };
+            return m;
+        }
 
-    // // 6. Modelo físico de la tabla Usuarios (unicidad garantizada por .unique() en columna usuario).
-    // class UsuariosModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "Usuarios" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_usuario"),
-    //             CharField("usuario", 48).unique(),
-    //             CharField("salt", 32),
-    //             CharField("contrasena_hash", 64),
-    //             EnumField("rol", "rol_usuario_enum").default_val("OPERADOR"),
-    //             PositiveIntegerField("intentos_fallidos").default_val(0),
-    //             BooleanField("bloqueado").default_val("FALSE"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_auditoria_sensor"),
+                ForeignKey("id_sensor", "Sensor", "id_sensor", RESTRICT),
+                ForeignKey("id_senso", "Senso", "id_senso", CASCADE),
+                EnumField<EstadoSensor>("estado_previo_sensor").default_val(EstadoSensor::OK),
+                EnumField<EstadoSensor>("estado_nuevo_sensor").default_val(EstadoSensor::ALARMA_SUPERIOR),
+                EnumField<EstadoBus>("estado_bus").default_val(EstadoBus::OK),
+                EnumField<TipoEvento>("tipo_evento_sensor").default_val(TipoEvento::ADVERTENCIA),
+                EnumField<CriticidadEvento>("criticidad_sensor").default_val(CriticidadEvento::ALTA),
+                EnumField<EstadoEnvioCorreo>("estado_reporte").default_val(EstadoEnvioCorreo::PENDIENTE),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion")
+            };
+        }
+    };
 
-    // // 7. Modelo físico de la tabla Correos.
-    // class CorreosModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "Correos" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_correo"),
-    //             CharField("nombre", 48),
-    //             CharField("apellido", 48),
-    //             CharField("correo_electronico", 96).unique(),
-    //             EnumField("tipo_recepcion_mensajes", "tipo_recepcion_correo_enum").default_val("TODOS"),
-    //             EnumField("ultimo_estado_envio", "estado_envio_correo_enum").default_val("PENDIENTE"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+    class AuditoriaSistemaModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "AuditoriaSistema";
+            m.db_tablespace = "tbs_auditoria";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_aud_sis_fecha",      {"fecha_creacion"}, false),
+                Index("idx_aud_sis_reporte",    {"estado_reporte"}, false),
+                Index("idx_aud_sis_criticidad", {"criticidad"},     false)
+            };
+            return m;
+        }
 
-    // // 8. Modelo físico de la tabla Auditoria (con FK hacia Usuarios).
-    // class AuditoriaModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override {
-    //         MetaOptions m;
-    //         m.db_table = "Auditoria";
-    //         m.indexes  = { Index("idx_auditoria_fecha", {"fecha_creacion"}) };
-    //         return m;
-    //     }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_auditoria"),
-    //             ForeignKey("id_usuario", "Usuarios", "id_usuario", PROTECT),
-    //             CharField("accion", 48),
-    //             CharField("tabla_afectada", 48),
-    //             CharField("valor_previo", 64).default_val(""),
-    //             CharField("valor_nuevo", 64).default_val(""),
-    //             CharField("detalle", 120).default_val(""),
-    //             EnumField("medio_conexion", "medio_conexion_enum").default_val("INTERNO"),
-    //             CharField("origen_remoto", 48).default_val("LOCAL"),
-    //             EnumField("resultado", "resultado_auditoria_enum").default_val("EXITO"),
-    //             EnumField("criticidad", "criticidad_evento_enum").default_val("BAJA"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_auditoria_sistema"),
+                EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::NULA),
+                EnumField<TipoEvento>("tipo_evento_sistema").default_val(TipoEvento::INFORMATIVO),
+                EnumField<EstadoBus>("estado_bus").default_val(EstadoBus::OK),
+                PositiveIntegerField("espacio_sd_libre_kb").default_val(0),
+                PositiveIntegerField("heap_libre_bytes").default_val(0),
+                CharField("reset_reason", 24).default_val(""),
+                CharField("version_firmware", 16).default_val("1.0.0"),
+                CharField("detalle", 96).default_val(""),
+                BooleanField("internet").default_val("FALSE"),
+                EnumField<EstadoEnvioCorreo>("estado_reporte").default_val(EstadoEnvioCorreo::PENDIENTE),
+                PositiveIntegerField("boot_id").default_val(0),
+                PositiveIntegerField("uptime_s").default_val(0),
+                EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion")
+            };
+        }
+    };
 
-    // // 9. Modelo físico de la tabla Sensor (unicidad garantizada por .unique() en hexadecimal).
-    // class SensorModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "Sensor" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_sensor"),
-    //             CharField("hexadecimal", 24).unique(),
-    //             CharField("mac2", 24),
-    //             CharField("nombre", 48).default_val("Sensor"),
-    //             TextField("descripcion").default_val(""),
-    //             CharField("ubicacion", 64).default_val("Sin asignar"),
-    //             TextField("ubicacion_descripcion").default_val(""),
-    //             FloatField("offset_calibracion").default_val(0.0f),
-    //             FloatField("correcion_superior").default_val(0.0f),
-    //             FloatField("correcion_inferior").default_val(0.0f),
-    //             FloatField("umbral_superior").default_val(125.0f),
-    //             FloatField("umbral_inferior").default_val(-55.0f),
-    //             SmallIntegerField("resolucion_bits").default_val(12).check("resolucion_bits >= 9 AND resolucion_bits <= 12"),
-    //             BooleanField("alimentacion_parasita").default_val("FALSE"),
-    //             SmallIntegerField("estado_actual").default_val(0),
-    //             DateTimeField("fecha_creacion").default_val(0),
-    //             DateTimeField("fecha_modificacion").default_val(0),
-    //         };
-    //     }
-    // };
+    class CorreosModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Correos";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_correos_activa", {"activa"}, false)
+            };
+            return m;
+        }
 
-    // // 10. Modelo físico de la tabla Senso (con FK hacia Sensor).
-    // class SensoModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override {
-    //         MetaOptions m;
-    //         m.db_table = "Senso";
-    //         m.indexes  = { Index("idx_senso_sensor_fecha", {"id_sensor", "fecha_creacion"}) };
-    //         return m;
-    //     }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_senso"),
-    //             ForeignKey("id_sensor", "Sensor", "id_sensor", CASCADE),
-    //             FloatField("temperatura_cruda"),
-    //             FloatField("temperatura_corregida"),
-    //             SmallIntegerField("estado_sensor").default_val(0),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_correo"),
+                CharField("nombre", 24),
+                CharField("apellido", 24).default_val(""),
+                CharField("correo_electronico", 48).unique(true),
+                EnumField<TipoRecepcionCorreo>("tipo_recepcion_mensajes").default_val(TipoRecepcionCorreo::RECIBIR_TODOS),
+                EnumField<EstadoEnvioCorreo>("ultimo_estado_envio").default_val(EstadoEnvioCorreo::PENDIENTE),
+                BooleanField("activa").default_val("TRUE"),
+                DateTimeField("fecha_creacion"),
+                DateTimeField("fecha_modificacion").auto_now(true)
+            };
+        }
+    };
 
-    // // 11. Modelo físico de la tabla EventoSensor (con FKs hacia Sensor y Senso).
-    // class EventoSensorModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "EventoSensor" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_evento_sensor"),
-    //             ForeignKey("id_sensor", "Sensor", "id_sensor", CASCADE),
-    //             ForeignKey("id_senso", "Senso", "id_senso", CASCADE),
-    //             SmallIntegerField("estado_previo_sensor").default_val(0),
-    //             SmallIntegerField("evento").default_val(0),
-    //             EnumField("criticidad", "criticidad_evento_enum").default_val("BAJA"),
-    //             EnumField("notificado_smtp", "estado_envio_correo_enum").default_val("PENDIENTE"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0),
-    //             BigIntegerField("fecha_modificacion").default_val(0)
-    //         };
-    //     }
-    // };
+    class CorreoEnvioModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "CorreoEnvio";
+            m.db_tablespace = "tbs_sistema";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_envio_cola_pendiente", {"estado", "intentos"}, false),
+                Index("idx_envio_destinatario",   {"id_correo"},          false)
+            };
+            return m;
+        }
 
-    // // 12. Modelo físico de la tabla EventoSistema.
-    // class EventoSistemaModel final : public Model {
-    // public:
-    //     MetaOptions meta() const override { return { "EventoSistema" }; }
-    //     std::vector<Field> fields() const override {
-    //         return {
-    //             AutoField("id_evento_sistema"),
-    //             SmallIntegerField("estado_bus").default_val(0),
-    //             SmallIntegerField("evento_gestor").default_val(0),
-    //             EnumField("criticidad", "criticidad_evento_enum").default_val("BAJA"),
-    //             PositiveIntegerField("espacio_sd_libre_kb").default_val(0),
-    //             PositiveIntegerField("heap_libre_bytes").default_val(0),
-    //             CharField("detalle", 96).default_val(""),
-    //             EnumField("notificado_smtp", "estado_envio_correo_enum").default_val("PENDIENTE"),
-    //             BooleanField("activa").default_val("TRUE"),
-    //             BigIntegerField("fecha_creacion").default_val(0)
-    //         };
-    //     }
-    // };
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_envio"),
+                ForeignKey("id_correo", "Correos", "id_correo", CASCADE),
+                ForeignKey("id_auditoria_sensor", "AuditoriaSensores", "id_auditoria_sensor", CASCADE).null(true),
+                ForeignKey("id_auditoria_sistema", "AuditoriaSistema", "id_auditoria_sistema", CASCADE).null(true),
+                EnumField<EstadoEnvioCorreo>("estado").default_val(EstadoEnvioCorreo::PENDIENTE),
+                PositiveSmallIntegerField("intentos").default_val(0),
+                CharField("ultimo_error", 128).default_val(""),
+                DateTimeField("fecha_creacion"),
+                DateTimeField("fecha_envio").null(true)
+            };
+        }
+    };
 
-    // Ejecuta la migración de un modelo individual en su propio frame de pila y reporta el margen libre.
+    class AuditoriaConexionModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "AuditoriaConexion";
+            m.db_tablespace = "tbs_auditoria";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_aud_con_fecha", {"fecha_creacion"}, false)
+            };
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_auditoria_conexion"),
+                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::UART_S),
+                FixedCharField("mac_conexion", 25).default_val(""),
+                FixedCharField("ip", 16).default_val("LOCAL"),
+                PositiveIntegerField("puerto_remoto").default_val(0),
+                DateTimeField("fecha_creacion")
+            };
+        }
+    };
+
+    class AuditoriaAuthModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "AuditoriaAuth";
+            m.db_tablespace = "tbs_auditoria";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_aud_auth_fecha",         {"fecha_creacion"},               false),
+                Index("idx_aud_auth_usuario_fecha", {"id_usuario", "fecha_creacion"}, false)
+            };
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_auditoria_auth"),
+                PositiveBigIntegerField("seq").unique(true),
+                ForeignKey("id_usuario", "Usuario", "id_usuario", RESTRICT).null(true),
+                ForeignKey("id_auditoria_conexion", "AuditoriaConexion", "id_auditoria_conexion", SET_NULL).null(true),
+                CharField("usuario_intentado", 20).default_val(""),
+                CharField("accion", 32),
+                CharField("tabla_afectada", 32).default_val("NINGUNA"),
+                CharField("valor_previo", 64).default_val(""),
+                CharField("valor_nuevo", 64).default_val(""),
+                CharField("detalle", 120).default_val(""),
+                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::INTERNO),
+                CharField("origen_remoto", 46).default_val("LOCAL"),
+                EnumField<ResultadoAuditoria>("resultado").default_val(ResultadoAuditoria::EXITO),
+                EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::BAJA),
+                PositiveIntegerField("boot_id").default_val(0),
+                PositiveIntegerField("uptime_s").default_val(0),
+                EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR),
+                BigIntegerField("fecha_creacion").default_val(0),
+                CharField("hash_previo", 64),
+                CharField("hash_registro", 64)
+            };
+        }
+    };
+
+    class SesionesModel final : public Model {
+    public:
+        MetaOptions meta() const override {
+            MetaOptions m;
+            m.db_table      = "Sesiones";
+            m.db_tablespace = "tbs_seguridad";
+            m.persistence   = Standard::TablePersistence::PERMANENT;
+            m.indexes       = {
+                Index("idx_sesiones_usuario", {"id_usuario"}, false)
+            };
+            return m;
+        }
+
+        std::vector<Field> fields() const override {
+            return {
+                AutoField("id_sesion"),
+                ForeignKey("id_usuario", "Usuario", "id_usuario", CASCADE),
+                CharField("token_hash", 64).unique(true),
+                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::INTERNO),
+                CharField("origen_remoto", 46).default_val("LOCAL"),
+                PositiveIntegerField("boot_id").default_val(0),
+                PositiveIntegerField("uptime_creacion_s").default_val(0),
+                PositiveIntegerField("uptime_expira_s").default_val(0),
+                BooleanField("revocada").default_val("FALSE"),
+                BigIntegerField("fecha_creacion").default_val(0)
+            };
+        }
+    };
+
     template <typename TModel>
     inline bool migrateSingleModel() {
         TModel modelInstance;
         return modelInstance.migrate();
-    };
+    }
 
-    // Ejecuta la migración determinista en orden topológico de dependencias liberando la pila entre cada modelo.
     inline bool migrateAllPhysicalModels() {
         if (!registerAllPostgresEnums()) return false;
 
         return migrateSingleModel<ConfiguracionRedModel>()
-            && migrateSingleModel<UsuarioModel>();
-    };
+            //&& migrateSingleModel<ConfiguracionConectividadModel>()
+            //&& migrateSingleModel<ConfiguracionSmtpModel>()
+            //&& migrateSingleModel<CalibracionModel>()
+            //&& migrateSingleModel<ServidoresNtpModel>()
+            //&& migrateSingleModel<ConfiguracionSistemaModel>()
+            && migrateSingleModel<UsuarioModel>()
+            && migrateSingleModel<SensorModel>()
+            && migrateSingleModel<SensoModel>()
+            // && migrateSingleModel<AuditoriaSensoresModel>()
+            // && migrateSingleModel<AuditoriaSistemaModel>()
+            // && migrateSingleModel<CorreosModel>()
+            // && migrateSingleModel<CorreoEnvioModel>()
+            // && migrateSingleModel<AuditoriaConexionModel>()
+            // && migrateSingleModel<AuditoriaAuthModel>()
+            // && migrateSingleModel<SesionesModel>()
+            ;
+    }
 
-} // namespace DbNotRuntime::PhysicalModels
+}

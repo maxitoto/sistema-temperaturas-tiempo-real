@@ -53,8 +53,9 @@ interface PeticionPendiente {
 }
 
 export class FirmwareRPCClient {
-    private static readonly INTERVALO_KEEPALIVE_MS = 45000;
-    private static readonly TIMEOUT_RPC_MS = 6000;
+    private static readonly INTERVALO_REVISION_KEEPALIVE_MS = 10000;
+    private static readonly UMBRAL_SILENCIO_KEEPALIVE_MS    = 40000;
+    private static readonly TIMEOUT_RPC_MS                  = 8000;
 
     private readonly uarts: UARTSClient;
     private readonly wifi: WiFiClient;
@@ -62,6 +63,10 @@ export class FirmwareRPCClient {
     private medioActivo: MedioActivoCliente = "NINGUNO";
     private proximoTicket = 1;
     private pendientes = new Map<number, PeticionPendiente>();
+    private enVueloPorClave = new Map<string, Promise<Buffer>>();
+    private colaSeriePromesa: Promise<unknown> = Promise.resolve();
+    private ultimoContactoMs = 0;
+
     private listenersStreamPorProc = new Map<number, (payload: Buffer) => void>();
     private udpWiFiVinculado = false;
     private timerKeepalive?: ReturnType<typeof setInterval>;
@@ -156,6 +161,7 @@ export class FirmwareRPCClient {
         await this.desconectar();
         await this.uarts.conectar(rutaPuerto);
         this.medioActivo = "UART-S";
+        this.ultimoContactoMs = Date.now();
 
         try {
             const resp = await this.invocarPorId(
@@ -176,6 +182,7 @@ export class FirmwareRPCClient {
         await this.wifi.conectar(ipServidor);
         this.medioActivo = "WIFI";
         this.udpWiFiVinculado = false;
+        this.ultimoContactoMs = Date.now();
 
         try {
             await this.invocarPorId(ProcedimientoSistemaRPC.L1_KEEPALIVE_WIFI);
@@ -232,7 +239,35 @@ export class FirmwareRPCClient {
         this.listenersStreamPorProc.set(idProc, cb);
     }
 
-    invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0)): Promise<Buffer> {
+    invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0), deduplicable = false): Promise<Buffer> {
+        if (this.medioActivo === "NINGUNO") {
+            return Promise.reject(new Error("ConnectionError: el cliente no está conectado al servidor ESP32"));
+        }
+
+        const claveVuelo = deduplicable ? `${idProc}:${payloadDto.toString("hex")}` : "";
+        if (deduplicable) {
+            const existente = this.enVueloPorClave.get(claveVuelo);
+            if (existente) {
+                return existente;
+            }
+        }
+
+        const ejecutarTransaccion = () => this.enviarYEsperarTicket(idProc, payloadDto);
+
+        // En UART-S (enlace serie punto a punto) encolamos secuencialmente para no saturar el FIFO del ESP32
+        const promesa = (this.medioActivo === "UART-S")
+            ? (this.colaSeriePromesa = this.colaSeriePromesa.then(ejecutarTransaccion, ejecutarTransaccion)) as Promise<Buffer>
+            : ejecutarTransaccion();
+
+        if (deduplicable) {
+            this.enVueloPorClave.set(claveVuelo, promesa);
+            promesa.finally(() => this.enVueloPorClave.delete(claveVuelo)).catch(() => {});
+        }
+
+        return promesa;
+    }
+
+    private enviarYEsperarTicket(idProc: number, payloadDto: Buffer): Promise<Buffer> {
         if (this.medioActivo === "NINGUNO") {
             return Promise.reject(new Error("ConnectionError: el cliente no está conectado al servidor ESP32"));
         }
@@ -248,6 +283,7 @@ export class FirmwareRPCClient {
             }, FirmwareRPCClient.TIMEOUT_RPC_MS);
 
             this.pendientes.set(idTicket, { resolve, reject, timer });
+            this.ultimoContactoMs = Date.now();
 
             const enviado = this.medioActivo === "UART-S"
                 ? this.uarts.enviarMensaje(frame)
@@ -264,6 +300,8 @@ export class FirmwareRPCClient {
     private procesarFrameRecibido(frameCompleto: Buffer): void {
         const desglose = FirmwareRPCClient.desempaquetarRespuesta(frameCompleto);
         if (!desglose) return;
+
+        this.ultimoContactoMs = Date.now();
 
         const pendiente = this.pendientes.get(desglose.idTicket);
         if (pendiente) {
@@ -288,6 +326,14 @@ export class FirmwareRPCClient {
     private iniciarPulsoKeepaliveAutomatico(): void {
         this.detenerPulsoKeepaliveAutomatico();
         this.timerKeepalive = setInterval(() => {
+            // No enviar Keepalive si ya hay llamadas L3 en curso o si hubo actividad reciente en el canal
+            if (this.pendientes.size > 0) {
+                return;
+            }
+            if (Date.now() - this.ultimoContactoMs < FirmwareRPCClient.UMBRAL_SILENCIO_KEEPALIVE_MS) {
+                return;
+            }
+
             const proc = this.medioActivo === "UART-S"
                 ? ProcedimientoSistemaRPC.L1_KEEPALIVE_UARTS
                 : this.medioActivo === "WIFI"
@@ -295,12 +341,12 @@ export class FirmwareRPCClient {
                     : null;
 
             if (proc !== null) {
-                this.invocarPorId(proc).catch(err => {
+                this.invocarPorId(proc, Buffer.alloc(0), true).catch(err => {
                     this.registrarLogVisor(`[KEEPALIVE FALLÓ] ${err.message}. Cerrando conexión.`);
                     void this.cerrarTransporteLocal();
                 });
             }
-        }, FirmwareRPCClient.INTERVALO_KEEPALIVE_MS);
+        }, FirmwareRPCClient.INTERVALO_REVISION_KEEPALIVE_MS);
     }
 
     private detenerPulsoKeepaliveAutomatico(): void {
@@ -314,6 +360,8 @@ export class FirmwareRPCClient {
         this.detenerPulsoKeepaliveAutomatico();
         this.medioActivo = "NINGUNO";
         this.udpWiFiVinculado = false;
+        this.enVueloPorClave.clear();
+        this.colaSeriePromesa = Promise.resolve();
         this.listenersStreamPorProc.clear();
         for (const [, p] of this.pendientes) {
             clearTimeout(p.timer);
@@ -351,7 +399,7 @@ class ConstructorLlamadoCliente {
             const payload = entradaCodec && entrada !== undefined
                 ? entradaCodec.serialize(entrada)
                 : Buffer.alloc(0);
-            const raw = await this.transporte.invocarPorId(idProc, payload);
+            const raw = await this.transporte.invocarPorId(idProc, payload, true);  
             return salidaCodec ? salidaCodec.deserialize(raw) : undefined;
         };
     }

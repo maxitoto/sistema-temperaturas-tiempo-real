@@ -55,7 +55,7 @@ constexpr uint16_t hashNombreProcedimiento(const char* nombre) {
 
 class RPCBase {
 public:
-    static constexpr size_t   CAPACIDAD_BUFFER_COMPARTIDO = 1024;
+    static constexpr size_t   CAPACIDAD_BUFFER_COMPARTIDO = 1536;
     static constexpr uint8_t  MAXIMO_TICKETS_EN_VUELO     = 12;
     static constexpr uint32_t TIMEOUT_TICKET_MS           = 15000;
 

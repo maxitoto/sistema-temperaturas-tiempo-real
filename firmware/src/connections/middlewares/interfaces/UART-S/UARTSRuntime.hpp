@@ -52,21 +52,19 @@ public:
         contadorSecuenciaSalida = 0;
         ultimoSecuenciaConfirmada = 0;
         deserializadorEntrada.reiniciarEstadoParser();
-        reensambladorEntrada = ReensambladorOrdenadoEntrante();
+        reensambladorEntrada.reiniciar();
         gestorSalida.reiniciarColaSalida();
     }
 
-    // ¿Cómo lo hace?: Cambia atómicamente la bandera clienteConectado a true cuando el handshake de L1 o la bandera SINCRONIZAR lo confirman.
     void marcarClienteConectado() {
         clienteConectado.store(true, std::memory_order_relaxed);
     }
 
-    // ¿Cómo lo hace?: Lee de forma atómica (memory_order_relaxed) la bandera clienteConectado sin bloquear tareas de FreeRTOS como dibujarOled().
     bool hayClienteConectado() const {
         return clienteConectado.load(std::memory_order_relaxed);
     }
 
-    // ¿Cómo lo hace?: Fracciona el buffer usando SegmentadorMensajesSalientes según el FIFO y encola cada tramo en GestorRetransmisionYEnvio.
+    // Segmenta y encola usando 1 sola TramaSegmentoUARTS (121 bytes en stack en vez de 1936 bytes)
     bool enviarMensajeConfiable(const uint8_t* datos, size_t longitud) {
         if (datos == nullptr || longitud == 0) {
             return false;
@@ -77,42 +75,60 @@ public:
             return false;
         }
 
-        // Protege contra truncamiento silencioso si el mensaje supera las 16 ranuras de salida
-        const size_t capacidadMaximaBytes = static_cast<size_t>(CAPACIDAD_COLA_SALIDA) * perfil.tamanoMaximoSegmentoDatos;
-        if (longitud > capacidadMaximaBytes) {
+        const uint8_t pasoCorte = (perfil.tamanoMaximoSegmentoDatos > TAMANO_MAXIMO_PAYLOAD_ESTATICO)
+                                  ? TAMANO_MAXIMO_PAYLOAD_ESTATICO
+                                  : perfil.tamanoMaximoSegmentoDatos;
+
+        const size_t segmentosRequeridos = (longitud + pasoCorte - 1) / pasoCorte;
+        if (segmentosRequeridos == 0 || segmentosRequeridos > CAPACIDAD_COLA_SALIDA) {
             return false;
         }
 
-        TramaSegmentoUARTS segmentosGenerados[CAPACIDAD_COLA_SALIDA];
-        uint8_t ventanaLocal = reensambladorEntrada.calcularVentanaSegmentosDisponible(perfil.tamanoMaximoSegmentoDatos);
-        bool modoHD = (perfil.modoDuplex == MODO_HALF_DUPLEX);
-
-        uint8_t cantidad = SegmentadorMensajesSalientes::dividirMensajeEnSegmentos(
-            datos,
-            longitud,
-            perfil.tamanoMaximoSegmentoDatos,
-            contadorSecuenciaSalida,
-            ultimoSecuenciaConfirmada,
-            ventanaLocal,
-            modoHD,
-            segmentosGenerados,
-            CAPACIDAD_COLA_SALIDA
-        );
-
-        if (cantidad == 0) {
-            return false;
-        }
-
-        for (uint8_t i = 0; i < cantidad; i++) {
-            if (!gestorSalida.encolarSegmentoParaEnvio(segmentosGenerados[i])) {
+        // Si la cola tiene segmentos previos en tránsito, drena el protocolo hasta liberar espacio
+        const uint32_t inicioEsperaMs = millis();
+        while (gestorSalida.obtenerRanurasLibres() < segmentosRequeridos) {
+            if (!hayClienteConectado() || (millis() - inicioEsperaMs) > 600) {
                 return false;
             }
+            ejecutarCicloProtocolo();
+            delay(1);
         }
+
+        const uint8_t ventanaLocal = reensambladorEntrada.calcularVentanaSegmentosDisponible(pasoCorte);
+        const bool esHalfDuplex = (perfil.modoDuplex == MODO_HALF_DUPLEX);
+
+        size_t offset = 0;
+        TramaSegmentoUARTS seg{};
+
+        while (offset < longitud) {
+            const size_t restantes = longitud - offset;
+            const uint8_t longitudTrozo = (restantes > pasoCorte) ? pasoCorte : static_cast<uint8_t>(restantes);
+            const bool hayMasFragmentos = (offset + longitudTrozo) < longitud;
+
+            seg.inicioTrama = BYTE_INICIO_TRAMA;
+            seg.banderas = BANDERA_DATOS;
+            if (hayMasFragmentos) {
+                seg.banderas |= BANDERA_MAS_FRAGMENTOS;
+            }
+            if (esHalfDuplex && !hayMasFragmentos) {
+                seg.banderas |= BANDERA_CEDER_TURNO_HD;
+            }
+
+            seg.numeroSecuencia = contadorSecuenciaSalida++;
+            seg.numeroConfirmacion = ultimoSecuenciaConfirmada;
+            seg.ventanaRecepcion = ventanaLocal;
+            seg.longitudDatos = longitudTrozo;
+            memcpy(seg.datosUtiles, datos + offset, longitudTrozo);
+            seg.finTrama = BYTE_FIN_TRAMA;
+
+            gestorSalida.encolarSegmentoParaEnvio(seg);
+            offset += longitudTrozo;
+        }
+
         gestorSalida.actualizarCicloEnvioYRetransmision();
         return true;
     }
 
-    // ¿Cómo lo hace?: Drena bytes RX, activa clienteConectado si recibe BANDERA_SINCRONIZAR, procesa ACKs/NACKs y ejecuta retransmisiones vencidas.
     void ejecutarCicloProtocolo() {
         const PerfilCapacidadesUART& perfil = adaptadorUART.obtenerPerfilCapacidades();
         TramaSegmentoUARTS tramaRecibida;
@@ -136,7 +152,7 @@ public:
             if (tramaRecibida.banderas & BANDERA_SINCRONIZAR) {
                 contadorSecuenciaSalida = 0;
                 ultimoSecuenciaConfirmada = 0;
-                reensambladorEntrada = ReensambladorOrdenadoEntrante();
+                reensambladorEntrada.reiniciar();
                 gestorSalida.reiniciarColaSalida();
                 clienteConectado.store(true, std::memory_order_relaxed);
 
@@ -153,6 +169,15 @@ public:
             }
 
             if (tramaRecibida.banderas & BANDERA_DATOS) {
+                // Si el cliente habla directamente con SEQ:0 tras estar desconectado, sincroniza en caliente
+                if (!clienteConectado.load(std::memory_order_relaxed) && tramaRecibida.numeroSecuencia == 0) {
+                    contadorSecuenciaSalida = 0;
+                    ultimoSecuenciaConfirmada = 0;
+                    reensambladorEntrada.reiniciar();
+                    gestorSalida.reiniciarColaSalida();
+                    clienteConectado.store(true, std::memory_order_relaxed);
+                }
+
                 bool eraDuplicado = false;
                 bool aceptado = reensambladorEntrada.procesarSegmentoDatosOrdenado(tramaRecibida, eraDuplicado);
                 uint8_t ventana = reensambladorEntrada.calcularVentanaSegmentosDisponible(perfil.tamanoMaximoSegmentoDatos);
