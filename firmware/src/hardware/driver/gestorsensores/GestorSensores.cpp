@@ -21,7 +21,7 @@ bool GestorSensores::esFamiliaValida(uint8_t fam) {
 
 int8_t GestorSensores::clampToInt8(float val) {
     float r = roundf(val);
-    if (r > 125.0f) return 125;
+    if (r > 126.0f) return 126;
     if (r < -55.0f) return -55;
     return static_cast<int8_t>(r);
 }
@@ -458,7 +458,7 @@ EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
     }
 
     if (estadoEvaluado != EstadoSensor::OK) {
-        float codigoComoTemp = static_cast<float>(static_cast<int16_t>(estadoEvaluado));
+        float codigoComoTemp = temperaturaCentinelaDeEstado(estadoEvaluado);
         s.setTempCruda(codigoComoTemp);
         s.setTempCelsius(codigoComoTemp);
         s.setEstado(estadoEvaluado);

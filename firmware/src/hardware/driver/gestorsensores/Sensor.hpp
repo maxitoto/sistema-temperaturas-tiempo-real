@@ -53,7 +53,7 @@ struct ResumenSistemaSensores {
 
 class Sensor {
 public:
-    static constexpr float UMBRAL_MAX_DEFAULT = 125.0f;
+    static constexpr float UMBRAL_MAX_DEFAULT = 126.0f;
     static constexpr float UMBRAL_MIN_DEFAULT = -55.0f;
     static constexpr float OFFSET_DEFAULT     = 0.0f;
 

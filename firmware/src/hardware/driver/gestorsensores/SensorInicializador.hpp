@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "Sensor.hpp"
+#include "../../../database/repositories/repoCalibracion.hpp"
 
 class SensorInicializador {
 private:
@@ -12,6 +13,7 @@ private:
         if (calibracionGlobalLeida) return;
 
         // consulta DB
+        
 
         calibracionGlobalLeida = true;
     }

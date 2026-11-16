@@ -31,7 +31,7 @@ namespace DbNotRuntime::PhysicalModels {
         MetaOptions meta() const override {
             MetaOptions m;
             m.db_table      = "ConfiguracionRed";
-            m.db_tablespace = "pg_default";
+            m.db_tablespace = "tbs_sistema";
             m.persistence   = Standard::TablePersistence::PERMANENT;
             return m;
         }
@@ -45,36 +45,6 @@ namespace DbNotRuntime::PhysicalModels {
                 CharField("password_ap", 64).default_val("ESP32secure1234@"),
                 DateTimeField("creado_el"),
                 DateTimeField("actualizado_el").auto_now(true)
-            };
-        }
-    };
-
-    class ConfiguracionConectividadModel final : public Model {
-    public:
-        MetaOptions meta() const override {
-            MetaOptions m;
-            m.db_table      = "ConfiguracionConectividad";
-            m.db_tablespace = "tbs_sistema";
-            m.persistence   = Standard::TablePersistence::PERMANENT;
-            return m;
-        }
-
-        std::vector<Field> fields() const override {
-            return {
-                IntegerField("id_configuracion_conectividad")
-                    .primary_key(true)
-                    .default_val(1)
-                    .check(
-                        "id_configuracion_conectividad = 1",
-                        +[](const String& v) -> bool { return v.toInt() == 1; }
-                    ),
-                CharField("ssid_sta", 33).default_val(""),
-                CharField("sta_password", 160).default_val(""),
-                CharField("ssid_ap", 33).default_val("ESP32-SecureAP"),
-                CharField("ap_password", 160).default_val(""),
-                BooleanField("activa").default_val("TRUE"),
-                DateTimeField("fecha_creacion"),
-                DateTimeField("fecha_modificacion").auto_now(true)
             };
         }
     };
@@ -132,7 +102,7 @@ namespace DbNotRuntime::PhysicalModels {
                         +[](const String& v) -> bool { return v.toInt() == 1; }
                     ),
                 FloatField("altura")
-                    .default_val(0.0f)
+                    .default_val(115.0f)
                     .check(
                         "altura >= -500.0 AND altura <= 9000.0",
                         +[](const String& v) -> bool {
@@ -475,60 +445,6 @@ namespace DbNotRuntime::PhysicalModels {
         }
     };
 
-    class CorreoEnvioModel final : public Model {
-    public:
-        MetaOptions meta() const override {
-            MetaOptions m;
-            m.db_table      = "CorreoEnvio";
-            m.db_tablespace = "tbs_sistema";
-            m.persistence   = Standard::TablePersistence::PERMANENT;
-            m.indexes       = {
-                Index("idx_envio_cola_pendiente", {"estado", "intentos"}, false),
-                Index("idx_envio_destinatario",   {"id_correo"},          false)
-            };
-            return m;
-        }
-
-        std::vector<Field> fields() const override {
-            return {
-                AutoField("id_envio"),
-                ForeignKey("id_correo", "Correos", "id_correo", CASCADE),
-                ForeignKey("id_auditoria_sensor", "AuditoriaSensores", "id_auditoria_sensor", CASCADE).null(true),
-                ForeignKey("id_auditoria_sistema", "AuditoriaSistema", "id_auditoria_sistema", CASCADE).null(true),
-                EnumField<EstadoEnvioCorreo>("estado").default_val(EstadoEnvioCorreo::PENDIENTE),
-                PositiveSmallIntegerField("intentos").default_val(0),
-                CharField("ultimo_error", 128).default_val(""),
-                DateTimeField("fecha_creacion"),
-                DateTimeField("fecha_envio").null(true)
-            };
-        }
-    };
-
-    class AuditoriaConexionModel final : public Model {
-    public:
-        MetaOptions meta() const override {
-            MetaOptions m;
-            m.db_table      = "AuditoriaConexion";
-            m.db_tablespace = "tbs_auditoria";
-            m.persistence   = Standard::TablePersistence::PERMANENT;
-            m.indexes       = {
-                Index("idx_aud_con_fecha", {"fecha_creacion"}, false)
-            };
-            return m;
-        }
-
-        std::vector<Field> fields() const override {
-            return {
-                AutoField("id_auditoria_conexion"),
-                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::UART_S),
-                FixedCharField("mac_conexion", 25).default_val(""),
-                FixedCharField("ip", 16).default_val("LOCAL"),
-                PositiveIntegerField("puerto_remoto").default_val(0),
-                DateTimeField("fecha_creacion")
-            };
-        }
-    };
-
     class AuditoriaAuthModel final : public Model {
     public:
         MetaOptions meta() const override {
@@ -548,7 +464,6 @@ namespace DbNotRuntime::PhysicalModels {
                 AutoField("id_auditoria_auth"),
                 PositiveBigIntegerField("seq").unique(true),
                 ForeignKey("id_usuario", "Usuario", "id_usuario", RESTRICT).null(true),
-                ForeignKey("id_auditoria_conexion", "AuditoriaConexion", "id_auditoria_conexion", SET_NULL).null(true),
                 CharField("usuario_intentado", 20).default_val(""),
                 CharField("accion", 32),
                 CharField("tabla_afectada", 32).default_val("NINGUNA"),
@@ -569,35 +484,6 @@ namespace DbNotRuntime::PhysicalModels {
         }
     };
 
-    class SesionesModel final : public Model {
-    public:
-        MetaOptions meta() const override {
-            MetaOptions m;
-            m.db_table      = "Sesiones";
-            m.db_tablespace = "tbs_seguridad";
-            m.persistence   = Standard::TablePersistence::PERMANENT;
-            m.indexes       = {
-                Index("idx_sesiones_usuario", {"id_usuario"}, false)
-            };
-            return m;
-        }
-
-        std::vector<Field> fields() const override {
-            return {
-                AutoField("id_sesion"),
-                ForeignKey("id_usuario", "Usuario", "id_usuario", CASCADE),
-                CharField("token_hash", 64).unique(true),
-                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::INTERNO),
-                CharField("origen_remoto", 46).default_val("LOCAL"),
-                PositiveIntegerField("boot_id").default_val(0),
-                PositiveIntegerField("uptime_creacion_s").default_val(0),
-                PositiveIntegerField("uptime_expira_s").default_val(0),
-                BooleanField("revocada").default_val("FALSE"),
-                BigIntegerField("fecha_creacion").default_val(0)
-            };
-        }
-    };
-
     template <typename TModel>
     inline bool migrateSingleModel() {
         TModel modelInstance;
@@ -608,22 +494,17 @@ namespace DbNotRuntime::PhysicalModels {
         if (!registerAllPostgresEnums()) return false;
 
         return migrateSingleModel<ConfiguracionRedModel>()
-            //&& migrateSingleModel<ConfiguracionConectividadModel>()
-            //&& migrateSingleModel<ConfiguracionSmtpModel>()
-            //&& migrateSingleModel<CalibracionModel>()
-            //&& migrateSingleModel<ServidoresNtpModel>()
-            //&& migrateSingleModel<ConfiguracionSistemaModel>()
+            && migrateSingleModel<ConfiguracionSmtpModel>()
+            && migrateSingleModel<CalibracionModel>()
+            && migrateSingleModel<ServidoresNtpModel>()
+            && migrateSingleModel<ConfiguracionSistemaModel>()
             && migrateSingleModel<UsuarioModel>()
             && migrateSingleModel<SensorModel>()
             && migrateSingleModel<SensoModel>()
-            // && migrateSingleModel<AuditoriaSensoresModel>()
-            // && migrateSingleModel<AuditoriaSistemaModel>()
-            // && migrateSingleModel<CorreosModel>()
-            // && migrateSingleModel<CorreoEnvioModel>()
-            // && migrateSingleModel<AuditoriaConexionModel>()
-            // && migrateSingleModel<AuditoriaAuthModel>()
-            // && migrateSingleModel<SesionesModel>()
-            ;
+            && migrateSingleModel<AuditoriaSensoresModel>()
+            && migrateSingleModel<AuditoriaSistemaModel>()
+            && migrateSingleModel<CorreosModel>()
+            && migrateSingleModel<AuditoriaAuthModel>();
     }
 
 }

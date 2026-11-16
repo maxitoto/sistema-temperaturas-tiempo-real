@@ -1,5 +1,9 @@
 #pragma once
 #include <stdint.h>
+#include "../../../database/common/PgDtoTypes.hpp"
+
+// FUENTE DE VERDAD: EstadoSensor y EstadoBus viven en PgDtoTypes.hpp (los usa la BD).
+// Este archivo solo conserva lo que es propio del bus 1-Wire y no se persiste.
 
 // Dirección ROM de 64 bits (8 bytes) estándar 1-Wire
 using DeviceAddress = uint8_t[8];
@@ -26,15 +30,7 @@ static constexpr int32_t DEVICE_FAULT_SHORTVDD_RAW     = -16384;
 static constexpr int32_t DEVICE_FAULT_SHORTGND_RAW     = -16512;
 static constexpr int32_t DEVICE_FAULT_OPEN_RAW         = -16640;
 
-enum class EstadoBus : uint8_t {
-    OK = 0,
-    LINEA_EN_CORTO_GND,
-    SIN_PULSO_PRESENCIA,
-    TOPOLOGIA_MODIFICADA,
-    FALLO_CONVERSION_GLOBAL,
-    LIMITE_SENSORES_EXCEDIDO
-};
-
+// Solo runtime (no se persiste): su información se refleja en AuditoriaSistema.detalle / estado_bus
 enum class EventoGestor : uint8_t {
     NINGUNO = 0,
     BUS_INICIALIZADO,
@@ -45,22 +41,31 @@ enum class EventoGestor : uint8_t {
     ALARMA_DETECTADA_EN_BUS
 };
 
-enum class EstadoSensor : int16_t {
-    OK                        = 0,
-    ALARMA_SUPERIOR           = 1,
-    ALARMA_INFERIOR           = 2,
-    SLOT_VACIO                = -1,
-    DIRECCION_ROM_INVALIDA    = -2,
-    FAMILIA_NO_COMPATIBLE     = -3,
-    SCRATCHPAD_VACIO_CEROS    = -4,
-    ERROR_CRC_SCRATCHPAD      = -5,
-    CONVERSION_PENDIENTE      = -6,
-    TIMEOUT_CONVERSION        = -7,
-    FALLO_ESCRITURA_EEPROM    = -8,
-    DESCONECTADO              = -127,
-    ALIMENTACION_INSUFICIENTE = 127,
-    REINICIO_ENERGIA_85C      = 85,
-    CORTOCIRCUITO_VDD         = -128,
-    CORTOCIRCUITO_GND         = -129,
-    CIRCUITO_ABIERTO          = -130
-};
+// true solo si la temperatura medida es real (el resto son fallos y su "temperatura" es un código)
+inline bool estadoTieneLecturaValida(EstadoSensor e) {
+    return e == EstadoSensor::OK
+        || e == EstadoSensor::ALARMA_SUPERIOR
+        || e == EstadoSensor::ALARMA_INFERIOR;
+}
+
+// Reemplaza el viejo static_cast<int16_t>(estado): conserva los códigos centinela
+// que antes vivían en los valores numéricos del enum.
+inline float temperaturaCentinelaDeEstado(EstadoSensor e) {
+    switch (e) {
+        case EstadoSensor::SLOT_VACIO:                return -1.0f;
+        case EstadoSensor::DIRECCION_ROM_INVALIDA:    return -2.0f;
+        case EstadoSensor::FAMILIA_NO_COMPATIBLE:     return -3.0f;
+        case EstadoSensor::SCRATCHPAD_VACIO_CEROS:    return -4.0f;
+        case EstadoSensor::ERROR_CRC_SCRATCHPAD:      return -5.0f;
+        case EstadoSensor::CONVERSION_PENDIENTE:      return -6.0f;
+        case EstadoSensor::TIMEOUT_CONVERSION:        return -7.0f;
+        case EstadoSensor::FALLO_ESCRITURA_EEPROM:    return -8.0f;
+        case EstadoSensor::DESCONECTADO:              return DEVICE_DISCONNECTED_C;
+        case EstadoSensor::ALIMENTACION_INSUFICIENTE: return DEVICE_INSUFFICIENT_POWER_C;
+        case EstadoSensor::REINICIO_ENERGIA_85C:      return DEVICE_POWER_ON_RESET_C;
+        case EstadoSensor::CORTOCIRCUITO_VDD:         return DEVICE_FAULT_SHORTVDD_C;
+        case EstadoSensor::CORTOCIRCUITO_GND:         return DEVICE_FAULT_SHORTGND_C;
+        case EstadoSensor::CIRCUITO_ABIERTO:          return DEVICE_FAULT_OPEN_C;
+        default:                                      return DEVICE_DISCONNECTED_C;
+    }
+}

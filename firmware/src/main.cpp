@@ -35,7 +35,6 @@ MiddlewareInterface middlewareInterfaceL1(
 void setup() {
     // DbNotRuntime::PhysicalModels::migrateAllPhysicalModels();
     DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog();
-    DbRuntime::Repositories::RepoUsuario::sembrarUsuariosPorDefecto(); //eliminar despues!
 
     // consulta DB (verificar existencia de catálogo físico; si falla, detener el sistema)
 

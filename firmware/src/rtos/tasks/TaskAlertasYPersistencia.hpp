@@ -53,8 +53,15 @@ namespace RTOS::Tasks {
                         if (cant > 0) {
                             DbRuntime::Repositories::TransaccionBatch tx;
                             for (uint8_t i = 0; i < cant; ++i) {
-                                (void)lista[i];
                                 // consulta DB (INSERT en tabla Senso para cada sensor conectado en el lote de 2 min)
+                                const bool lecturaValida = estadoTieneLecturaValida(lista[i].estado);
+                                DbRuntime::Repositories::RepoSenso::registrarLectura(
+                                    lista[i].idSensorDB,
+                                    lecturaValida ? lista[i].tempCruda     : 0.0f,
+                                    lecturaValida ? lista[i].tempCorregida : 0.0f,
+                                    lista[i].estado,
+                                    static_cast<int64_t>(RelojSistema::obtenerTimestampActual())
+                                );
                             }
                             tx.confirmar();
                         }
@@ -63,6 +70,7 @@ namespace RTOS::Tasks {
 
                     case TipoRegistroDB::EVENTO_CAMBIO_SENSOR: {
                         // consulta DB (INSERT en tabla Senso + INSERT en tabla EventoSensor por anomalía del sensor)
+                        
                         break;
                     }
 
