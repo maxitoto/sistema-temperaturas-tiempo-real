@@ -168,11 +168,12 @@ namespace RPSensor {
         []() -> HistorialSensoresDTO {
             SnapshotSensor conectados[GestorSensores::MAX_SENSORES];
             const uint8_t cant = gestorSensores.obtenerSensoresConectados(conectados);
+            const uint32_t tsUnixSeg = RTOS::RelojSistema::obtenerTimestampActual();
 
             HistorialSensoresDTO lote{};
             for (uint8_t i = 0; i < cant; ++i) {
                 LecturaSensorDTO item{};
-                item.timestampMs          = conectados[i].timestampLecturaMs;
+                item.timestampMs          = tsUnixSeg;
                 item.idSensor             = static_cast<uint16_t>(conectados[i].idSensorDB > 0 ? conectados[i].idSensorDB : (i + 1));
                 memcpy(item.macSensor.data, conectados[i].rom, 8);
                 item.temperaturaCorregida = conectados[i].tempCorregida;

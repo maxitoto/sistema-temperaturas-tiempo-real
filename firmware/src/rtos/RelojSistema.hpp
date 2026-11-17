@@ -93,19 +93,17 @@ namespace RTOS {
         }
 
         static void sincronizarNtpSiHayWiFi() {
-            if (WiFi.status() != WL_CONNECTED) {
+            if (horaSincronizada || WiFi.status() != WL_CONNECTED) {
                 return;
             }
 
             const uint32_t ahoraMs = millis();
-            if (!ntpConfigurado || (!horaSincronizada && (ahoraMs - ultimoIntentoSyncMs >= 30000))) {
+            if (!ntpConfigurado || (ahoraMs - ultimoIntentoSyncMs >= 30000)) {
                 ultimoIntentoSyncMs = ahoraMs;
                 configTime(gmtOffsetSeg, DAYLIGHT_OFFSET_SEG,
                            servidorNtp1, servidorNtp2, servidorNtp3);
                 ntpConfigurado = true;
-            }
 
-            if (!horaSincronizada) {
                 struct tm info{};
                 if (getLocalTime(&info, 5)) {
                     if (info.tm_year + 1900 >= 2025) {

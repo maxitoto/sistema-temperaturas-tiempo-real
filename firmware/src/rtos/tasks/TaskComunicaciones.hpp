@@ -34,18 +34,24 @@ namespace RTOS::Tasks {
         }
 
         static void verificarTransicionesClientesYAuditoria() {
-            const bool serieAhora   = refUarts ? refUarts->hayClienteConectado() : false;
-            const uint8_t wifiAhora = refWiFi  ? refWiFi->obtenerCantidadClientesActivos() : 0;
+            const bool serieAhora    = refUarts ? refUarts->hayClienteConectado() : false;
+            const uint8_t wifiAhora  = refWiFi  ? refWiFi->obtenerCantidadClientesActivos() : 0;
             const uint16_t authAhora = calcularMascaraAutenticadosActual();
 
-            // 1. Detectar nuevo cliente autenticado o desconectado
+            bool sonidoConexionEmitido    = false;
+            bool sonidoDesconexionEmitido = false;
+
+            // 1. Detectar nuevo cliente autenticado o cierre de sesión autenticada
             if (authAhora != mascaraAutenticadosPrevia) {
                 for (uint8_t s = 0; s <= 8; ++s) {
                     const bool antes = (mascaraAutenticadosPrevia & (1u << s)) != 0;
                     const bool ahora = (authAhora & (1u << s)) != 0;
                     const char* origen = (s == 0) ? "UART-S" : (refWiFi ? refWiFi->obtenerIdentidadPeer(s).ip : "WIFI");
                     if (!antes && ahora) {
-                        encolarSonido(TipoSonidoEvento::CLIENTE_CONECTADO);
+                        if (!sonidoConexionEmitido) {
+                            encolarSonido(TipoSonidoEvento::CLIENTE_CONECTADO);
+                            sonidoConexionEmitido = true;
+                        }
                         encolarAuditoria(
                             TipoRegistroDB::AUDITORIA_RED,
                             RPAuth::obtenerIdUsuarioSlot(s),
@@ -56,7 +62,10 @@ namespace RTOS::Tasks {
                             static_cast<uint8_t>(CriticidadEvento::BAJA)
                         );
                     } else if (antes && !ahora) {
-                        encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+                        if (!sonidoDesconexionEmitido) {
+                            encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+                            sonidoDesconexionEmitido = true;
+                        }
                         encolarAuditoria(
                             TipoRegistroDB::AUDITORIA_RED,
                             0,
@@ -71,10 +80,13 @@ namespace RTOS::Tasks {
                 mascaraAutenticadosPrevia = authAhora;
             }
 
-            // 2. Detectar desconexión física sin sesión
-            if ((serieConectadoPrevio && !serieAhora) || (wifiAhora < clientesWifiPrevios)) {
-                encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+            // 2. Detectar desconexión física solo si no sonó ya por cierre de sesión en este ciclo
+            if (!sonidoDesconexionEmitido) {
+                if ((serieConectadoPrevio && !serieAhora) || (wifiAhora < clientesWifiPrevios)) {
+                    encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+                }
             }
+
             serieConectadoPrevio = serieAhora;
             clientesWifiPrevios  = wifiAhora;
         }

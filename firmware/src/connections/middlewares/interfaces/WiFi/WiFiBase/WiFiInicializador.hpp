@@ -135,11 +135,14 @@ public:
 
     bool reconectarEstacionRouter() {
         if (strlen(ssidStaCache) == 0) {
+            WiFi.disconnect(false, false);
+            WiFi.setAutoReconnect(false);
             estadoActual.conectadoARouter = false;
             estadoActual.ipEstacionLAN[0] = '\0';
             return false;
         }
 
+        WiFi.setAutoReconnect(true);
         WiFi.begin(ssidStaCache, claveStaCache);
         const uint32_t inicioMs = millis();
 
@@ -155,6 +158,9 @@ public:
             return true;
         }
 
+        // Si el router no está disponible, detiene el escaneo STA para no tumbar el canal del SoftAP
+        WiFi.disconnect(false, false);
+        WiFi.setAutoReconnect(false);
         estadoActual.conectadoARouter = false;
         estadoActual.ipEstacionLAN[0] = '\0';
         return false;

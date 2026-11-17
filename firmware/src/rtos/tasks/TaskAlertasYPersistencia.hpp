@@ -68,6 +68,11 @@ namespace RTOS::Tasks {
         }
 
         static void procesarColaSonidos() {
+            // Si el buzzer ya está reproduciendo un tono de evento, espera al próximo ciclo para no solapar
+            if (buzz.buzzEstaEncendido() && !buzz.hayAlarmaFisicaActiva()) {
+                return;
+            }
+
             TipoSonidoEvento ev = TipoSonidoEvento::NINGUNO;
             if (!colaSonidos.recibir(ev, 0)) {
                 return;
