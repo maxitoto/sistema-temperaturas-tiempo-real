@@ -65,6 +65,9 @@ int8_t GestorSensores::buscarSlotPorIdInterno(int32_t idSensorDB) const {
 }
 
 void GestorSensores::reevaluarAlarmaSlotInterno(Sensor& s) {
+    if (!estadoTieneLecturaValida(s.obtenerEstado())) {
+        return;
+    }
     float t = s.obtenerTempCelsius();
     if (t >= s.obtenerUmbralSuperior()) {
         s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
@@ -72,9 +75,7 @@ void GestorSensores::reevaluarAlarmaSlotInterno(Sensor& s) {
     } else if (t <= s.obtenerUmbralInferior()) {
         s.setEstado(EstadoSensor::ALARMA_INFERIOR);
         s.setEnAlarma(true);
-    } else if (s.obtenerEstado() == EstadoSensor::ALARMA_SUPERIOR ||
-               s.obtenerEstado() == EstadoSensor::ALARMA_INFERIOR ||
-               s.obtenerEstado() == EstadoSensor::OK) {
+    } else {
         s.setEstado(EstadoSensor::OK);
         s.setEnAlarma(false);
     }
@@ -191,12 +192,12 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
                 ? EstadoBus::LIMITE_SENSORES_EXCEDIDO
                 : EstadoBus::OK;
 
-    Sensor anteriores[MAX_SENSORES];
+    static Sensor anteriores[MAX_SENSORES];
     for (uint8_t s = 0; s < MAX_SENSORES; s++) {
         anteriores[s] = sensores[s];
         sensores[s].limpiar(s);
     }
-
+    
     totalAsignados = 0;
     modoParasitoGlobal = false;
     uint8_t tope = (totalDetectadosBus > MAX_SENSORES) ? MAX_SENSORES : totalDetectadosBus;
@@ -614,7 +615,7 @@ bool GestorSensores::configurarOffsetSlot(uint8_t slot, float offsetC) {
     if (slot >= MAX_SENSORES || !sensores[slot].estaActivo()) return false;
     Sensor& s = sensores[slot];
     s.setOffset(offsetC, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
-    if (s.obtenerTempCruda() > DEVICE_DISCONNECTED_C) {
+    if (estadoTieneLecturaValida(s.obtenerEstado())) {
         s.setTempCelsius(s.aplicarCalibracion(s.obtenerTempCruda()));
         reevaluarAlarmaSlotInterno(s);
     }
@@ -629,7 +630,7 @@ bool GestorSensores::calibrarPuntosPorMAC(const char* macHex, float tempMedidaHi
     Sensor& s = sensores[slot];
     s.setOffset(offsetManual, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
     s.setCorrecciones(tempMedidaHirviendo, tempMedidaHielo, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
-    if (s.obtenerTempCruda() > DEVICE_DISCONNECTED_C) {
+    if (estadoTieneLecturaValida(s.obtenerEstado())) {
         s.setTempCelsius(s.aplicarCalibracion(s.obtenerTempCruda()));
         reevaluarAlarmaSlotInterno(s);
     }

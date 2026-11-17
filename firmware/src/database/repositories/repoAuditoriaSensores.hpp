@@ -160,6 +160,16 @@ namespace DbRuntime::Repositories {
             }
             return out;
         }
-    };
+        
+        static uint16_t purgarAnterioresA(const char* fechaHoraIsoLimite) {
+            asegurarCatalogo();
+            if (!fechaHoraIsoLimite || fechaHoraIsoLimite[0] == '\0') return 0;
 
+            auto res = AuditoriaSensores.filter("fecha_creacion", FilterOp::LT, String(fechaHoraIsoLimite)).remove();
+            if (!res.success) {
+                lanzarUltimoErrorDB();
+            }
+            return res.affectedRows;
+        }
+    };
 }

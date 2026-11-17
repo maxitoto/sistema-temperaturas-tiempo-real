@@ -1,17 +1,71 @@
 #pragma once
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <esp_system.h>
 #include "../PrimitivasRTOS.hpp"
 #include "../EventosYColas.hpp"
 #include "../../hardware/driver/buzz/Buzz.hpp"
 #include "../../hardware/driver/buzz/frecuencias.hpp"
 #include "../../hardware/driver/gestorsensores/GestorSensores.hpp"
+#include "../../hardware/driver/tarjetasd/TarjetaSD.hpp"
 #include "../../database/repositories/RepositorioBase.hpp"
+#include "../../database/repositories/repoSensor.hpp"
+#include "../../database/repositories/repoSenso.hpp"
+#include "../../database/repositories/repoAuditoriaSensores.hpp"
+#include "../../database/repositories/repoAuditoriaSistema.hpp"
+#include "../../database/repositories/repoAuditoriaAuth.hpp"
+#include "../../database/repositories/repoConfiguracionSistema.hpp"
+#include "../../database/repositories/repoConfiguracionSmtp.hpp"
+#include "../../database/repositories/repoCorreos.hpp"
 
 namespace RTOS::Tasks {
 
     class TaskAlertasYPersistencia {
     private:
         inline static TareaSegura tarea;
+        inline static uint32_t    ultimoMantenimientoMs  = 0;
+        inline static uint32_t    ultimoChequeoCorreoMs  = 0;
+        inline static uint32_t    ultimoEnvioSmtpExitoMs = 0;
+        static constexpr uint32_t INTERVALO_MANTENIMIENTO_MS  = 3600000UL; // 1 hora
+        static constexpr uint32_t INTERVALO_CHEQUEO_CORREO_MS = 30000UL;   // 30 segundos
+
+        static const char* textoMotivoReset() {
+            switch (esp_reset_reason()) {
+                case ESP_RST_POWERON:   return "POWERON_RESET";
+                case ESP_RST_SW:        return "SW_RESTART";
+                case ESP_RST_PANIC:     return "EXCEPTION_PANIC";
+                case ESP_RST_INT_WDT:   return "INT_WDT";
+                case ESP_RST_TASK_WDT:  return "TASK_WDT";
+                case ESP_RST_WDT:       return "OTHER_WDT";
+                case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+                case ESP_RST_BROWNOUT:  return "BROWNOUT";
+                default:                return "UNKNOWN_RESET";
+            }
+        }
+
+        static void clasificarEventoSensor(
+            EstadoSensor estadoNuevo,
+            TipoEvento& outTipo,
+            CriticidadEvento& outCriticidad
+        ) {
+            if (estadoNuevo == EstadoSensor::OK) {
+                outTipo       = TipoEvento::INFORMATIVO;
+                outCriticidad = CriticidadEvento::BAJA;
+            } else if (estadoNuevo == EstadoSensor::ALARMA_SUPERIOR ||
+                       estadoNuevo == EstadoSensor::ALARMA_INFERIOR) {
+                outTipo       = TipoEvento::ADVERTENCIA;
+                outCriticidad = CriticidadEvento::ALTA;
+            } else if (estadoNuevo == EstadoSensor::CORTOCIRCUITO_VDD ||
+                       estadoNuevo == EstadoSensor::CORTOCIRCUITO_GND ||
+                       estadoNuevo == EstadoSensor::CIRCUITO_ABIERTO) {
+                outTipo       = TipoEvento::EXCEPCION;
+                outCriticidad = CriticidadEvento::ALTA;
+            } else {
+                outTipo       = TipoEvento::EXCEPCION;
+                outCriticidad = CriticidadEvento::MEDIA;
+            }
+        }
 
         static void procesarColaSonidos() {
             TipoSonidoEvento ev = TipoSonidoEvento::NINGUNO;
@@ -43,81 +97,223 @@ namespace RTOS::Tasks {
             }
         }
 
-        static void procesarColaPersistenciaDB() {
-            RegistroPersistenciaPOD reg{};
-            while (colaPersistenciaDB.recibir(reg, 0)) {
-                switch (reg.tipo) {
-                    case TipoRegistroDB::LOTE_SENSOS_2_MINUTOS: {
-                        SnapshotSensor lista[GestorSensores::MAX_SENSORES];
-                        uint8_t cant = gestorSensores.obtenerSensoresConectados(lista);
-                        if (cant > 0) {
-                            DbRuntime::Repositories::TransaccionBatch tx;
-                            for (uint8_t i = 0; i < cant; ++i) {
-                                // consulta DB (INSERT en tabla Senso para cada sensor conectado en el lote de 2 min)
-                                if (lista[i].idSensorDB <= 0) continue;
-                                const bool lecturaValida = estadoTieneLecturaValida(lista[i].estado);
-                                DbRuntime::Repositories::RepoSenso::registrarLectura(
-                                    lista[i].idSensorDB,
-                                    lecturaValida ? lista[i].tempCruda     : 0.0f,
-                                    lecturaValida ? lista[i].tempCorregida : 0.0f,
-                                    lista[i].estado,
-                                    static_cast<int64_t>(RelojSistema::obtenerTimestampActual())
-                                );
-                            }
-                            tx.confirmar();
-                        }
-                        break;
-                    }
+        static void persistirLoteSensos() {
+            using namespace DbRuntime::Repositories;
+            static SnapshotSensor lista[GestorSensores::MAX_SENSORES];
+            uint8_t cant = gestorSensores.obtenerSensoresConectados(lista);
+            if (cant == 0) return;
 
-                    case TipoRegistroDB::EVENTO_CAMBIO_SENSOR: {
-                        // 1) SensoDTO s = RepoSenso::registrarLectura(reg.idRelacionado, valida ? reg.tempCruda : 0, valida ? reg.tempCorregida : 0,
-                        //      (EstadoSensor)reg.estadoNuevo, reg.timestampUnix);   // valida = estadoTieneLecturaValida(estadoNuevo)
-                        // 2) RepoAuditoriaSensores::registrarEvento(reg.idRelacionado, s.idSenso, (EstadoSensor)reg.estadoPrevio,
-                        //      (EstadoSensor)reg.estadoNuevo, gestorSensores.obtenerEstadoBus(), tipo, criticidad);
-                        // tipo/criticidad: ALARMA_* -> ADVERTENCIA/ALTA | DESCONECTADO, CRC, timeout... -> EXCEPCION/MEDIA
-                        //                  CORTOCIRCUITO_*, CIRCUITO_ABIERTO -> EXCEPCION/ALTA | volver a OK -> INFORMATIVO/BAJA
-                        // Va en este orden porque AuditoriaSensores.id_senso es FK a Senso.
-                        
-                        break;
-                    }
-
-                    case TipoRegistroDB::EVENTO_SISTEMA_BUS: {
-                        // AuditoriaSistemaDTO a; a.estadoBus = (EstadoBus)reg.estadoNuevo; a.detalle = reg.detalle;
-                        // a.tipoEventoSistema = (estadoBus==OK) ? INFORMATIVO : (TOPOLOGIA_MODIFICADA ? ADVERTENCIA : EXCEPCION);
-                        // a.criticidad según tipo; a.heapLibreBytes = ESP.getFreeHeap(); a.espacioSdLibreKb = (libre de la SD);
-                        // a.bootId, a.uptimeS = millis()/1000; a.fuenteTiempo = (la de RelojSistema); a.internet = (WiFi.status()==WL_CONNECTED);
-                        // RepoAuditoriaSistema::registrarEvento(a);
-                        break;
-                    }
-
-                    case TipoRegistroDB::AUDITORIA_TRANSACCION:
-                    case TipoRegistroDB::AUDITORIA_RED: {
-                        // AuditoriaAuthDTO a; a.idUsuario = reg.idRelacionado; a.origenRemoto = reg.origenOClave; a.accion/detalle = reg.detalle;
-                        // a.medioConexion = (según tipo: AUDITORIA_RED -> WIFI_*/UART_S); RepoAuditoriaAuth::registrarEvento(a);
-                        break;
-                    }
+            TransaccionBatch tx;
+            const int64_t tsAhora = static_cast<int64_t>(RelojSistema::obtenerTimestampActual());
+            for (uint8_t i = 0; i < cant; ++i) {
+                int32_t idSensor = lista[i].idSensorDB;
+                if (idSensor <= 0 && strlen(lista[i].mac) == 16) {
+                    idSensor = RepoSensor::registrarOAsegurarPorMac(lista[i].mac).idSensor;
                 }
+                if (idSensor <= 0) continue;
+
+                const bool lecturaValida = estadoTieneLecturaValida(lista[i].estado);
+                RepoSenso::registrarLectura(
+                    idSensor,
+                    lecturaValida ? Sensor::limitarTemp(lista[i].tempCruda)     : 0.0f,
+                    lecturaValida ? Sensor::limitarTemp(lista[i].tempCorregida) : 0.0f,
+                    lista[i].estado,
+                    tsAhora
+                );
+            }
+            tx.confirmar();
+        }
+
+        static void persistirCambioSensor(const RegistroPersistenciaPOD& reg) {
+            using namespace DbRuntime::Repositories;
+            int32_t idSensor = reg.idRelacionado;
+            if (idSensor <= 0 && strlen(reg.origenOClave) == 16) {
+                idSensor = RepoSensor::registrarOAsegurarPorMac(reg.origenOClave).idSensor;
+            }
+            if (idSensor <= 0) return;
+
+            const EstadoSensor estadoPrevio = static_cast<EstadoSensor>(reg.estadoPrevio);
+            const EstadoSensor estadoNuevo  = static_cast<EstadoSensor>(reg.estadoNuevo);
+            const bool valida               = estadoTieneLecturaValida(estadoNuevo);
+            const int64_t tsEvento          = (reg.timestampUnix > 0)
+                ? static_cast<int64_t>(reg.timestampUnix)
+                : static_cast<int64_t>(RelojSistema::obtenerTimestampActual());
+
+            SensoDTO s = RepoSenso::registrarLectura(
+                idSensor,
+                valida ? Sensor::limitarTemp(reg.tempCruda)     : 0.0f,
+                valida ? Sensor::limitarTemp(reg.tempCorregida) : 0.0f,
+                estadoNuevo,
+                tsEvento
+            );
+
+            TipoEvento tipo{};
+            CriticidadEvento criticidad{};
+            clasificarEventoSensor(estadoNuevo, tipo, criticidad);
+
+            RepoAuditoriaSensores::registrarEvento(
+                idSensor,
+                s.idSenso,
+                estadoPrevio,
+                estadoNuevo,
+                gestorSensores.obtenerEstadoBus(),
+                tipo,
+                criticidad
+            );
+        }
+
+        static void persistirEventoSistemaBus(const RegistroPersistenciaPOD& reg) {
+            using namespace DbRuntime::Repositories;
+            static AuditoriaSistemaDTO a{};
+            a = AuditoriaSistemaDTO{};
+            a.estadoBus = static_cast<EstadoBus>(reg.estadoNuevo);
+            a.detalle   = (reg.detalle[0] != '\0')
+                ? reg.detalle
+                : GestorSensores::nombreEstadoBus(a.estadoBus);
+
+            if (a.estadoBus == EstadoBus::OK) {
+                a.tipoEventoSistema = TipoEvento::INFORMATIVO;
+                a.criticidad        = CriticidadEvento::BAJA;
+            } else if (a.estadoBus == EstadoBus::TOPOLOGIA_MODIFICADA) {
+                a.tipoEventoSistema = TipoEvento::ADVERTENCIA;
+                a.criticidad        = CriticidadEvento::MEDIA;
+            } else {
+                a.tipoEventoSistema = TipoEvento::EXCEPCION;
+                a.criticidad        = CriticidadEvento::ALTA;
+            }
+
+            a.espacioSdLibreKb = 0;
+            a.heapLibreBytes   = ESP.getFreeHeap();
+            a.resetReason      = textoMotivoReset();
+            a.versionFirmware  = "1.0.0";
+            a.internet         = (WiFi.status() == WL_CONNECTED);
+            a.estadoReporte    = EstadoEnvioCorreo::PENDIENTE;
+            a.bootId           = 1;
+            a.uptimeS          = static_cast<uint32_t>(millis() / 1000UL);
+            a.fuenteTiempo     = RelojSistema::estaSincronizado()
+                ? FuenteTiempo::NTP
+                : FuenteTiempo::SIN_SINCRONIZAR;
+
+            RepoAuditoriaSistema::registrarEvento(a);
+        }
+
+        static void persistirAuditoriaAuth(const RegistroPersistenciaPOD& reg) {
+            using namespace DbRuntime::Repositories;
+            static AuditoriaAuthDTO a{};
+            a = AuditoriaAuthDTO{};
+            a.idUsuario        = (reg.idRelacionado > 0) ? reg.idRelacionado : 0;
+            a.usuarioIntentado = reg.usuarioIntentado;
+            a.origenRemoto     = (reg.origenOClave[0] != '\0') ? reg.origenOClave : "LOCAL";
+            a.accion           = (reg.detalle[0] != '\0')      ? reg.detalle      : "EVENTO_SISTEMA";
+            a.detalle          = reg.detalle;
+
+            if (reg.tipo == TipoRegistroDB::AUDITORIA_RED) {
+                if (strncmp(reg.origenOClave, "UART", 4) == 0) {
+                    a.medioConexion = MedioConexion::UART_S;
+                } else if (strncmp(reg.origenOClave, "192.168.4.", 10) == 0) {
+                    a.medioConexion = MedioConexion::WIFI_AP;
+                } else {
+                    a.medioConexion = MedioConexion::WIFI_STA;
+                }
+            } else {
+                a.medioConexion = MedioConexion::INTERNO;
+            }
+
+            a.resultado     = static_cast<ResultadoAuditoria>(reg.resultadoAuditoria);
+            a.criticidad    = static_cast<CriticidadEvento>(reg.criticidadAuditoria);
+            a.bootId        = 1;
+            a.uptimeS       = static_cast<uint32_t>(millis() / 1000UL);
+            a.fuenteTiempo  = RelojSistema::estaSincronizado()
+                ? FuenteTiempo::NTP
+                : FuenteTiempo::SIN_SINCRONIZAR;
+            a.fechaCreacion = (reg.timestampUnix > 0)
+                ? static_cast<int64_t>(reg.timestampUnix)
+                : static_cast<int64_t>(RelojSistema::obtenerTimestampActual());
+
+            RepoAuditoriaAuth::registrarEvento(a);
+        }
+
+        static void procesarColaPersistenciaDB() {
+            static RegistroPersistenciaPOD reg{};
+            // Procesa máximo 2 registros por ciclo para nunca retener el mutex de la MicroSD frente a un Login RPC
+            for (uint8_t n = 0; n < 2 && colaPersistenciaDB.recibir(reg, 0); ++n) {
+                try {
+                    switch (reg.tipo) {
+                        case TipoRegistroDB::LOTE_SENSOS_2_MINUTOS:
+                            persistirLoteSensos();
+                            break;
+                        case TipoRegistroDB::EVENTO_CAMBIO_SENSOR:
+                            persistirCambioSensor(reg);
+                            break;
+                        case TipoRegistroDB::EVENTO_SISTEMA_BUS:
+                            persistirEventoSistemaBus(reg);
+                            break;
+                        case TipoRegistroDB::AUDITORIA_TRANSACCION:
+                        case TipoRegistroDB::AUDITORIA_RED:
+                            persistirAuditoriaAuth(reg);
+                            break;
+                    }
+                } catch (...) {}
             }
         }
 
+        static void ejecutarMantenimientoPeriodicoDB() {
+            using namespace DbRuntime::Repositories;
+
+            const uint32_t ahoraMs = millis();
+            if (ahoraMs - ultimoMantenimientoMs < INTERVALO_MANTENIMIENTO_MS) {
+                return;
+            }
+            ultimoMantenimientoMs = ahoraMs;
+
+            if (!RelojSistema::estaSincronizado()) {
+                return;
+            }
+
+            try {
+                static ConfiguracionSistemaDTO cfg{};
+                if (!RepoConfiguracionSistema::obtenerOInicializar(cfg) || !cfg.activa) {
+                    return;
+                }
+
+                const uint32_t ahoraEpoch = RelojSistema::obtenerTimestampActual();
+
+                if (cfg.retencionSensoDias > 0) {
+                    const int64_t limiteSenso = static_cast<int64_t>(ahoraEpoch) - (static_cast<int64_t>(cfg.retencionSensoDias) * 86400LL);
+                    RepoSenso::purgarAnterioresA(limiteSenso);
+                }
+
+                if (cfg.retencionEventosDias > 0) {
+                    const uint32_t limiteEvEpoch = ahoraEpoch - (cfg.retencionEventosDias * 86400UL);
+                    const PgDateTime fechaIsoEv  = RelojSistema::desdeTimestampUnix(limiteEvEpoch);
+                    RepoAuditoriaSensores::purgarAnterioresA(fechaIsoEv.c_str());
+                    RepoAuditoriaSistema::purgarAnterioresA(fechaIsoEv.c_str());
+                }
+
+                if (cfg.retencionAuditoriaDias > 0) {
+                    const int64_t limiteAud = static_cast<int64_t>(ahoraEpoch) - (static_cast<int64_t>(cfg.retencionAuditoriaDias) * 86400LL);
+                    RepoAuditoriaAuth::purgarAnterioresA(limiteAud);
+                }
+            } catch (...) {}
+        }
+
         static void ejecutarCiclo(void*) {
-            // 1. Actualizar estado de alarmas continuas (Buzzer + LED) según el estado actual de los 6 sensores
             EstadoSensor estados[GestorSensores::MAX_SENSORES];
             EstadoBus estadoBus = EstadoBus::OK;
             gestorSensores.obtenerEstadosParaAlarma(estados, estadoBus);
             buzz.actualizarAlarmaDesdeSensores(estados, estadoBus);
 
-            // 2. Reproducir tonos cortos de eventos (clientes, sensores en caliente, RPC)
             procesarColaSonidos();
-
-            // 3. Persistir en segundo plano los lotes de 2 minutos, eventos malos y auditorías
             procesarColaPersistenciaDB();
+            ejecutarMantenimientoPeriodicoDB();
         }
 
     public:
         static bool iniciar() {
+            ultimoMantenimientoMs = millis();
+            ultimoChequeoCorreoMs = millis();
             encolarSonido(TipoSonidoEvento::BOOT_SISTEMA);
-            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 100, 4096, 1, 0);
+            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 100, 6144, 1, 0);
         }
     };
 

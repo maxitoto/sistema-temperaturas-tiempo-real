@@ -47,9 +47,13 @@ namespace RTOS {
 
     class RelojSistema {
     private:
-        inline static bool ntpConfigurado = false;
-        inline static bool horaSincronizada = false;
+        inline static bool     ntpConfigurado      = false;
+        inline static bool     horaSincronizada    = false;
         inline static uint32_t ultimoIntentoSyncMs = 0;
+        inline static long     gmtOffsetSeg        = -3 * 3600;
+        inline static char     servidorNtp1[40]    = "pool.ntp.org";
+        inline static char     servidorNtp2[40]    = "time.google.com";
+        inline static char     servidorNtp3[40]    = "ar.pool.ntp.org";
         // Época base de respaldo (2026-01-01 00:00:00 UTC) por si opera sin WiFi desde el arranque
         static constexpr time_t EPOCA_RESPALDO_2026 = 1767225600;
 
@@ -66,6 +70,28 @@ namespace RTOS {
         static constexpr long GMT_OFFSET_ARGENTINA_SEG = -3 * 3600; // UTC-3
         static constexpr int  DAYLIGHT_OFFSET_SEG      = 0;
 
+        static void configurarParametrosRed(
+            int32_t zonaHorariaMin,
+            const char* host1 = nullptr,
+            const char* host2 = nullptr,
+            const char* host3 = nullptr
+        ) {
+            gmtOffsetSeg = static_cast<long>(zonaHorariaMin) * 60L;
+            if (host1 && host1[0] != '\0') {
+                strncpy(servidorNtp1, host1, sizeof(servidorNtp1) - 1);
+                servidorNtp1[sizeof(servidorNtp1) - 1] = '\0';
+            }
+            if (host2 && host2[0] != '\0') {
+                strncpy(servidorNtp2, host2, sizeof(servidorNtp2) - 1);
+                servidorNtp2[sizeof(servidorNtp2) - 1] = '\0';
+            }
+            if (host3 && host3[0] != '\0') {
+                strncpy(servidorNtp3, host3, sizeof(servidorNtp3) - 1);
+                servidorNtp3[sizeof(servidorNtp3) - 1] = '\0';
+            }
+            ntpConfigurado = false;
+        }
+
         static void sincronizarNtpSiHayWiFi() {
             if (WiFi.status() != WL_CONNECTED) {
                 return;
@@ -74,8 +100,8 @@ namespace RTOS {
             const uint32_t ahoraMs = millis();
             if (!ntpConfigurado || (!horaSincronizada && (ahoraMs - ultimoIntentoSyncMs >= 30000))) {
                 ultimoIntentoSyncMs = ahoraMs;
-                configTime(GMT_OFFSET_ARGENTINA_SEG, DAYLIGHT_OFFSET_SEG,
-                           "pool.ntp.org", "time.nist.gov", "ar.pool.ntp.org");
+                configTime(gmtOffsetSeg, DAYLIGHT_OFFSET_SEG,
+                           servidorNtp1, servidorNtp2, servidorNtp3);
                 ntpConfigurado = true;
             }
 

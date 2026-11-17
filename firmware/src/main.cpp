@@ -1,16 +1,15 @@
-#include <Arduino.h>
-
-#include "connections/middlewares/interfaces/UART-S/UARTSRuntime.hpp"
-#include "connections/middlewares/interfaces/WiFi/WiFiBase/WiFiInicializador.hpp"
-#include "connections/middlewares/interfaces/WiFi/WiFiBase/WiFiRuntime.hpp"
-#include "connections/middlewares/interfaces/WiFi/WiFiTcpTls/WiFiTcpTlsRuntime.hpp"
-#include "connections/middlewares/interfaces/WiFi/WiFiUdpPlain/WiFiUdpPlainRuntime.hpp"
-#include "connections/middlewares/middleware_message.hpp"
-#include "connections/middlewares/middleware_sesion.hpp"
-#include "connections/middlewares/middleware_intereface.hpp"
-
-#include "database/DB_DDL/models/PhysicalModelsDefinition.hpp"
+#include <esp_system.h>
 #include "database/DB_DQL_DML/orm/DjangoManager.hpp"
+#include "database/repositories/repoConfiguracionSistema.hpp"
+#include "database/repositories/repoCalibracion.hpp"
+#include "database/repositories/repoServidorNtp.hpp"
+#include "database/repositories/repoConfiguracionSmtp.hpp"
+#include "database/repositories/repoAuditoriaSistema.hpp"
+#include "database/repositories/repoUsuario.hpp"
+#include "hardware/driver/tarjetasd/TarjetaSD.hpp"
+#include "hardware/driver/led/Led.hpp"
+#include "hardware/driver/buzz/Buzz.hpp"
+#include "hardware/driver/gestorsensores/GestorSensores.hpp"
 #include "rtos/GestorRTOS.hpp"
 
 // Instancias globales de transporte (L0/L1 físico)
@@ -33,19 +32,75 @@ MiddlewareInterface middlewareInterfaceL1(
 );
 
 void setup() {
-    // DbNotRuntime::PhysicalModels::migrateAllPhysicalModels();
-    DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog();
+    // 1. Vincular y verificar existencia del catálogo físico en MicroSD; si falla, detener el sistema
+    if (!TarjetaSD::getInstance().estaInicializada() ||
+        !DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog() ||
+        DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
+        led.encenderLed();
+        buzz.sonarBuzz(800, 1.5f);
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
 
-    // consulta DB (verificar existencia de catálogo físico; si falla, detener el sistema)
+    // 2. Inicializar configuraciones base y asegurar que el usuario 'admin' exista y no haya quedado corrupto
+    try {
+        DbRuntime::Repositories::UsuarioDTO adminDto{};
+        if (!DbRuntime::Repositories::RepoUsuario::obtenerPorNombreUsuario("admin", adminDto)) {
+            DbRuntime::Repositories::RepoUsuario::crearUsuario("admin", "admin", RolUsuario::ADMIN);
+        } else if (adminDto.bloqueado) {
+            DbRuntime::Repositories::RepoUsuario::desbloquearPorNombre("admin");
+        }
+    } catch (...) {}
 
+    DbRuntime::Repositories::ConfiguracionSistemaDTO cfgSis{};
+    cfgSis.zonaHorariaMin = -180;
+    try {
+        DbRuntime::Repositories::RepoConfiguracionSistema::obtenerOInicializar(cfgSis);
+    } catch (...) {}
+
+    try {
+        DbRuntime::Repositories::CalibracionDTO cfgCal{};
+        DbRuntime::Repositories::RepoCalibracion::obtenerOInicializar(cfgCal);
+    } catch (...) {}
+
+    try {
+        auto servidoresNtp = DbRuntime::Repositories::RepoServidoresNtp::listarActivosPorPrioridad(3);
+        RTOS::RelojSistema::configurarParametrosRed(
+            cfgSis.zonaHorariaMin,
+            servidoresNtp.size() > 0 ? servidoresNtp[0].server.c_str() : "pool.ntp.org",
+            servidoresNtp.size() > 1 ? servidoresNtp[1].server.c_str() : "time.google.com",
+            servidoresNtp.size() > 2 ? servidoresNtp[2].server.c_str() : "ar.pool.ntp.org"
+        );
+    } catch (...) {
+        RTOS::RelojSistema::configurarParametrosRed(cfgSis.zonaHorariaMin);
+    }
+
+    // 3. Inicializar comunicaciones serie y red WiFi
     uartsRuntime.abrirPuertoServidor();
 
     if (wifiInicializador.iniciarRedDesdeBaseDeDatos()) {
         wifiTcpRuntime.iniciarServidorSeguro();
         wifiUdpRuntime.iniciarSocketStreaming();
+        RTOS::RelojSistema::sincronizarNtpSiHayWiFi();
     }
 
-    // Lanza las 4 tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED y Comunicaciones)
+    // 4. Escanear bus 1-Wire e hidratar sensores desde la BD antes de lanzar las tareas
+    EstadoBus estadoBusBoot = gestorSensores.verificarEstadoElectricoBus();
+    if (estadoBusBoot == EstadoBus::OK) {
+        gestorSensores.escanearYAsignarSensores();
+        estadoBusBoot = gestorSensores.obtenerEstadoBus();
+    }
+
+    // 5. Encolar auditoría de arranque de forma asíncrona (sin bloquear setup() con lecturas de FAT32)
+    RTOS::RegistroPersistenciaPOD regBoot{};
+    regBoot.tipo          = RTOS::TipoRegistroDB::EVENTO_SISTEMA_BUS;
+    regBoot.timestampUnix = RTOS::RelojSistema::obtenerTimestampActual();
+    regBoot.estadoNuevo   = static_cast<int16_t>(estadoBusBoot);
+    strncpy(regBoot.detalle, "BOOT_SISTEMA_INICIALIZADO", sizeof(regBoot.detalle) - 1);
+    RTOS::encolarPersistencia(regBoot);
+
+    // 8. Lanzar las 4 tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED y Comunicaciones)
     RTOS::GestorRTOS::iniciarSistemaCompleto(
         uartsRuntime,
         wifiRuntime,

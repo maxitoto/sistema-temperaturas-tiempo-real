@@ -59,7 +59,7 @@ namespace RTOS::Tasks {
             gestorSensores.actualizarTodosLosSlots();
 
             // 3. Si algún sensor cambió de estado (ej. OK -> ALARMA_SUPERIOR o DESCONECTADO), encolar evento inmediato
-            EventoCambioSensor cambios[GestorSensores::MAX_SENSORES];
+            static EventoCambioSensor cambios[GestorSensores::MAX_SENSORES];
             uint8_t cantCambios = gestorSensores.extraerEventosCambioEstado(cambios);
             for (uint8_t i = 0; i < cantCambios; ++i) {
                 RegistroPersistenciaPOD ev{};
@@ -89,13 +89,16 @@ namespace RTOS::Tasks {
     public:
         static bool iniciar(MiddlewareMessage& l3) {
             refMiddlewareL3 = &l3;
-            gestorSensores.verificarEstadoElectricoBus();
-            gestorSensores.escanearYAsignarSensores();
+            if (gestorSensores.obtenerTotalEnBus() == 0) {
+                if (gestorSensores.verificarEstadoElectricoBus() == EstadoBus::OK) {
+                    gestorSensores.escanearYAsignarSensores();
+                }
+            }
             ultimoRefrescoSensoresMs = millis();
             ultimoGuardadoLoteDbMs   = millis();
 
             // Corre en Core 1 con chequeo ligero cada 200ms
-            return tarea.iniciarEnNucleo("TaskSensores", &ejecutarCiclo, 200, 10240, 2, 1);
+            return tarea.iniciarEnNucleo("TaskSensores", &ejecutarCiclo, 200, 6144, 2, 1);
         }
     };
 

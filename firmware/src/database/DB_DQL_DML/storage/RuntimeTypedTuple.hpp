@@ -291,8 +291,10 @@ namespace DbRuntime::Storage {
             operator const char*() const { return c_str(""); }
             operator String() const      { return String(c_str("")); }
             operator int64_t() const     { return (cell && !cell->isNull) ? cell->asInt64() : 0; }
+            operator uint64_t() const    { return static_cast<uint64_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator int32_t() const     { return static_cast<int32_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator int16_t() const     { return static_cast<int16_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
+            operator int8_t() const      { return static_cast<int8_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator uint32_t() const    { return static_cast<uint32_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator uint16_t() const    { return static_cast<uint16_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }
             operator uint8_t() const     { return static_cast<uint8_t>((cell && !cell->isNull) ? cell->asInt64() : 0); }

@@ -6,8 +6,12 @@
 #include <stdexcept>
 #include "../../Controller/abstract/RPC_middleware_message.hpp"
 #include "../../../../hardware/driver/gestorsensores/GestorSensores.hpp"
+#include "../../../../hardware/driver/gestorsensores/SensorInicializador.hpp"
 #include "../../../../database/repositories/repoSensor.hpp"
 #include "../../../../database/repositories/repoSenso.hpp"
+#include "../../../../database/repositories/repoCalibracion.hpp"
+#include "../../../../database/repositories/repoAuditoriaSensores.hpp"
+#include "../../../../rtos/EventosYColas.hpp"
 
 struct FiltroPorMacDTO {
     PgMac         macSensor;
@@ -57,6 +61,14 @@ struct ActualizarCalibracionSensorDTO {
     PgFloat    offset;
 };
 
+struct ActualizarCalibracionAmbienteDTO {
+    PgFloat altura;
+    PgFloat presionAtmosferica;
+    PgFloat tempCongelacionRef;
+    PgFloat tempEbullicionRef;
+    PgBool  activa;
+};
+
 struct PerfilSensorDTO {
     PgAuto      idSensor;
     PgChar<25>  mac;
@@ -84,16 +96,33 @@ struct ResumenSensorDTO {
     PgBool     activa;
 };
 
-using ListaSensoresDTO = PgList<ResumenSensorDTO, 32>;
+using ListaSensoresDTO          = PgList<ResumenSensorDTO, 32>;
+using ListaAuditoriaSensorDTO   = PgList<DbRuntime::Repositories::AuditoriaSensorDTO, 32>;
 
 namespace RPSensor {
 
     using DbRuntime::Repositories::RepoSensor;
     using DbRuntime::Repositories::RepoSenso;
+    using DbRuntime::Repositories::RepoCalibracion;
+    using DbRuntime::Repositories::RepoAuditoriaSensores;
     using DbRuntime::Repositories::SensorDTO;
     using DbRuntime::Repositories::SensoDTO;
+    using DbRuntime::Repositories::CalibracionDTO;
+    using DbRuntime::Repositories::AuditoriaSensorDTO;
     using DbRuntime::Repositories::EstadisticasSensoresDTO;
     using DbRuntime::Repositories::ResumenEstadisticoSensoDTO;
+    using DbRuntime::Repositories::EstadisticasAuditoriaSensoresDTO;
+
+    inline void auditarAccionSensor(const char* accion, const char* macDetalle) {
+        const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
+        RTOS::encolarAuditoria(
+            RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
+            RPAuth::obtenerIdUsuarioSlot(slot),
+            RPAuth::obtenerNombreUsuarioSlot(slot),
+            macDetalle ? macDetalle : "SENSOR",
+            accion
+        );
+    }
 
     inline void hexStringABytes8(const char* hexStr, uint8_t out[8]) {
         memset(out, 0, 8);
@@ -195,7 +224,7 @@ namespace RPSensor {
 
             auto filas = RepoSenso::listarPorIdSensorYRangoFecha(
                 sensor.idSensor,
-                 static_cast<int64_t>(filtro.timestampDesde),
+                static_cast<int64_t>(filtro.timestampDesde),
                 static_cast<int64_t>(filtro.timestampHasta),
                 lim
             );
@@ -256,6 +285,7 @@ namespace RPSensor {
                 dto.descripcion.c_str(),
                 dto.activa
             );
+            auditarAccionSensor("ACTUALIZAR_METADATOS_SENSOR", dto.mac.c_str());
             return aPerfilSensor(act);
         },
         RolUsuario::ADMIN
@@ -264,18 +294,26 @@ namespace RPSensor {
     inline auto actualizarCalibracionSensor = llamadoSemantico.exactamenteUnaVez<ActualizarCalibracionSensorDTO, PerfilSensorDTO>(
         "actualizarCalibracionSensor",
         [](const ActualizarCalibracionSensorDTO& dto) -> PerfilSensorDTO {
-            SensorDTO act = RepoSensor::actualizarCalibracionYUmbralesPorMac(
-                dto.mac.c_str(),
-                dto.umbralSup,
-                dto.umbralInf,
-                dto.errorSup,
-                dto.errorInf,
-                dto.offset
-            );
-            // bool enRam = gestorSensores.configurarUmbralesPorMAC(mac, sup, inf, false)
-            //           && gestorSensores.calibrarPuntosPorMAC(mac, errorSup, errorInf, offset);  // ambos persisten vía SensorInicializador
-            // if (!enRam) RepoSensor::actualizarCalibracionYUmbralesPorMac(...);                 // sensor no conectado: solo BD
-            // SensorDTO act = RepoSensor::exigirPorMac(mac);
+            if (dto.umbralInf > dto.umbralSup) {
+                throw std::invalid_argument("ValueError: umbral_inf no puede ser mayor que umbral_sup");
+            }
+
+            const bool enRam = gestorSensores.configurarUmbralesPorMAC(dto.mac.c_str(), dto.umbralSup, dto.umbralInf, false)
+                            && gestorSensores.calibrarPuntosPorMAC(dto.mac.c_str(), dto.errorSup, dto.errorInf, dto.offset);
+
+            if (!enRam) {
+                RepoSensor::actualizarCalibracionYUmbralesPorMac(
+                    dto.mac.c_str(),
+                    dto.umbralSup,
+                    dto.umbralInf,
+                    dto.errorSup,
+                    dto.errorInf,
+                    dto.offset
+                );
+            }
+
+            SensorDTO act = RepoSensor::exigirPorMac(dto.mac.c_str());
+            auditarAccionSensor("CALIBRAR_SENSOR", dto.mac.c_str());
             return aPerfilSensor(act);
         },
         RolUsuario::ADMIN
@@ -285,6 +323,7 @@ namespace RPSensor {
         "eliminarSensorPorMac",
         [](const ConsultaSensorMacDTO& dto) {
             RepoSensor::cambiarEstadoActivoPorMac(dto.mac.c_str(), false);
+            auditarAccionSensor("DESACTIVAR_SENSOR", dto.mac.c_str());
         },
         RolUsuario::ADMIN
     );
@@ -302,6 +341,62 @@ namespace RPSensor {
         [](const ConsultaSensorMacDTO& dto) -> ResumenEstadisticoSensoDTO {
             SensorDTO sensor = RepoSensor::exigirPorMac(dto.mac.c_str());
             return RepoSenso::obtenerEstadisticasPorSensor(sensor.idSensor);
+        },
+        RolUsuario::NO_ADMIN
+    );
+
+    inline auto obtenerCalibracionAmbiente = llamadoSemantico.alMenosUnaVez<void, CalibracionDTO>(
+        "obtenerCalibracionAmbiente",
+        []() -> CalibracionDTO {
+            return RepoCalibracion::exigirCalibracion();
+        },
+        RolUsuario::NO_ADMIN
+    );
+
+    inline auto actualizarCalibracionAmbiente = llamadoSemantico.exactamenteUnaVez<ActualizarCalibracionAmbienteDTO, CalibracionDTO>(
+        "actualizarCalibracionAmbiente",
+        [](const ActualizarCalibracionAmbienteDTO& dto) -> CalibracionDTO {
+            CalibracionDTO entrada{};
+            entrada.idCalibracion      = 1;
+            entrada.altura             = dto.altura;
+            entrada.presionAtmosferica = dto.presionAtmosferica;
+            entrada.tempCongelacionRef = dto.tempCongelacionRef;
+            entrada.tempEbullicionRef  = dto.tempEbullicionRef;
+            entrada.activa             = dto.activa;
+
+            CalibracionDTO act = RepoCalibracion::actualizarTodo(entrada);
+            SensorInicializador::invalidarCacheCalibracionGlobal();
+            auditarAccionSensor("ACTUALIZAR_CALIBRACION_AMBIENTE", "GLOBAL");
+            return act;
+        },
+        RolUsuario::ADMIN
+    );
+
+    inline auto listarAuditoriaSensorPorMac = llamadoSemantico.alMenosUnaVez<FiltroPorMacDTO, ListaAuditoriaSensorDTO>(
+        "listarAuditoriaSensorPorMac",
+        [](const FiltroPorMacDTO& filtro) -> ListaAuditoriaSensorDTO {
+            const String macHex = filtro.macSensor.toHexString();
+            const uint16_t lim  = (filtro.limiteRegistros == 0 || filtro.limiteRegistros > 32) ? 32 : filtro.limiteRegistros;
+
+            SensorDTO sensor{};
+            if (!RepoSensor::obtenerPorMac(macHex.c_str(), sensor)) {
+                return ListaAuditoriaSensorDTO{};
+            }
+
+            auto filas = RepoAuditoriaSensores::listarPorIdSensor(sensor.idSensor, lim, 0);
+            ListaAuditoriaSensorDTO salida{};
+            for (const auto& f : filas) {
+                if (!salida.agregar(f)) break;
+            }
+            return salida;
+        },
+        RolUsuario::NO_ADMIN
+    );
+
+    inline auto obtenerEstadisticasAuditoriaSensores = llamadoSemantico.alMenosUnaVez<void, EstadisticasAuditoriaSensoresDTO>(
+        "obtenerEstadisticasAuditoriaSensores",
+        []() -> EstadisticasAuditoriaSensoresDTO {
+            return RepoAuditoriaSensores::obtenerEstadisticasGlobales();
         },
         RolUsuario::NO_ADMIN
     );

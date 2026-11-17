@@ -43,25 +43,29 @@ namespace RTOS::Tasks {
                 for (uint8_t s = 0; s <= 8; ++s) {
                     const bool antes = (mascaraAutenticadosPrevia & (1u << s)) != 0;
                     const bool ahora = (authAhora & (1u << s)) != 0;
+                    const char* origen = (s == 0) ? "UART-S" : (refWiFi ? refWiFi->obtenerIdentidadPeer(s).ip : "WIFI");
                     if (!antes && ahora) {
                         encolarSonido(TipoSonidoEvento::CLIENTE_CONECTADO);
-                        RegistroPersistenciaPOD aud{};
-                        aud.tipo          = TipoRegistroDB::AUDITORIA_RED;
-                        aud.timestampUnix = RelojSistema::obtenerTimestampActual();
-                        aud.idRelacionado = s;
-                        strncpy(aud.origenOClave, (s == 0) ? "UART-S" : refWiFi->obtenerIdentidadPeer(s).ip,
-                                sizeof(aud.origenOClave) - 1);
-                        strncpy(aud.detalle, "LOGIN_SESION_OK", sizeof(aud.detalle) - 1);
-                        encolarPersistencia(aud);
+                        encolarAuditoria(
+                            TipoRegistroDB::AUDITORIA_RED,
+                            RPAuth::obtenerIdUsuarioSlot(s),
+                            RPAuth::obtenerNombreUsuarioSlot(s),
+                            origen,
+                            "LOGIN_SESION_OK",
+                            static_cast<uint8_t>(ResultadoAuditoria::EXITO),
+                            static_cast<uint8_t>(CriticidadEvento::BAJA)
+                        );
                     } else if (antes && !ahora) {
                         encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
-                        RegistroPersistenciaPOD aud{};
-                        aud.tipo          = TipoRegistroDB::AUDITORIA_RED;
-                        aud.timestampUnix = RelojSistema::obtenerTimestampActual();
-                        aud.idRelacionado = s;
-                        strncpy(aud.origenOClave, (s == 0) ? "UART-S" : "WIFI", sizeof(aud.origenOClave) - 1);
-                        strncpy(aud.detalle, "CIERRE_SESION", sizeof(aud.detalle) - 1);
-                        encolarPersistencia(aud);
+                        encolarAuditoria(
+                            TipoRegistroDB::AUDITORIA_RED,
+                            0,
+                            "",
+                            origen,
+                            "CIERRE_SESION",
+                            static_cast<uint8_t>(ResultadoAuditoria::EXITO),
+                            static_cast<uint8_t>(CriticidadEvento::BAJA)
+                        );
                     }
                 }
                 mascaraAutenticadosPrevia = authAhora;
@@ -105,7 +109,7 @@ namespace RTOS::Tasks {
             refL3    = &l3;
 
             // Prioridad 3 (alta) y período de 10 ms para baja latencia en UART-S y TCP
-            return tarea.iniciarEnNucleo("TaskComms", &ejecutarCiclo, 10, 6144, 3, 1);
+            return tarea.iniciarEnNucleo("TaskComms", &ejecutarCiclo, 10, 8192, 3, 1);
         }
     };
 

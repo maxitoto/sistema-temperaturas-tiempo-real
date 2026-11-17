@@ -206,30 +206,31 @@ namespace DbNotRuntime::PhysicalModels {
         }
 
         std::vector<Field> fields() const override {
-            return {
-                AutoField("id_usuario"),
-                CharField("usuario", 20).unique(true),
-                CharField("salt", 32).default_val("SALT"),
-                TextField("contrasena_hash", 64),
-                EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO),
-                SmallIntegerField("intentos_fallidos")
-                    .check(
-                        "intentos_fallidos >= 0 AND intentos_fallidos <= 3",
-                        +[](const String& v) -> bool {
-                            const int n = v.toInt();
-                            return n >= 0 && n <= 3;
-                        }
-                    )
-                    .default_val(0),
-                BooleanField("bloqueado").default_val("FALSE"),
-                BigIntegerField("bloqueado_desde").null(true).default_val(0),
-                BigIntegerField("bloqueado_hasta").null(true).default_val(0),
-                BigIntegerField("fecha_ultimo_login").null(true).default_val(0),
-                BigIntegerField("fecha_cambio_password").null(true).default_val(0),
-                BooleanField("activa").default_val("TRUE"),
-                DateTimeField("creado_el"),
-                DateTimeField("actualizado_el").auto_now(true)
-            };
+            std::vector<Field> f;
+            f.reserve(14);
+            f.push_back(AutoField("id_usuario"));
+            f.push_back(CharField("usuario", 20).unique(true));
+            f.push_back(CharField("salt", 32).default_val("SALT"));
+            f.push_back(TextField("contrasena_hash", 64));
+            f.push_back(EnumField<RolUsuario>("rol").default_val(RolUsuario::NINGUNO));
+            f.push_back(SmallIntegerField("intentos_fallidos")
+                .check(
+                    "intentos_fallidos >= 0 AND intentos_fallidos <= 3",
+                    +[](const String& v) -> bool {
+                        const int n = v.toInt();
+                        return n >= 0 && n <= 3;
+                    }
+                )
+                .default_val(0));
+            f.push_back(BooleanField("bloqueado").default_val("FALSE"));
+            f.push_back(BigIntegerField("bloqueado_desde").null(true).default_val(0));
+            f.push_back(BigIntegerField("bloqueado_hasta").null(true).default_val(0));
+            f.push_back(BigIntegerField("fecha_ultimo_login").null(true).default_val(0));
+            f.push_back(BigIntegerField("fecha_cambio_password").null(true).default_val(0));
+            f.push_back(BooleanField("activa").default_val("TRUE"));
+            f.push_back(DateTimeField("creado_el"));
+            f.push_back(DateTimeField("actualizado_el").auto_now(true));
+            return f;
         }
     };
 
@@ -396,24 +397,25 @@ namespace DbNotRuntime::PhysicalModels {
         }
 
         std::vector<Field> fields() const override {
-            return {
-                AutoField("id_auditoria_sistema"),
-                EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::NULA),
-                EnumField<TipoEvento>("tipo_evento_sistema").default_val(TipoEvento::INFORMATIVO),
-                EnumField<EstadoBus>("estado_bus").default_val(EstadoBus::OK),
-                PositiveIntegerField("espacio_sd_libre_kb").default_val(0),
-                PositiveIntegerField("heap_libre_bytes").default_val(0),
-                CharField("reset_reason", 24).default_val(""),
-                CharField("version_firmware", 16).default_val("1.0.0"),
-                CharField("detalle", 96).default_val(""),
-                BooleanField("internet").default_val("FALSE"),
-                EnumField<EstadoEnvioCorreo>("estado_reporte").default_val(EstadoEnvioCorreo::PENDIENTE),
-                PositiveIntegerField("boot_id").default_val(0),
-                PositiveIntegerField("uptime_s").default_val(0),
-                EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR),
-                BooleanField("activa").default_val("TRUE"),
-                DateTimeField("fecha_creacion")
-            };
+            std::vector<Field> f;
+            f.reserve(16);
+            f.push_back(AutoField("id_auditoria_sistema"));
+            f.push_back(EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::NULA));
+            f.push_back(EnumField<TipoEvento>("tipo_evento_sistema").default_val(TipoEvento::INFORMATIVO));
+            f.push_back(EnumField<EstadoBus>("estado_bus").default_val(EstadoBus::OK));
+            f.push_back(PositiveIntegerField("espacio_sd_libre_kb").default_val(0));
+            f.push_back(PositiveIntegerField("heap_libre_bytes").default_val(0));
+            f.push_back(CharField("reset_reason", 24).default_val(""));
+            f.push_back(CharField("version_firmware", 16).default_val("1.0.0"));
+            f.push_back(CharField("detalle", 96).default_val(""));
+            f.push_back(BooleanField("internet").default_val("FALSE"));
+            f.push_back(EnumField<EstadoEnvioCorreo>("estado_reporte").default_val(EstadoEnvioCorreo::PENDIENTE));
+            f.push_back(PositiveIntegerField("boot_id").default_val(0));
+            f.push_back(PositiveIntegerField("uptime_s").default_val(0));
+            f.push_back(EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR));
+            f.push_back(BooleanField("activa").default_val("TRUE"));
+            f.push_back(DateTimeField("fecha_creacion"));
+            return f;
         }
     };
 
@@ -460,27 +462,28 @@ namespace DbNotRuntime::PhysicalModels {
         }
 
         std::vector<Field> fields() const override {
-            return {
-                AutoField("id_auditoria_auth"),
-                PositiveBigIntegerField("seq").unique(true),
-                ForeignKey("id_usuario", "Usuario", "id_usuario", RESTRICT).null(true),
-                CharField("usuario_intentado", 20).default_val(""),
-                CharField("accion", 32),
-                CharField("tabla_afectada", 32).default_val("NINGUNA"),
-                CharField("valor_previo", 64).default_val(""),
-                CharField("valor_nuevo", 64).default_val(""),
-                CharField("detalle", 120).default_val(""),
-                EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::INTERNO),
-                CharField("origen_remoto", 46).default_val("LOCAL"),
-                EnumField<ResultadoAuditoria>("resultado").default_val(ResultadoAuditoria::EXITO),
-                EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::BAJA),
-                PositiveIntegerField("boot_id").default_val(0),
-                PositiveIntegerField("uptime_s").default_val(0),
-                EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR),
-                BigIntegerField("fecha_creacion").default_val(0),
-                CharField("hash_previo", 64),
-                CharField("hash_registro", 64)
-            };
+            std::vector<Field> f;
+            f.reserve(19);
+            f.push_back(AutoField("id_auditoria_auth"));
+            f.push_back(PositiveBigIntegerField("seq").unique(true));
+            f.push_back(ForeignKey("id_usuario", "Usuario", "id_usuario", RESTRICT).null(true));
+            f.push_back(CharField("usuario_intentado", 20).default_val(""));
+            f.push_back(CharField("accion", 32));
+            f.push_back(CharField("tabla_afectada", 32).default_val("NINGUNA"));
+            f.push_back(CharField("valor_previo", 64).default_val(""));
+            f.push_back(CharField("valor_nuevo", 64).default_val(""));
+            f.push_back(CharField("detalle", 120).default_val(""));
+            f.push_back(EnumField<MedioConexion>("medio_conexion").default_val(MedioConexion::INTERNO));
+            f.push_back(CharField("origen_remoto", 46).default_val("LOCAL"));
+            f.push_back(EnumField<ResultadoAuditoria>("resultado").default_val(ResultadoAuditoria::EXITO));
+            f.push_back(EnumField<CriticidadEvento>("criticidad").default_val(CriticidadEvento::BAJA));
+            f.push_back(PositiveIntegerField("boot_id").default_val(0));
+            f.push_back(PositiveIntegerField("uptime_s").default_val(0));
+            f.push_back(EnumField<FuenteTiempo>("fuente_tiempo").default_val(FuenteTiempo::SIN_SINCRONIZAR));
+            f.push_back(BigIntegerField("fecha_creacion").default_val(0));
+            f.push_back(CharField("hash_previo", 64));
+            f.push_back(CharField("hash_registro", 64));
+            return f;
         }
     };
 

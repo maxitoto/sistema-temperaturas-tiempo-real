@@ -215,6 +215,18 @@ namespace DbRuntime::Repositories {
             }
             return true;
         }
+        static uint16_t purgarAnterioresA(int64_t timestampLimite) {
+            asegurarCatalogo();
+
+            char bufLimite[24]{};
+            snprintf(bufLimite, sizeof(bufLimite), "%lld", static_cast<long long>(timestampLimite));
+
+            auto res = AuditoriaAuth.filter("fecha_creacion", FilterOp::LT, String(bufLimite)).remove();
+            if (!res.success) {
+                lanzarUltimoErrorDB();
+            }
+            return res.affectedRows;
+        }
     };
 
 }
