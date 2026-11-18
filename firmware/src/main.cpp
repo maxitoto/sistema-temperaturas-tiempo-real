@@ -32,15 +32,14 @@ MiddlewareInterface middlewareInterfaceL1(
 );
 
 void setup() {
-    // 1. Vincular y verificar existencia del catálogo físico en MicroSD; si falla, detener el sistema
-    if (!TarjetaSD::getInstance().estaInicializada() ||
+    // 1. Vincular y verificar existencia del catálogo físico en MicroSD; si falla tras reintentar, reiniciar limpiamente
+    if (!TarjetaSD::getInstance().iniciar() ||
         !DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog() ||
         DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
         led.encenderLed();
         buzz.sonarBuzz(800, 1.5f);
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        ESP.restart();
     }
 
     // 2. Inicializar configuraciones base y asegurar que el usuario 'admin' exista y no haya quedado corrupto

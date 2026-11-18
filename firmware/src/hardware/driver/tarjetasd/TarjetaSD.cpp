@@ -9,6 +9,9 @@ bool TarjetaSD::iniciar() {
     ScopedLock lock(mutexSd);
     if (inicializada) return true;
 
+    pinMode(Pin::PIN_SD_CS, OUTPUT);
+    digitalWrite(Pin::PIN_SD_CS, HIGH);
+
     SPI.begin(
         Pin::PIN_SD_SCK,
         Pin::PIN_SD_MISO,
@@ -16,12 +19,17 @@ bool TarjetaSD::iniciar() {
         Pin::PIN_SD_CS
     );
 
-    inicializada = SD.begin(
-        Pin::PIN_SD_CS,
-        SPI,
-        FRECUENCIA_SPI
-    );
-    return inicializada;
+    for (uint8_t intento = 0; intento < 5; ++intento) {
+        if (SD.begin(Pin::PIN_SD_CS, SPI, FRECUENCIA_SPI)) {
+            inicializada = true;
+            return true;
+        }
+        SD.end();
+        digitalWrite(Pin::PIN_SD_CS, HIGH);
+        delay(150);
+    }
+
+    return false;
 }
 
 bool TarjetaSD::estaInicializada() const {

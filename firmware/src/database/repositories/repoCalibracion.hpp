@@ -29,8 +29,7 @@ namespace DbRuntime::Repositories {
     class RepoCalibracion {
     private:
         static int64_t epochActual() {
-            const time_t t = time(nullptr);
-            return (t > 100000) ? static_cast<int64_t>(t) : static_cast<int64_t>(millis() / 1000UL);
+            return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
         }
 
         static void asegurarCatalogo() {

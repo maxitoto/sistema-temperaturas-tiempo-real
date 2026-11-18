@@ -155,7 +155,7 @@ namespace DbRuntime::Storage {
                 return false;
             }
 
-            char lineBuf[384];
+            static char lineBuf[640];
             size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
             f.close();
 
@@ -185,7 +185,8 @@ namespace DbRuntime::Storage {
             File f = SD.open(path.c_str(), FILE_READ);
             if (!f) return;
 
-            char lineBuf[384];
+            static char lineBuf[640];
+            uint16_t iterCount = 0;
             while (f.available()) {
                 uint32_t offset = static_cast<uint32_t>(f.position());
                 size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
@@ -196,12 +197,15 @@ namespace DbRuntime::Storage {
                 if (len == 0) continue;
 
                 PgTuple row = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
+                if (++iterCount % 16 == 0) {
+                    vTaskDelay(1);
+                }
                 if (!fn(row, offset)) break;
             }
             f.close();
         }
 
-        // Reescribe una tabla línea por línea en streaming (1 sola PgTuple en RAM a la vez)
+        // Reescribe una tabla línea por línea en streaming (1 sola PgTuple en RAM a la vez y alimentando al Watchdog)
         template <typename TransformFn>
         bool rewriteTableStreaming(const String& tableName, TransformFn fn) {
             auto lk = lockEngine();
@@ -226,7 +230,8 @@ namespace DbRuntime::Storage {
             if (SD.exists(path.c_str())) {
                 File fIn = SD.open(path.c_str(), FILE_READ);
                 if (fIn) {
-                    char lineBuf[384];
+                    static char lineBuf[640];
+                    uint16_t iterCount = 0;
                     while (fIn.available()) {
                         size_t len = fIn.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
                         while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
@@ -243,6 +248,9 @@ namespace DbRuntime::Storage {
                                 writeOk = false;
                                 break;
                             }
+                        }
+                        if (++iterCount % 16 == 0) {
+                            vTaskDelay(1);
                         }
                     }
                     fIn.close();

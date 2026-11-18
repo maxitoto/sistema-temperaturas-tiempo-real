@@ -203,6 +203,24 @@ namespace DbRuntime::Engine {
                 return result;
             }
 
+            // Verificar primero sin escribir en SD si al menos 1 fila coincide con el filtro
+            bool hayCoincidencias = allowUnconditionalDelete && whereFilters.empty();
+            if (!hayCoincidencias) {
+                storage.forEachRowStreaming(tableName, [&](const Storage::PgTuple& row, uint32_t) -> bool {
+                    if (ModuloDQL::evaluatePredicateChain(row, whereFilters)) {
+                        hayCoincidencias = true;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            if (!hayCoincidencias) {
+                result.success = true;
+                result.affectedRows = 0;
+                return result;
+            }
+
             bool ok = storage.rewriteTableStreaming(tableName, [&](Storage::PgTuple& row) -> bool {
                 if (ModuloDQL::evaluatePredicateChain(row, whereFilters)) {
                     result.affectedRows++;

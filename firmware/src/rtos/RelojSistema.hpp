@@ -61,9 +61,9 @@ namespace RTOS {
             if (horaSincronizada && getLocalTime(&outInfo, 5)) {
                 return;
             }
-            // Si aún no sincronizó NTP, avanza desde la época base usando millis()
+            // Mientras no haya NTP, avanza desde 2026-01-01 00:00:00 sin desfasar a 2025-12-31
             time_t t = EPOCA_RESPALDO_2026 + static_cast<time_t>(millis() / 1000UL);
-            localtime_r(&t, &outInfo);
+            gmtime_r(&t, &outInfo);
         }
 
     public:

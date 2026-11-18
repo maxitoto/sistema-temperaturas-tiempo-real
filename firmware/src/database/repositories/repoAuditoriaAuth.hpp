@@ -43,9 +43,8 @@ namespace DbRuntime::Repositories {
     private:
         static constexpr const char* HASH_GENESIS = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        static int64_t epochActual() {
-            const time_t t = time(nullptr);
-            return (t > 100000) ? static_cast<int64_t>(t) : static_cast<int64_t>(millis() / 1000UL);
+       static int64_t epochActual() {
+            return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
         }
 
         static void asegurarCatalogo() {

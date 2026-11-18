@@ -48,8 +48,7 @@ namespace DbRuntime::Repositories {
         static constexpr int64_t DURACION_BLOQUEO_SEGUNDOS = 600;
 
         static int64_t epochActual() {
-            const time_t t = time(nullptr);
-            return (t > 100000) ? static_cast<int64_t>(t) : static_cast<int64_t>(millis() / 1000UL);
+            return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
         }
 
         static void asegurarCatalogo() {

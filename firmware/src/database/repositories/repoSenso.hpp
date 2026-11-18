@@ -1,6 +1,5 @@
 #pragma once
 #include <Arduino.h>
-#include <time.h>
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
@@ -46,10 +45,12 @@ namespace DbRuntime::Repositories {
 
     class RepoSenso {
     private:
+        static int64_t epochActual() {
+            return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
+        }
+
         static int64_t resolverTimestamp(int64_t tsProvisto) {
-            if (tsProvisto > 0) return tsProvisto;
-            const time_t t = time(nullptr);
-            return (t > 100000) ? static_cast<int64_t>(t) : static_cast<int64_t>(millis() / 1000UL);
+            return (tsProvisto > 0) ? tsProvisto : epochActual();
         }
 
         static void asegurarCatalogo() {
