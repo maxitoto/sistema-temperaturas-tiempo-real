@@ -20,13 +20,16 @@ WiFiTcpTlsRuntime wifiTcpRuntime;
 WiFiUdpPlainRuntime wifiUdpRuntime;
 
 // Instancias globales de los 3 dominios de middlewares (L3, L2 y L1)
+ColaTrabajoRPC colaTrabajoRpc;
+
 MiddlewareMessage middlewareMessageL3;
 MiddlewareSesion middlewareSesionL2(middlewareMessageL3);
 MiddlewareInterface middlewareInterfaceL1(
     uartsRuntime,
     wifiRuntime,
-    wifiTcpRuntime, 
+    wifiTcpRuntime,
     wifiUdpRuntime,
+    colaTrabajoRpc,
     middlewareSesionL2,
     middlewareMessageL3
 );
@@ -100,9 +103,12 @@ void setup() {
     RTOS::encolarPersistencia(regBoot);
 
     // 8. Lanzar las 4 tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED y Comunicaciones)
+    colaTrabajoRpc.inicializar();
+
     RTOS::GestorRTOS::iniciarSistemaCompleto(
         uartsRuntime,
         wifiRuntime,
+        colaTrabajoRpc,
         middlewareInterfaceL1,
         middlewareSesionL2,
         middlewareMessageL3

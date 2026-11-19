@@ -1,5 +1,31 @@
 import net from "node:net";
 import dgram from "node:dgram";
+import crypto from "node:crypto";
+
+const PSK = Buffer.from("UNTDF-ESP32-PSK1", "ascii"); // 16 bytes idénticos a PSK_DEFECTO_128
+const VER = 0x01;
+
+export function cifrarFrameCcm(flags: number, salt: number, seq: number, plainSinLen: Buffer): Buffer {
+    const hdr = Buffer.alloc(10);
+    hdr[0] = VER;
+    hdr[1] = flags;
+    hdr.writeUInt32BE(salt >>> 0, 2);
+    hdr.writeUInt32BE(seq >>> 0, 6);
+
+    const nonce = Buffer.alloc(12);
+    nonce[0] = VER;
+    nonce[1] = flags;
+    hdr.copy(nonce, 4, 2, 10);
+
+    const cipher = crypto.createCipheriv("aes-128-ccm", PSK, nonce, { authTagLength: 8 });
+    cipher.setAAD(hdr, { plaintextLength: plainSinLen.length });
+    const ct = Buffer.concat([cipher.update(plainSinLen), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    const lenPref = Buffer.alloc(4);
+    lenPref.writeUInt32BE(hdr.length + ct.length + tag.length, 0);
+    return Buffer.concat([lenPref, hdr, ct, tag]);
+}
 
 export interface WiFiClientEvents {
     onMessage?: (mensajeCompletoConCabeceraLen: Buffer) => void;

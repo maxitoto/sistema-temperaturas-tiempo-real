@@ -216,7 +216,7 @@ namespace RTOS::Tasks {
 
         static bool iniciar() {
             // Prioridad 5 (máxima del sistema), corre cada 500 ms con stack ligero
-            return tareaBios.iniciarEnNucleo("TaskBiosOS", &ejecutarCicloBios, 500, 4096, 5, 1);
+            return tareaBios.iniciarEnNucleo("TaskBiosOS", &ejecutarCicloBios, 500, 3072, 5, 1);
         }
 
         static TareaSegura& obtenerTarea()       { return tareaBios; }

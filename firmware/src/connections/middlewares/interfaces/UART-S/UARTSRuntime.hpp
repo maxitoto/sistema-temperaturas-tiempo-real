@@ -87,11 +87,11 @@ public:
         // Si la cola tiene segmentos previos en tránsito, drena el protocolo hasta liberar espacio
         const uint32_t inicioEsperaMs = millis();
         while (gestorSalida.obtenerRanurasLibres() < segmentosRequeridos) {
-            if (!hayClienteConectado() || (millis() - inicioEsperaMs) > 600) {
-                return false;
+            if (!hayClienteConectado() || (millis() - inicioEsperaMs) > 80) {
+                return false; // Falla rápido sin congelar el loop de red
             }
             ejecutarCicloProtocolo();
-            delay(1);
+            vTaskDelay(1);
         }
 
         const uint8_t ventanaLocal = reensambladorEntrada.calcularVentanaSegmentosDisponible(pasoCorte);

@@ -17,7 +17,15 @@ enum IdentificadorProcedimientoL1 : uint16_t {
 };
 
 class RPCMiddlewareInterface : public RPCBase {
+private:
+    inline static uint8_t bufferSalidaL1[64] = {0};
+    inline static size_t  longitudSalidaL1   = 0;
+
 public:
+
+    static const uint8_t* obtenerBufferSalidaL1()   { return bufferSalidaL1; }
+    static size_t         obtenerLongitudSalidaL1() { return longitudSalidaL1; }
+
     static bool despacharProcedimientoConexion(const SobreMensajeRPC& sobre, uint16_t& puertoUdpSolicitadoOut) {
         puertoUdpSolicitadoOut   = 0;
         longitudSalidaCompartida = 0;

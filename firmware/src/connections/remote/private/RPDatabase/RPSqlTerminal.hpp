@@ -200,7 +200,7 @@ namespace RPSqlTerminal {
             uint8_t idxFk = 0;
 
             for (const auto& kv : cat.getAllTables()) {
-                if (idxT >= 16) break;
+                if (idxT >= 14) break;
                 const auto& tb = kv.second;
                 NodoTablaEstructuraDTO& nodo = out.tablas[idxT++];
                 nodo.nombreTabla   = tb.tableName.c_str();
@@ -216,7 +216,7 @@ namespace RPSqlTerminal {
                     if (col.isPrimaryKey) {
                         nodo.pkColumna = col.columnName.c_str();
                     }
-                    if (col.isForeignKey && idxFk < 12) {
+                    if (col.isForeignKey && idxFk < 8) {
                         RelacionFkEstructuraDTO& rel = out.relacionesFk[idxFk++];
                         rel.tablaOrigen    = tb.tableName.c_str();
                         rel.columnaOrigen  = col.columnName.c_str();

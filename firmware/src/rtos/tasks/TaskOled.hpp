@@ -34,6 +34,8 @@ namespace RTOS::Tasks {
         inline static MiddlewareSesion* refSesion = nullptr;
 
         inline static bool logoMostrado = false;
+        inline static bool     logoIniciado = false;
+        inline static uint32_t inicioLogoMs = 0;
         inline static bool enModoDetalle = false;
 
         inline static uint8_t indiceSensorDetalle = 0;
@@ -506,24 +508,27 @@ namespace RTOS::Tasks {
             // ---------------------------------------------
 
             if (!logoMostrado) {
-
-                if (!oled.iniciar()) {
+                if (!logoIniciado) {
+                    if (!oled.iniciar()) {
+                        return;
+                    }
+                    oled.fullScreen(
+                        LOGO_UNTDF.data,
+                        LOGO_UNTDF.ancho,
+                        LOGO_UNTDF.alto,
+                        true
+                    );
+                    logoIniciado = true;
+                    inicioLogoMs = millis();
                     return;
                 }
 
-                oled.fullScreen(
-                    LOGO_UNTDF.data,
-                    LOGO_UNTDF.ancho,
-                    LOGO_UNTDF.alto,
-                    true
-                );
-
-                TareaSegura::dormirMs(2500);
+                if (millis() - inicioLogoMs < 2500) {
+                    return;
+                }
 
                 oled.limpiarTodo();
-
-                logoMostrado = true;
-
+                logoMostrado  = true;
                 cambioVistaMs = millis();
             }
 
@@ -638,14 +643,7 @@ namespace RTOS::Tasks {
 
             refSesion = &sesionL2;
 
-            return tarea.iniciarEnNucleo(
-                "TaskOled",
-                &ejecutarCiclo,
-                250,
-                4096,
-                1,
-                1
-            );
+            return tarea.iniciarEnNucleo("TaskOled", &ejecutarCiclo, 250, 3584, 1, 0);
         }
     };
 

@@ -96,7 +96,9 @@ struct ResumenSensorDTO {
     PgBool     activa;
 };
 
-using ListaSensoresDTO          = PgList<ResumenSensorDTO, 32>;
+using ListaSensoresDTO = PgList<ResumenSensorDTO, 12>;
+static_assert(sizeof(ListaSensoresDTO) <= RPCBase::CAPACIDAD_BUFFER_COMPARTIDO - 8,
+              "ListaSensoresDTO excede MTU RPC");
 using ListaAuditoriaSensorDTO   = PgList<DbRuntime::Repositories::AuditoriaSensorDTO, 32>;
 
 namespace RPSensor {
@@ -246,7 +248,7 @@ namespace RPSensor {
     inline auto listarSensores = llamadoSemantico.alMenosUnaVez<FiltroListadoSensoresDTO, ListaSensoresDTO>(
         "listarSensores",
         [](const FiltroListadoSensoresDTO& filtro) -> ListaSensoresDTO {
-            const uint16_t lim = (filtro.limiteRegistros == 0 || filtro.limiteRegistros > 32) ? 32 : filtro.limiteRegistros;
+            const uint16_t lim = (filtro.limiteRegistros == 0 || filtro.limiteRegistros > 12) ? 12 : filtro.limiteRegistros;
             auto filas = RepoSensor::listarSensoresPaginados(lim, filtro.offsetRegistros, filtro.soloActivos);
 
             ListaSensoresDTO salida{};

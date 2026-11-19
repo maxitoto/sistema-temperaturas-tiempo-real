@@ -6,6 +6,7 @@
 #include "RPC_base.hpp"
 #include "../unmarshalling/decode.hpp"
 #include "../../public/RPAuth.hpp"
+#include <atomic>
 
 class RPCMiddlewareMessage : public RPCBase {
 public:
@@ -28,6 +29,16 @@ private:
     inline static DescriptorProcedimiento registro[MAX_PROCEDIMIENTOS_REGISTRADOS] = {};
     inline static size_t   totalRegistrados = 0;
     inline static uint16_t secuenciaStreamGlobal = 0;
+
+    inline static std::atomic<MascaraClientes> mascaraTotalSuscriptoresCache{0};
+
+    static void recalcularCacheSuscriptores() {
+        MascaraClientes m = 0;
+        for (size_t i = 0; i < totalRegistrados; ++i) {
+            m |= registro[i].suscriptoresStream;
+        }
+        mascaraTotalSuscriptoresCache.store(m, std::memory_order_relaxed);
+    }
 
 public:
     static size_t registrarProcedimiento(
@@ -95,11 +106,7 @@ public:
     }
 
     static MascaraClientes obtenerMascaraTotalSuscriptoresStream() {
-        MascaraClientes m = 0;
-        for (size_t i = 0; i < totalRegistrados; ++i) {
-            m |= registro[i].suscriptoresStream;
-        }
-        return m;
+        return mascaraTotalSuscriptoresCache.load(std::memory_order_relaxed);
     }
 
     static void desuscribirClienteDeTodosLosStreams(uint8_t slotCliente) {
@@ -108,6 +115,7 @@ public:
         for (size_t i = 0; i < totalRegistrados; ++i) {
             registro[i].suscriptoresStream &= maskInv;
         }
+        recalcularCacheSuscriptores();
     }
 
     template <typename EntradaDTO, typename SalidaDTO, typename Callable>
@@ -184,6 +192,7 @@ public:
             // Si es un servicio talVez, el cliente queda suscrito automáticamente al stream de este procedimiento
             if (semantica == SemanticaEntrega::TAL_VEZ && !std::is_void_v<SalidaDTO>) {
                 refSuscriptoresStream |= mascaraSolicitante;
+                recalcularCacheSuscriptores();
             }
         });
 

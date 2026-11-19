@@ -17,6 +17,7 @@ class WiFiTcpTlsRuntime {
 public:
     static constexpr uint16_t PUERTO_SERVIDOR_TLS = 8443;
     static constexpr uint8_t MAXIMO_CLIENTES_TLS = 4;
+    static constexpr uint32_t INTERVALO_MIN_ACCEPT_MS = 50;
 
 private:
     WiFiServer servidorTcp{PUERTO_SERVIDOR_TLS};
@@ -40,10 +41,16 @@ public:
     NuevoClienteAceptado aceptarConexionEntrante() {
         NuevoClienteAceptado resultado{0, "", 0};
 
+        const uint32_t ahoraMs = millis();
+        if (static_cast<int32_t>(ahoraMs - ultimoHandshakeMs) < static_cast<int32_t>(INTERVALO_MIN_ACCEPT_MS)) {
+            return resultado;
+        }
+
         WiFiClient entrante = servidorTcp.accept();
         if (!entrante) {
             return resultado;
         }
+        ultimoHandshakeMs = ahoraMs;
 
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
             if (!slotOcupado[i] || !clientesTcp[i].connected()) {
@@ -55,7 +62,7 @@ public:
                 resultado.slotAsignado = static_cast<uint8_t>(i + 1);
                 IPAddress ipRemota = clientesTcp[i].remoteIP();
                 snprintf(resultado.ip, sizeof(resultado.ip), "%u.%u.%u.%u",
-                         ipRemota[0], ipRemota[1], ipRemota[2], ipRemota[3]);
+                        ipRemota[0], ipRemota[1], ipRemota[2], ipRemota[3]);
                 resultado.puerto = clientesTcp[i].remotePort();
                 return resultado;
             }

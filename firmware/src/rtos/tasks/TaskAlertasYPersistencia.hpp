@@ -19,6 +19,9 @@
 #include "../../database/repositories/repoConfiguracionSmtp.hpp"
 #include "../../database/repositories/repoCorreos.hpp"
 
+#include "../../connections/middlewares/ColaTrabajoRPC.hpp"
+#include "../../connections/middlewares/middleware_sesion.hpp"
+
 namespace RTOS::Tasks {
 
     class TaskAlertasYPersistencia {
@@ -27,6 +30,48 @@ namespace RTOS::Tasks {
         inline static uint32_t    ultimoMantenimientoMs  = 0;
         inline static uint32_t    ultimoChequeoCorreoMs  = 0;
         inline static uint32_t    ultimoEnvioSmtpExitoMs = 0;
+        inline static ColaTrabajoRPC*    refColaRpc           = nullptr;
+        inline static MiddlewareSesion*  refL2                = nullptr;
+        inline static MiddlewareMessage* refL3                = nullptr;
+        inline static uint32_t           ultimoCicloAlertasMs = 0;
+        inline static uint32_t           ultimoStreamingMs    = 0;
+        inline static uint32_t           ultimaExpSesionMs    = 0;
+
+        static void procesarTrabajoRpcEnCore1() {
+            if (!refColaRpc || !refL2) return;
+
+            // 1. Limpiar sesiones/streams de slots desconectados por Core 0
+            const uint16_t limpiezas = refColaRpc->extraerLimpiezasSesionPendientes();
+            if (limpiezas != 0) {
+                for (uint8_t s = 0; s <= 8; ++s) {
+                    if (limpiezas & (1u << s)) {
+                        refL2->forzarCierreSesionPorDesconexion(s);
+                    }
+                }
+            }
+
+            // 2. Despachar 1 petición RPC (espera hasta 15 ms para responder con baja latencia)
+            uint8_t idx = 0;
+            PeticionEncoladaRPC* pet = nullptr;
+            if (!refColaRpc->esperarSiguientePeticion(idx, pet, pdMS_TO_TICKS(15))) {
+                return;
+            }
+
+            if (pet->generacionSlot == refColaRpc->obtenerGeneracionSlot(pet->slotClienteOrigen)) {
+                SobreMensajeRPC sobre{
+                    pet->slotClienteOrigen,
+                    pet->idProcedimiento,
+                    pet->idTicket,
+                    pet->hashPeticion,
+                    RolUsuario::NINGUNO,
+                    pet->payloadEntrada,
+                    pet->longitudEntrada
+                };
+                refL2->procesarMensajeEntrante(sobre);
+            }
+
+            refColaRpc->liberarPeticion(idx);
+        }
         static constexpr uint32_t INTERVALO_MANTENIMIENTO_MS  = 3600000UL; // 1 hora
         static constexpr uint32_t INTERVALO_CHEQUEO_CORREO_MS = 30000UL;   // 30 segundos
 
@@ -303,22 +348,56 @@ namespace RTOS::Tasks {
         }
 
         static void ejecutarCiclo(void*) {
-            EstadoSensor estados[GestorSensores::MAX_SENSORES];
-            EstadoBus estadoBus = EstadoBus::OK;
-            gestorSensores.obtenerEstadosParaAlarma(estados, estadoBus);
-            buzz.actualizarAlarmaDesdeSensores(estados, estadoBus);
+            procesarTrabajoRpcEnCore1();
 
-            procesarColaSonidos();
-            procesarColaPersistenciaDB();
-            ejecutarMantenimientoPeriodicoDB();
+            const uint32_t ahoraMs = millis();
+
+            if (ahoraMs - ultimoStreamingMs >= 500) {
+                ultimoStreamingMs = ahoraMs;
+                if (refL3) {
+                    refL3->emitirStreamsActivos();
+                }
+            }
+
+            if (ahoraMs - ultimaExpSesionMs >= 500) {
+                ultimaExpSesionMs = ahoraMs;
+                if (refL2) {
+                    refL2->verificarExpiracionSesionesPorOcio();
+                }
+            }
+
+            if (ahoraMs - ultimoCicloAlertasMs >= 100) {
+                ultimoCicloAlertasMs = ahoraMs;
+
+                EstadoSensor estados[GestorSensores::MAX_SENSORES];
+                EstadoBus estadoBus = EstadoBus::OK;
+                gestorSensores.obtenerEstadosParaAlarma(estados, estadoBus);
+                buzz.actualizarAlarmaDesdeSensores(estados, estadoBus);
+
+                procesarColaSonidos();
+                procesarColaPersistenciaDB();
+                ejecutarMantenimientoPeriodicoDB();
+            }
         }
 
     public:
-        static bool iniciar() {
+        static bool iniciar(
+            ColaTrabajoRPC& colaRpc,
+            MiddlewareSesion& l2,
+            MiddlewareMessage& l3
+        ) {
+            refColaRpc           = &colaRpc;
+            refL2                = &l2;
+            refL3                = &l3;
             ultimoMantenimientoMs = millis();
             ultimoChequeoCorreoMs = millis();
+            ultimoCicloAlertasMs  = millis();
+            ultimoStreamingMs     = millis();
+            ultimaExpSesionMs     = millis();
             encolarSonido(TipoSonidoEvento::BOOT_SISTEMA);
-            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 100, 6144, 1, 0);
+
+            // Core 1, prioridad 2, stack 8 KB: dueño exclusivo de MicroSD, ORM y RPC L2/L3
+            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 5, 8192, 2, 1);
         }
 
         static TareaSegura& obtenerTarea() { return tarea; }

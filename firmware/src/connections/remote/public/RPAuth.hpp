@@ -2,6 +2,7 @@
 #define RP_AUTH_H
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdexcept>
@@ -38,27 +39,40 @@ public:
 
 private:
     inline static EstadoSesionSlot sesionesPorSlot[9]{};
+    inline static portMUX_TYPE     muxSesiones = portMUX_INITIALIZER_UNLOCKED;
 
     static const char* medioPorSlot(uint8_t slotCliente) {
         return (slotCliente == 0) ? "UART-S" : "WIFI";
     }
 
-    static void verificarSiSlotEstaBloqueado(EstadoSesionSlot& slot, uint8_t slotCliente, const char* usuarioIntento, uint32_t ahoraMs) {
+    static void verificarSiSlotEstaBloqueado(uint8_t slotCliente, const char* usuarioIntento, uint32_t ahoraMs) {
+        bool bloqueado = false;
+        int32_t idUsr  = 0;
+
+        portENTER_CRITICAL(&muxSesiones);
+        EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
         if (slot.bloqueadoHastaMs != 0) {
             if (static_cast<int32_t>(ahoraMs - slot.bloqueadoHastaMs) < 0) {
-                RTOS::encolarAuditoria(
-                    RTOS::TipoRegistroDB::AUDITORIA_RED,
-                    slot.idUsuario,
-                    usuarioIntento,
-                    medioPorSlot(slotCliente),
-                    "LOGIN_RECHAZADO_SLOT_BLOQUEADO",
-                    static_cast<uint8_t>(ResultadoAuditoria::USUARIO_BLOQUEADO),
-                    static_cast<uint8_t>(CriticidadEvento::MEDIA)
-                );
-                throw std::runtime_error("AuthenticationError: sesion bloqueada temporalmente por intentos fallidos");
+                bloqueado = true;
+                idUsr     = slot.idUsuario;
+            } else {
+                slot.bloqueadoHastaMs = 0;
+                slot.intentosFallidos = 0;
             }
-            slot.bloqueadoHastaMs = 0;
-            slot.intentosFallidos = 0;
+        }
+        portEXIT_CRITICAL(&muxSesiones);
+
+        if (bloqueado) {
+            RTOS::encolarAuditoria(
+                RTOS::TipoRegistroDB::AUDITORIA_RED,
+                idUsr,
+                usuarioIntento,
+                medioPorSlot(slotCliente),
+                "LOGIN_RECHAZADO_SLOT_BLOQUEADO",
+                static_cast<uint8_t>(ResultadoAuditoria::USUARIO_BLOQUEADO),
+                static_cast<uint8_t>(CriticidadEvento::MEDIA)
+            );
+            throw std::runtime_error("AuthenticationError: sesion bloqueada temporalmente por intentos fallidos");
         }
     }
 
@@ -68,9 +82,8 @@ public:
             throw std::out_of_range("IndexError: slot de cliente invalido");
         }
 
-        EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
         const uint32_t ahoraMs = millis();
-        verificarSiSlotEstaBloqueado(slot, slotCliente, entrada.usuario, ahoraMs);
+        verificarSiSlotEstaBloqueado(slotCliente, entrada.usuario, ahoraMs);
 
         if (entrada.usuario[0] == '\0' || entrada.clavePlana[0] == '\0') {
             throw std::invalid_argument("ValueError: el usuario y la contrasena no pueden estar vacios");
@@ -82,27 +95,35 @@ public:
                 entrada.clavePlana
             );
 
-            slot.idUsuario        = usuarioDb.idUsuario;
+            portENTER_CRITICAL(&muxSesiones);
+            EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
+            slot.idUsuario         = usuarioDb.idUsuario;
             strncpy(slot.usuario, usuarioDb.usuario.c_str(), sizeof(slot.usuario) - 1);
             slot.usuario[sizeof(slot.usuario) - 1] = '\0';
-            slot.autenticado      = true;
-            slot.rol              = usuarioDb.rol;
-            slot.ultimoRequestMs  = ahoraMs;
-            slot.intentosFallidos = 0;
+            slot.autenticado       = true;
+            slot.rol               = usuarioDb.rol;
+            slot.ultimoRequestMs   = ahoraMs;
+            slot.intentosFallidos  = 0;
+            portEXIT_CRITICAL(&muxSesiones);
 
             return SesionIniciadaDTO{
                 static_cast<uint8_t>(usuarioDb.rol),
                 EXPIRACION_SESION_SEGUNDOS
             };
         } catch (...) {
-            slot.autenticado = false;
-            slot.idUsuario   = 0;
-            slot.rol         = RolUsuario::NINGUNO;
+            bool bloqueadoAhora = false;
+
+            portENTER_CRITICAL(&muxSesiones);
+            EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
+            slot.autenticado       = false;
+            slot.idUsuario         = 0;
+            slot.rol               = RolUsuario::NINGUNO;
             slot.intentosFallidos++;
-            const bool bloqueadoAhora = (slot.intentosFallidos >= MAXIMO_INTENTOS_FALLIDOS);
+            bloqueadoAhora = (slot.intentosFallidos >= MAXIMO_INTENTOS_FALLIDOS);
             if (bloqueadoAhora) {
                 slot.bloqueadoHastaMs = ahoraMs + TIEMPO_BLOQUEO_INTENTOS_MS;
             }
+            portEXIT_CRITICAL(&muxSesiones);
 
             RTOS::encolarAuditoria(
                 RTOS::TipoRegistroDB::AUDITORIA_RED,
@@ -118,13 +139,19 @@ public:
     }
 
     static void cerrarSesionUsuario(uint8_t slotCliente) {
-        if (slotCliente <= 8) {
-            sesionesPorSlot[slotCliente].autenticado     = false;
-            sesionesPorSlot[slotCliente].idUsuario       = 0;
-            sesionesPorSlot[slotCliente].usuario[0]      = '\0';
-            sesionesPorSlot[slotCliente].rol             = RolUsuario::NINGUNO;
-            sesionesPorSlot[slotCliente].ultimoRequestMs = 0;
-        }
+        if (slotCliente > 8) return;
+        portENTER_CRITICAL(&muxSesiones);
+        sesionesPorSlot[slotCliente].autenticado     = false;
+        sesionesPorSlot[slotCliente].idUsuario       = 0;
+        sesionesPorSlot[slotCliente].usuario[0]      = '\0';
+        sesionesPorSlot[slotCliente].rol             = RolUsuario::NINGUNO;
+        sesionesPorSlot[slotCliente].ultimoRequestMs = 0;
+        portEXIT_CRITICAL(&muxSesiones);
+    }
+
+    // Llamado por Core 0 al cerrar o reciclar un socket para bajar el permiso en el acto
+    static void invalidarAutenticacionInmediata(uint8_t slotCliente) {
+        cerrarSesionUsuario(slotCliente);
     }
 
     static RolUsuario exigirSesionAutorizada(uint8_t slotCliente, RolUsuario rolMinimoRequerido) {
@@ -132,11 +159,30 @@ public:
             throw std::out_of_range("IndexError: slot de cliente invalido");
         }
 
-        EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
         const uint32_t ahoraMs = millis();
-        verificarSiSlotEstaBloqueado(slot, slotCliente, slot.usuario, ahoraMs);
+        char nombreLocal[20]{};
+        int32_t idLocal = 0;
+        bool estaAuth   = false;
+        RolUsuario rolActual = RolUsuario::NINGUNO;
 
-        if (!slot.autenticado) {
+        portENTER_CRITICAL(&muxSesiones);
+        strncpy(nombreLocal, sesionesPorSlot[slotCliente].usuario, sizeof(nombreLocal) - 1);
+        portEXIT_CRITICAL(&muxSesiones);
+
+        verificarSiSlotEstaBloqueado(slotCliente, nombreLocal, ahoraMs);
+
+        portENTER_CRITICAL(&muxSesiones);
+        EstadoSesionSlot& slot = sesionesPorSlot[slotCliente];
+        estaAuth  = slot.autenticado;
+        idLocal   = slot.idUsuario;
+        rolActual = slot.rol;
+        strncpy(nombreLocal, slot.usuario, sizeof(nombreLocal) - 1);
+        if (estaAuth && static_cast<uint8_t>(rolActual) >= static_cast<uint8_t>(rolMinimoRequerido)) {
+            slot.ultimoRequestMs = ahoraMs;
+        }
+        portEXIT_CRITICAL(&muxSesiones);
+
+        if (!estaAuth) {
             RTOS::encolarAuditoria(
                 RTOS::TipoRegistroDB::AUDITORIA_RED,
                 0,
@@ -149,11 +195,11 @@ public:
             throw std::runtime_error("AuthenticationError: sesion no autenticada. Inicie sesion primero");
         }
 
-        if (static_cast<uint8_t>(slot.rol) < static_cast<uint8_t>(rolMinimoRequerido)) {
+        if (static_cast<uint8_t>(rolActual) < static_cast<uint8_t>(rolMinimoRequerido)) {
             RTOS::encolarAuditoria(
                 RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
-                slot.idUsuario,
-                slot.usuario,
+                idLocal,
+                nombreLocal,
                 medioPorSlot(slotCliente),
                 "RPC_DENEGADO_POR_ROL",
                 static_cast<uint8_t>(ResultadoAuditoria::DENEGADO_ROL),
@@ -166,18 +212,39 @@ public:
             );
         }
 
-        slot.ultimoRequestMs = ahoraMs;
-        return slot.rol;
+        return rolActual;
     }
 
     static bool estaClienteAutenticado(uint8_t slotCliente) {
-        return (slotCliente <= 8) ? sesionesPorSlot[slotCliente].autenticado : false;
+        if (slotCliente > 8) return false;
+        portENTER_CRITICAL(&muxSesiones);
+        const bool ok = sesionesPorSlot[slotCliente].autenticado;
+        portEXIT_CRITICAL(&muxSesiones);
+        return ok;
+    }
+
+    static void obtenerSnapshotUsuarioSlot(uint8_t slotCliente, int32_t& idOut, char* nombreOut, size_t capNombre) {
+        idOut = 0;
+        if (nombreOut && capNombre > 0) nombreOut[0] = '\0';
+        if (slotCliente > 8) return;
+
+        portENTER_CRITICAL(&muxSesiones);
+        if (sesionesPorSlot[slotCliente].autenticado) {
+            idOut = sesionesPorSlot[slotCliente].idUsuario;
+            if (nombreOut && capNombre > 0) {
+                strncpy(nombreOut, sesionesPorSlot[slotCliente].usuario, capNombre - 1);
+                nombreOut[capNombre - 1] = '\0';
+            }
+        }
+        portEXIT_CRITICAL(&muxSesiones);
     }
 
     static int32_t obtenerIdUsuarioSlot(uint8_t slotCliente) {
-        return (slotCliente <= 8 && sesionesPorSlot[slotCliente].autenticado)
-            ? sesionesPorSlot[slotCliente].idUsuario
-            : 0;
+        if (slotCliente > 8) return 0;
+        portENTER_CRITICAL(&muxSesiones);
+        const int32_t id = sesionesPorSlot[slotCliente].autenticado ? sesionesPorSlot[slotCliente].idUsuario : 0;
+        portEXIT_CRITICAL(&muxSesiones);
+        return id;
     }
 
     static const char* obtenerNombreUsuarioSlot(uint8_t slotCliente) {
@@ -187,9 +254,13 @@ public:
     }
 
     static bool expiroPorOcio(uint8_t slotCliente, uint32_t ahoraMs) {
-        if (slotCliente > 8 || !sesionesPorSlot[slotCliente].autenticado) return false;
-        return static_cast<int32_t>(ahoraMs - sesionesPorSlot[slotCliente].ultimoRequestMs) >
-               static_cast<int32_t>(TIEMPO_MAXIMO_OCIO_MS);
+        if (slotCliente > 8) return false;
+        portENTER_CRITICAL(&muxSesiones);
+        const bool auth = sesionesPorSlot[slotCliente].autenticado;
+        const uint32_t ult = sesionesPorSlot[slotCliente].ultimoRequestMs;
+        portEXIT_CRITICAL(&muxSesiones);
+        if (!auth) return false;
+        return static_cast<int32_t>(ahoraMs - ult) > static_cast<int32_t>(TIEMPO_MAXIMO_OCIO_MS);
     }
 };
 
