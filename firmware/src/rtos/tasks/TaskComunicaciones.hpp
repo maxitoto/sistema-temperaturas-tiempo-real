@@ -123,6 +123,8 @@ namespace RTOS::Tasks {
             // Prioridad 3 (alta) y período de 10 ms para baja latencia en UART-S y TCP
             return tarea.iniciarEnNucleo("TaskComms", &ejecutarCiclo, 10, 8192, 3, 1);
         }
+
+        static TareaSegura& obtenerTarea() { return tarea; }
     };
 
 } // namespace RTOS::Tasks

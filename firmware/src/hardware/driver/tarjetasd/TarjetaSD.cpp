@@ -107,19 +107,26 @@ bool TarjetaSD::eliminarDirectorio(const char* ruta) {
 uint64_t TarjetaSD::espacioTotal() {
     ScopedLock lock(mutexSd);
     if (!inicializada) return 0;
-    return SD.totalBytes();
+    uint64_t total = SD.totalBytes();
+    cacheTotalKb = static_cast<uint32_t>(total / 1024ULL);
+    return total;
 }
 
 uint64_t TarjetaSD::espacioUsado() {
     ScopedLock lock(mutexSd);
     if (!inicializada) return 0;
-    return SD.usedBytes();
+    uint32_t ahora = millis();
+    if (cacheUsadoKb == 0 || (ahora - ultimoCalculoEspacioMs > 300000UL)) {
+        ultimoCalculoEspacioMs = ahora;
+        cacheTotalKb = static_cast<uint32_t>(SD.totalBytes() / 1024ULL);
+        cacheUsadoKb = static_cast<uint32_t>(SD.usedBytes() / 1024ULL);
+    }
+    return static_cast<uint64_t>(cacheUsadoKb) * 1024ULL;
 }
 
 uint32_t TarjetaSD::espacioLibreKB() {
     ScopedLock lock(mutexSd);
     if (!inicializada) return 0;
-    uint64_t total = SD.totalBytes();
-    uint64_t usado = SD.usedBytes();
-    return (total > usado) ? static_cast<uint32_t>((total - usado) / 1024ULL) : 0;
+    espacioUsado();
+    return (cacheTotalKb > cacheUsadoKb) ? (cacheTotalKb - cacheUsadoKb) : 0;
 }

@@ -12,6 +12,9 @@ private:
     static constexpr int FRECUENCIA_SPI = 4000000;
     bool inicializada = false;
     SemaphoreHandle_t mutexSd = nullptr;
+    uint32_t cacheTotalKb = 0;
+    uint32_t cacheUsadoKb = 0;
+    uint32_t ultimoCalculoEspacioMs = 0;
 
     TarjetaSD();
     ~TarjetaSD() = default;

@@ -22,7 +22,7 @@ namespace RTOS::Tasks {
 
     class TaskOled {
     public:
-
+        static TareaSegura& obtenerTarea() { return tarea; }
         static constexpr uint32_t DURACION_VISTA_GRILLA_MS   = 12000;
         static constexpr uint32_t DURACION_DETALLE_SENSOR_MS = 10000;
 

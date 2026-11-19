@@ -2,10 +2,6 @@
 #define MIDDLEWARE_MESSAGE_H
 
 #include "../remote/Controller/abstract/RPC_middleware_message.hpp"
-#include "../remote/private/RPDatabase/RPSensor.hpp"
-#include "../remote/private/RPDatabase/RPUsuario.hpp"
-#include "../remote/private/RPSistema/RPSistema.hpp"
-
 
 class MiddlewareMessage {
 public:
@@ -50,5 +46,13 @@ public:
         return RPCMiddlewareMessage::obtenerMascaraTotalSuscriptoresStream();
     }
 };
+
+// Inclusión de los dominios de procedimientos remotos después de definir MiddlewareMessage
+#include "../remote/private/RPDatabase/RPSensor.hpp"
+#include "../remote/private/RPDatabase/RPUsuario.hpp"
+#include "../remote/private/RPDatabase/RPConfiguracion.hpp"
+#include "../remote/private/RPDatabase/RPAuditoria.hpp"
+#include "../remote/private/RPDatabase/RPSqlTerminal.hpp"
+#include "../remote/private/RPSistema/RPSistema.hpp"
 
 #endif

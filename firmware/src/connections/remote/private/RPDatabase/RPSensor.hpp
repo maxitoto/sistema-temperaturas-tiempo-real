@@ -402,6 +402,114 @@ namespace RPSensor {
         RolUsuario::NO_ADMIN
     );
 
+    struct FiltroPaginadoSensoDTO {
+        PgInt         idSensor; // 0 = todos los sensores
+        PgPosSmallInt limiteRegistros;
+        PgPosSmallInt offsetRegistros;
+    };
+
+    struct CrearSensoManualDTO {
+        PgInt        idSensor;
+        PgFloat      temperaturaCruda;
+        PgFloat      temperaturaCorregida;
+        EstadoSensor estadoSensor;
+    };
+
+    struct IdentificadorRegistroDTO {
+        PgInt id;
+    };
+
+    struct PurgarPorEpochDTO {
+        PgEpoch timestampLimite;
+    };
+
+    struct ActualizarReporteAuditoriaSensorDTO {
+        PgInt             idAuditoriaSensor;
+        EstadoEnvioCorreo nuevoEstado;
+    };
+
+    using ListaSensoCompletaDTO = PgList<SensoDTO, 32>;
+
+    // Listar tabla Senso completa con paginación (NO_ADMIN)
+    inline auto listarSensosPaginados = llamadoSemantico.alMenosUnaVez<FiltroPaginadoSensoDTO, ListaSensoCompletaDTO>(
+        "listarSensosPaginados",
+        [](const FiltroPaginadoSensoDTO& f) -> ListaSensoCompletaDTO {
+            const int32_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 32) ? 32 : f.limiteRegistros;
+            auto q = (f.idSensor > 0)
+                ? DbRuntime::Orm::Senso.filter_eq("id_sensor", f.idSensor)
+                : DbRuntime::Orm::Senso.objects();
+
+            auto filas = q.order_by("-id_senso")
+                          .limit(lim)
+                          .offset(static_cast<int32_t>(f.offsetRegistros))
+                          .all_as<SensoDTO>(&RepoSenso::mapear);
+
+            ListaSensoCompletaDTO out{};
+            for (const auto& r : filas) {
+                if (!out.agregar(r)) break;
+            }
+            return out;
+        },
+        RolUsuario::NO_ADMIN
+    );
+
+    // Crear registro manual en Senso (ADMIN)
+    inline auto crearSensoManual = llamadoSemantico.exactamenteUnaVez<CrearSensoManualDTO, SensoDTO>(
+        "crearSensoManual",
+        [](const CrearSensoManualDTO& dto) -> SensoDTO {
+            SensoDTO creado = RepoSenso::registrarLectura(
+                dto.idSensor,
+                dto.temperaturaCruda,
+                dto.temperaturaCorregida,
+                dto.estadoSensor,
+                static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual())
+            );
+            auditarAccionSensor("CREAR_SENSO_MANUAL", "SENSO");
+            return creado;
+        },
+        RolUsuario::ADMIN
+    );
+
+    // Eliminar un registro de Senso por ID (ADMIN)
+    inline auto eliminarSensoPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
+        "eliminarSensoPorId",
+        [](const IdentificadorRegistroDTO& dto) {
+            DbRuntime::Orm::Senso.filter_eq("id_senso", dto.id).remove();
+            auditarAccionSensor("ELIMINAR_SENSO_ID", "SENSO");
+        },
+        RolUsuario::ADMIN
+    );
+
+    // Purgar registros antiguos de Senso (ADMIN)
+    inline auto purgarSensosAnterioresA = llamadoSemantico.exactamenteUnaVez<PurgarPorEpochDTO, PgPosSmallInt>(
+        "purgarSensosAnterioresA",
+        [](const PurgarPorEpochDTO& dto) -> PgPosSmallInt {
+            uint16_t borrados = RepoSenso::purgarAnterioresA(static_cast<int64_t>(dto.timestampLimite));
+            auditarAccionSensor("PURGAR_SENSOS", "SENSO");
+            return borrados;
+        },
+        RolUsuario::ADMIN
+    );
+
+    // Actualizar estado de reporte de AuditoriaSensores (ADMIN)
+    inline auto actualizarEstadoReporteAuditoriaSensor = llamadoSemantico.exactamenteUnaVez<ActualizarReporteAuditoriaSensorDTO, AuditoriaSensorDTO>(
+        "actualizarEstadoReporteAuditoriaSensor",
+        [](const ActualizarReporteAuditoriaSensorDTO& dto) -> AuditoriaSensorDTO {
+            return RepoAuditoriaSensores::actualizarEstadoReporte(dto.idAuditoriaSensor, dto.nuevoEstado);
+        },
+        RolUsuario::ADMIN
+    );
+
+    // Eliminar registro de AuditoriaSensores por ID (ADMIN)
+    inline auto eliminarAuditoriaSensorPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
+        "eliminarAuditoriaSensorPorId",
+        [](const IdentificadorRegistroDTO& dto) {
+            DbRuntime::Orm::AuditoriaSensores.filter_eq("id_auditoria_sensor", dto.id).remove();
+            auditarAccionSensor("ELIMINAR_AUD_SENSOR", "AUDITORIA_SENSORES");
+        },
+        RolUsuario::ADMIN
+    );
+
 }
 
 #endif

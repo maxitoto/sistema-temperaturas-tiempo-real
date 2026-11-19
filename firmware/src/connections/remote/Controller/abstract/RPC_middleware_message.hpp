@@ -9,7 +9,7 @@
 
 class RPCMiddlewareMessage : public RPCBase {
 public:
-    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 32;
+    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 80;
     using InvocadorBorradoFn = MascaraClientes (*)(const SobreMensajeRPC&, MascaraClientes& refSuscriptoresStream);
     using EmisorStreamFn     = size_t (*)(uint16_t ticketSecuencia, uint16_t idProc, uint8_t* bufferOut, size_t capMax);
     using FuncionDifusionL1  = void (*)(const uint8_t* buffer, size_t longitud, MascaraClientes destinatarios, CanalSalida canal);

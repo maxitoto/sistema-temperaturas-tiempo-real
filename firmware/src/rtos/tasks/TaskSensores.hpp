@@ -6,10 +6,12 @@
 #include "../../hardware/driver/gestorsensores/GestorSensores.hpp"
 #include "../../connections/middlewares/middleware_message.hpp"
 
+
 namespace RTOS::Tasks {
 
     class TaskSensores {
     public:
+        static TareaSegura& obtenerTarea() { return tarea; }
         static constexpr uint32_t INTERVALO_STREAM_ACTIVO_MS  = 1000;   // 1s cuando hay streaming
         static constexpr uint32_t INTERVALO_REPOSO_MS         = 3000;   // 3s sin streaming
         static constexpr uint32_t INTERVALO_GUARDADO_DB_MS    = 120000; // 2 minutos fijos para DB

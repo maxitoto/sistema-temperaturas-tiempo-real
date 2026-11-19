@@ -320,6 +320,8 @@ namespace RTOS::Tasks {
             encolarSonido(TipoSonidoEvento::BOOT_SISTEMA);
             return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 100, 6144, 1, 0);
         }
+
+        static TareaSegura& obtenerTarea() { return tarea; }
     };
 
 } // namespace RTOS::Tasks

@@ -152,7 +152,7 @@ namespace RTOS {
         uint32_t obtenerDesbordes() const { return fallosColaLlena.load(std::memory_order_relaxed); }
     };
 
-    // 4. TAREA SEGURA CON TELEMETRÍA Y PARADA COOPERATIVA
+    // 4. TAREA SEGURA CON TELEMETRÍA Y RECUPERACIÓN POR BIOS
     class TareaSegura {
     public:
         using FuncionPaso = void (*)(void* ctx);
@@ -163,6 +163,7 @@ namespace RTOS {
         FuncionPaso funcionPaso = nullptr;
         void* contexto = nullptr;
         uint32_t periodoMs = 100;
+        uint32_t stackReservadoBytes = 4096;
         uint8_t prioridad = 1;
         BaseType_t nucleo = 1;
         std::atomic<bool> seguirEjecutando{false};
@@ -170,15 +171,27 @@ namespace RTOS {
         std::atomic<uint32_t> ciclosEjecutados{0};
         std::atomic<uint32_t> maxTiempoEjecucionUs{0};
         std::atomic<uint32_t> minStackLibreBytes{0};
+        std::atomic<uint32_t> ultimoLatidoMs{0};
+        std::atomic<bool>     enEjecucionPaso{false};
+        std::atomic<uint16_t> reiniciosBios{0};
 
         static void puntoEntradaEstatico(void* param) {
             TareaSegura* self = static_cast<TareaSegura*>(param);
+            self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+
             while (self->seguirEjecutando.load(std::memory_order_relaxed)) {
+                self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+                self->enEjecucionPaso.store(true, std::memory_order_relaxed);
+
                 int64_t t0 = esp_timer_get_time();
                 if (self->funcionPaso) {
                     self->funcionPaso(self->contexto);
                 }
                 uint32_t dt = static_cast<uint32_t>(esp_timer_get_time() - t0);
+
+                self->enEjecucionPaso.store(false, std::memory_order_relaxed);
+                self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+
                 uint32_t prevMax = self->maxTiempoEjecucionUs.load(std::memory_order_relaxed);
                 if (dt > prevMax) {
                     self->maxTiempoEjecucionUs.store(dt, std::memory_order_relaxed);
@@ -191,8 +204,10 @@ namespace RTOS {
                     uint32_t paso = (restante > 50) ? 50 : restante;
                     vTaskDelay(pdMS_TO_TICKS(paso));
                     restante -= paso;
+                    self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
                 }
             }
+            self->enEjecucionPaso.store(false, std::memory_order_relaxed);
             self->handle.store(nullptr, std::memory_order_relaxed);
             vTaskDelete(nullptr);
         }
@@ -210,20 +225,51 @@ namespace RTOS {
             void* ctx = nullptr
         ) {
             if (handle.load(std::memory_order_relaxed) != nullptr) return false;
-            nombre           = nombreTarea;
-            funcionPaso      = fnPasoCiclico;
-            contexto         = ctx;
-            periodoMs        = (intervaloMs == 0) ? 10 : intervaloMs;
-            prioridad        = prio;
-            nucleo           = coreId;
+            nombre              = nombreTarea;
+            funcionPaso         = fnPasoCiclico;
+            contexto            = ctx;
+            periodoMs           = (intervaloMs == 0) ? 10 : intervaloMs;
+            stackReservadoBytes = stackBytes;
+            prioridad           = prio;
+            nucleo              = coreId;
             seguirEjecutando.store(true, std::memory_order_relaxed);
-            ciclosEjecutados.store(0, std::memory_order_relaxed);
+            enEjecucionPaso.store(false, std::memory_order_relaxed);
+            ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
 
             TaskHandle_t nuevoHandle = nullptr;
             BaseType_t res = xTaskCreatePinnedToCore(
                 &TareaSegura::puntoEntradaEstatico,
                 nombre,
-                stackBytes,
+                stackReservadoBytes,
+                this,
+                prioridad,
+                &nuevoHandle,
+                nucleo
+            );
+            if (res != pdPASS) {
+                seguirEjecutando.store(false, std::memory_order_relaxed);
+                return false;
+            }
+            handle.store(nuevoHandle, std::memory_order_relaxed);
+            return true;
+        }
+
+        // Usado exclusivamente por TaskBiosRTOS cuando una tarea queda colgada sin retener mutex críticos
+        bool reiniciarForzadoPorBios() {
+            TaskHandle_t hActual = handle.exchange(nullptr, std::memory_order_relaxed);
+            if (hActual != nullptr) {
+                vTaskDelete(hActual);
+            }
+            enEjecucionPaso.store(false, std::memory_order_relaxed);
+            seguirEjecutando.store(true, std::memory_order_relaxed);
+            ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+            reiniciosBios.fetch_add(1, std::memory_order_relaxed);
+
+            TaskHandle_t nuevoHandle = nullptr;
+            BaseType_t res = xTaskCreatePinnedToCore(
+                &TareaSegura::puntoEntradaEstatico,
+                nombre,
+                stackReservadoBytes,
                 this,
                 prioridad,
                 &nuevoHandle,
@@ -250,9 +296,19 @@ namespace RTOS {
             vTaskDelay(pdMS_TO_TICKS(ms));
         }
 
-        bool estaActiva() const { return handle.load(std::memory_order_relaxed) != nullptr; }
-        uint32_t obtenerCiclos() const { return ciclosEjecutados.load(std::memory_order_relaxed); }
-        uint32_t obtenerStackLibreMin() const { return minStackLibreBytes.load(std::memory_order_relaxed); }
+        bool estaActiva() const              { return handle.load(std::memory_order_relaxed) != nullptr; }
+        TaskHandle_t obtenerHandle() const   { return handle.load(std::memory_order_relaxed); }
+        const char* obtenerNombre() const    { return nombre; }
+        uint8_t obtenerPrioridad() const     { return prioridad; }
+        int8_t obtenerNucleo() const         { return static_cast<int8_t>(nucleo); }
+        uint32_t obtenerPeriodoMs() const    { return periodoMs; }
+        uint32_t obtenerStackTotal() const   { return stackReservadoBytes; }
+        uint32_t obtenerCiclos() const       { return ciclosEjecutados.load(std::memory_order_relaxed); }
+        uint32_t obtenerMaxTiempoUs() const  { return maxTiempoEjecucionUs.load(std::memory_order_relaxed); }
+        uint32_t obtenerStackLibreMin() const{ return minStackLibreBytes.load(std::memory_order_relaxed); }
+        uint32_t obtenerUltimoLatidoMs()const{ return ultimoLatidoMs.load(std::memory_order_relaxed); }
+        bool estaEjecutandoPaso() const      { return enEjecucionPaso.load(std::memory_order_relaxed); }
+        uint16_t obtenerReiniciosBios() const{ return reiniciosBios.load(std::memory_order_relaxed); }
     };
 
     // 5. PIZARRA OLED (Buffer en RAM para desacoplar escritores de la única tarea I2C)

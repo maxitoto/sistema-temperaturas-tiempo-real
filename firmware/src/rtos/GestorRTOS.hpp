@@ -3,6 +3,7 @@
 #include "tasks/TaskComunicaciones.hpp"
 #include "tasks/TaskOled.hpp"
 #include "tasks/TaskAlertasYPersistencia.hpp"
+#include "tasks/TaskBiosRTOS.hpp"
 
 namespace RTOS {
 
@@ -19,6 +20,13 @@ namespace RTOS {
             Tasks::TaskAlertasYPersistencia::iniciar();
             Tasks::TaskSensores::iniciar(l3);
             Tasks::TaskOled::iniciar(uarts, l2);
+
+            // Registrar las 4 tareas en el Supervisor BIOS con sus umbrales máximos permitidos
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskComunicaciones::obtenerTarea(),       6000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskAlertasYPersistencia::obtenerTarea(), 12000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskSensores::obtenerTarea(),             8000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskOled::obtenerTarea(),                 6000);
+            Tasks::TaskBiosRTOS::iniciar();
         }
     };
 
