@@ -30,7 +30,7 @@ export type DiagnosticoSistemaCliente = InferDTO<typeof DiagnosticoSistemaDTO>;
 // --- 2. Procedimientos Remotos Declarativos ---
 
 const rpcActualizarWiFi = llamadoCliente.exactamenteUnaVez("actualizarConfiguracionWiFi", ConfiguracionWiFiDTO, ResConfiguracionWiFiDTO);
-const rpcObtenerWiFi    = llamadoCliente.alMenosUnaVez("obtenerConfiguracionWiFi", null, ResConfiguracionWiFiDTO);
+const rpcObtenerWiFi = llamadoCliente.alMenosUnaVez("obtenerConfiguracionWiFi", null, ResConfiguracionWiFiDTO, 60000);
 const rpcDiagnostico    = llamadoCliente.alMenosUnaVez("ejecutarDiagnosticoSistema", null, DiagnosticoSistemaDTO);
 const rpcReiniciar      = llamadoCliente.exactamenteUnaVez("reiniciarHardware", null, null);
 

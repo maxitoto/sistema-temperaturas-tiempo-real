@@ -2,13 +2,13 @@
 #define WIFI_SECURITY_ENCRYPT_HPP
 
 #include <Arduino.h>
-#include <mbedtls/ccm.h>
+#include <mbedtls/gcm.h>
 #include <esp_random.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
-// Activar/desactivar cifrado en tiempo de compilación (-DWIFI_CIFRADO_CCM_ACTIVO=0 para pruebas progresivas)
+// Activar/desactivar cifrado en tiempo de compilación (-DWIFI_CIFRADO_CCM_ACTIVO=0 para pruebas sin cifrado)
 #ifndef WIFI_CIFRADO_CCM_ACTIVO
 #define WIFI_CIFRADO_CCM_ACTIVO 1
 #endif
@@ -48,17 +48,18 @@ namespace WiFiSecurity {
         }
     };
 
+    // AEAD AES-128-GCM (compatible nativamente con Electron/BoringSSL y acelerado por HW en ESP32)
     class CifradorAesCcm {
     public:
         static constexpr uint8_t VERSION_PROTOCOLO = 0x01;
         static constexpr size_t  TAMANO_CLAVE      = 16; // AES-128
-        static constexpr size_t  TAMANO_NONCE      = 12; // RFC 3610 (L = 3)
+        static constexpr size_t  TAMANO_NONCE      = 12; // 96 bits estándar GCM
         static constexpr size_t  TAMANO_CABECERA   = 10; // [VER:1][FLAGS:1][SALT:4][SEQ:4]
-        static constexpr size_t  TAMANO_TAG        = 8;  // CCM-8 (RFC 7925)
-        static constexpr size_t  OVERHEAD_INTERNO  = TAMANO_CABECERA + TAMANO_TAG; // 18 bytes
+        static constexpr size_t  TAMANO_TAG        = 16; // Tag GCM de 128 bits
+        static constexpr size_t  OVERHEAD_INTERNO  = TAMANO_CABECERA + TAMANO_TAG; // 26 bytes
 
     private:
-        mbedtls_ccm_context ctx{};
+        mbedtls_gcm_context ctx{};
         bool inicializado{false};
 
         static inline void escribirU32BE(uint8_t* dst, uint32_t val) {
@@ -92,20 +93,19 @@ namespace WiFiSecurity {
 
     public:
         CifradorAesCcm() {
-            mbedtls_ccm_init(&ctx);
+            mbedtls_gcm_init(&ctx);
         }
 
         ~CifradorAesCcm() {
-            mbedtls_ccm_free(&ctx);
+            mbedtls_gcm_free(&ctx);
         }
 
         CifradorAesCcm(const CifradorAesCcm&) = delete;
         CifradorAesCcm& operator=(const CifradorAesCcm&) = delete;
 
-        // Configura la PSK de 128 bits una sola vez en el arranque (cero allocs por paquete).
         bool inicializarConPsk(const uint8_t clavePsk16[TAMANO_CLAVE]) {
             if (clavePsk16 == nullptr) return false;
-            const int rc = mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, clavePsk16, 128);
+            const int rc = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, clavePsk16, 128);
             inicializado = (rc == 0);
             return inicializado;
         }
@@ -114,8 +114,6 @@ namespace WiFiSecurity {
             return inicializado;
         }
 
-        // Cifra un payload RPC sin prefijo LEN y escribe el frame completo [LEN:4][HDR:10][CT:N][TAG:8].
-        // Devuelve la longitud total escrita (incluyendo los 4 bytes de LEN) o 0 ante error / wrap de seq.
         size_t empaquetarYCifrarFrame(
             CanalDireccionCcm direccion,
             EstadoCanalCcmSlot& estado,
@@ -127,7 +125,6 @@ namespace WiFiSecurity {
             if (!inicializado || textoPlanoSinLen == nullptr || frameSalidaConLen == nullptr || lenPlano == 0) {
                 return 0;
             }
-            // Protege contra wrap-around del contador de secuencia (obliga a renovar sesión)
             if (estado.txSeq >= 0xFFFFFFFEu) {
                 return 0;
             }
@@ -158,20 +155,20 @@ namespace WiFiSecurity {
             uint8_t* ptrCipher = hdr + TAMANO_CABECERA;
             uint8_t* ptrTag    = ptrCipher + lenPlano;
 
-            const int rc = mbedtls_ccm_encrypt_and_tag(
+            const int rc = mbedtls_gcm_crypt_and_tag(
                 &ctx,
+                MBEDTLS_GCM_ENCRYPT,
                 lenPlano,
                 nonce, TAMANO_NONCE,
-                hdr, TAMANO_CABECERA, // AAD = cabecera completa de 10 bytes
+                hdr, TAMANO_CABECERA,
                 textoPlanoSinLen,
                 ptrCipher,
-                ptrTag, TAMANO_TAG
+                TAMANO_TAG, ptrTag
             );
 
             return (rc == 0) ? lenTotal : 0;
         }
 
-        // Verifica formato, anti-replay y tag CCM-8 de un frame ya despojado de [LEN:4].
         ResultadoDescifradoCcm descifrarYValidar(
             CanalDireccionCcm direccionEsperada,
             EstadoCanalCcmSlot& estado,
@@ -203,7 +200,6 @@ namespace WiFiSecurity {
                 return ResultadoDescifradoCcm::ERROR_VERSION_O_CANAL;
             }
 
-            // Anti-replay estricto antes de actualizar el estado
             if (estado.rxInicializado) {
                 if (salt != estado.rxSalt || seq <= estado.ultimoRxSeq) {
                     return ResultadoDescifradoCcm::ERROR_REPLAY;
@@ -216,21 +212,20 @@ namespace WiFiSecurity {
             const uint8_t* ptrCipher = frameInterno + TAMANO_CABECERA;
             const uint8_t* ptrTag    = ptrCipher + lenCipher;
 
-            const int rc = mbedtls_ccm_auth_decrypt(
+            const int rc = mbedtls_gcm_auth_decrypt(
                 &ctx,
                 lenCipher,
                 nonce, TAMANO_NONCE,
-                frameInterno, TAMANO_CABECERA, // AAD
+                frameInterno, TAMANO_CABECERA,
+                ptrTag, TAMANO_TAG,
                 ptrCipher,
-                textoPlanoOut,
-                ptrTag, TAMANO_TAG
+                textoPlanoOut
             );
 
             if (rc != 0) {
                 return ResultadoDescifradoCcm::ERROR_TAG_AUTENTICACION;
             }
 
-            // Solo fijamos salt/seq después de comprobar integridad criptográfica
             if (!estado.rxInicializado) {
                 estado.rxSalt         = salt;
                 estado.rxInicializado = true;

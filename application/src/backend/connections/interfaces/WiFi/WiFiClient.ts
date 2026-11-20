@@ -1,31 +1,11 @@
 import net from "node:net";
 import dgram from "node:dgram";
-import crypto from "node:crypto";
-
-const PSK = Buffer.from("UNTDF-ESP32-PSK1", "ascii"); // 16 bytes idénticos a PSK_DEFECTO_128
-const VER = 0x01;
-
-export function cifrarFrameCcm(flags: number, salt: number, seq: number, plainSinLen: Buffer): Buffer {
-    const hdr = Buffer.alloc(10);
-    hdr[0] = VER;
-    hdr[1] = flags;
-    hdr.writeUInt32BE(salt >>> 0, 2);
-    hdr.writeUInt32BE(seq >>> 0, 6);
-
-    const nonce = Buffer.alloc(12);
-    nonce[0] = VER;
-    nonce[1] = flags;
-    hdr.copy(nonce, 4, 2, 10);
-
-    const cipher = crypto.createCipheriv("aes-128-ccm", PSK, nonce, { authTagLength: 8 });
-    cipher.setAAD(hdr, { plaintextLength: plainSinLen.length });
-    const ct = Buffer.concat([cipher.update(plainSinLen), cipher.final()]);
-    const tag = cipher.getAuthTag();
-
-    const lenPref = Buffer.alloc(4);
-    lenPref.writeUInt32BE(hdr.length + ct.length + tag.length, 0);
-    return Buffer.concat([lenPref, hdr, ct, tag]);
-}
+import {
+    CanalDireccionCcm,
+    EstadoSesionCcmCliente,
+    OVERHEAD_CCM,
+    WIFI_CIFRADO_CCM_ACTIVO
+} from "./WiFiCcmCodec";
 
 export interface WiFiClientEvents {
     onMessage?: (mensajeCompletoConCabeceraLen: Buffer) => void;
@@ -44,27 +24,35 @@ export class WiFiClient {
     private conectado = false;
     private puertoUdpLocal = 0;
 
+    private readonly ccm = new EstadoSesionCcmCliente();
+
     constructor(private readonly eventos: WiFiClientEvents = {}) {}
 
-    private registrarLogFrame(direccion: "TX >" | "RX <", protocolo: "TCP" | "UDP", frame: Buffer): void {
-        if (frame.length >= 8) {
-            const len = frame.readUInt32BE(0);
-            const ticket = frame.readUInt16BE(4);
-            const procCrudo = frame.readUInt16BE(6);
+    private registrarLogFrame(
+        direccion: "TX >" | "RX <",
+        protocolo: "TCP" | "UDP",
+        framePlano: Buffer,
+        extra = ""
+    ): void {
+        if (framePlano.length >= 8) {
+            const len = framePlano.readUInt32BE(0);
+            const ticket = framePlano.readUInt16BE(4);
+            const procCrudo = framePlano.readUInt16BE(6);
             const esErr = (procCrudo & 0x8000) !== 0;
             const proc = `0x${(procCrudo & 0x7FFF).toString(16).padStart(4, "0")}`;
             this.eventos.onDebugLog?.(
-                `[WIFI-${protocolo} ${direccion}] PROC:${proc}${esErr ? " (ERR)" : ""} TICKET:${ticket} LEN:${len} | ${frame.toString("hex").toUpperCase()}`
+                `[WIFI-${protocolo} ${direccion}] PROC:${proc}${esErr ? " (ERR)" : ""} TICKET:${ticket} LEN:${len}${extra}`
             );
         } else {
             this.eventos.onDebugLog?.(
-                `[WIFI-${protocolo} ${direccion} RAW] (${frame.length}B) ${frame.toString("hex").toUpperCase()}`
+                `[WIFI-${protocolo} ${direccion} RAW] (${framePlano.length}B)${extra}`
             );
         }
     }
 
     async conectar(ipServidor: string, timeoutMs = 5000): Promise<void> {
         await this.cerrar();
+        this.ccm.reiniciar();
 
         await new Promise<void>((resolve, reject) => {
             const socket = new net.Socket();
@@ -81,13 +69,14 @@ export class WiFiClient {
                 clearTimeout(timer);
                 this.socketTcp = socket;
                 this.conectado = true;
-                this.eventos.onDebugLog?.(`[ESTADO WIFI] -> CONECTADO (${ipServidor}:${WiFiClient.PUERTO_TCP_SERVIDOR})`);
+                this.eventos.onDebugLog?.(
+                    `[ESTADO WIFI] -> CONECTADO (${ipServidor}:${WiFiClient.PUERTO_TCP_SERVIDOR}) · CCM:${WIFI_CIFRADO_CCM_ACTIVO ? "ON" : "OFF"}`
+                );
                 resolve();
             });
 
             socket.on("data", (chunk: Buffer) => this.procesarFragmentoTcp(chunk));
 
-            // Si el ESP32 cierra el socket por ocio o keepalive (FIN), cerramos inmediatamente el lado local
             socket.on("end", () => {
                 this.eventos.onDebugLog?.("[WIFI-TCP] FIN recibido desde el servidor ESP32.");
                 socket.destroy();
@@ -107,6 +96,7 @@ export class WiFiClient {
                     this.socketTcp = null;
                     this.conectado = false;
                     this.bufferAcumuladoTcp = Buffer.alloc(0);
+                    this.ccm.reiniciar();
                     this.eventos.onDisconnect?.();
                 }
             });
@@ -116,14 +106,34 @@ export class WiFiClient {
     }
 
     private async abrirReceptorUdpLocal(): Promise<void> {
-        return new Promise<void>((resolve, _reject) => {
+        return new Promise<void>(resolve => {
             const udp = dgram.createSocket("udp4");
 
             udp.on("message", (msg: Buffer) => {
-                if (msg.length >= 8) {
+                if (msg.length < 8) return;
+
+                if (!WIFI_CIFRADO_CCM_ACTIVO) {
                     this.registrarLogFrame("RX <", "UDP", msg);
                     this.eventos.onMessage?.(msg);
+                    return;
                 }
+
+                const longitudPayload = msg.readUInt32BE(0);
+                if (longitudPayload < 4 + OVERHEAD_CCM || msg.length < 4 + longitudPayload) {
+                    return;
+                }
+
+                const res = this.ccm.descifrarFrameEntrante(
+                    CanalDireccionCcm.DIR_S2C_UDP,
+                    msg.subarray(4, 4 + longitudPayload)
+                );
+                if (!res) {
+                    this.eventos.onDebugLog?.("[WIFI-UDP RX <] Datagrama descartado por fallo de autenticación CCM / replay.");
+                    return;
+                }
+
+                this.registrarLogFrame("RX <", "UDP", res.framePlanoConLen, ` [CCM SEQ:${res.seq}]`);
+                this.eventos.onMessage?.(res.framePlanoConLen);
             });
 
             udp.on("error", err => this.eventos.onError?.(err));
@@ -139,12 +149,16 @@ export class WiFiClient {
     private procesarFragmentoTcp(chunk: Buffer): void {
         this.bufferAcumuladoTcp = Buffer.concat([this.bufferAcumuladoTcp, chunk]);
 
+        const minPayload = WIFI_CIFRADO_CCM_ACTIVO ? 4 + OVERHEAD_CCM : 4;
+
         while (this.bufferAcumuladoTcp.length >= 4) {
             const longitudPayload = this.bufferAcumuladoTcp.readUInt32BE(0);
             const longitudTotalFrame = 4 + longitudPayload;
 
-            if (longitudPayload < 4 || longitudTotalFrame > 2048) {
+            if (longitudPayload < minPayload || longitudTotalFrame > 2048) {
+                this.eventos.onDebugLog?.(`[WIFI-TCP RX <] Framing inválido (LEN:${longitudPayload}). Cerrando socket.`);
                 this.bufferAcumuladoTcp = Buffer.alloc(0);
+                this.socketTcp?.destroy();
                 break;
             }
 
@@ -155,8 +169,24 @@ export class WiFiClient {
             const frameCompleto = Buffer.from(this.bufferAcumuladoTcp.subarray(0, longitudTotalFrame));
             this.bufferAcumuladoTcp = this.bufferAcumuladoTcp.subarray(longitudTotalFrame);
 
-            this.registrarLogFrame("RX <", "TCP", frameCompleto);
-            this.eventos.onMessage?.(frameCompleto);
+            if (!WIFI_CIFRADO_CCM_ACTIVO) {
+                this.registrarLogFrame("RX <", "TCP", frameCompleto);
+                this.eventos.onMessage?.(frameCompleto);
+                continue;
+            }
+
+            const res = this.ccm.descifrarFrameEntrante(
+                CanalDireccionCcm.DIR_S2C_TCP,
+                frameCompleto.subarray(4)
+            );
+            if (!res) {
+                this.eventos.onDebugLog?.("[WIFI-TCP RX <] Error de autenticación AES-CCM o replay detectado. Cerrando socket.");
+                this.socketTcp?.destroy();
+                break;
+            }
+
+            this.registrarLogFrame("RX <", "TCP", res.framePlanoConLen, ` [CCM SEQ:${res.seq}]`);
+            this.eventos.onMessage?.(res.framePlanoConLen);
         }
     }
 
@@ -164,8 +194,20 @@ export class WiFiClient {
         if (!this.conectado || !this.socketTcp) {
             return false;
         }
-        this.registrarLogFrame("TX >", "TCP", frameConPrefijoLen);
-        return this.socketTcp.write(frameConPrefijoLen);
+
+        if (!WIFI_CIFRADO_CCM_ACTIVO) {
+            this.registrarLogFrame("TX >", "TCP", frameConPrefijoLen);
+            return this.socketTcp.write(frameConPrefijoLen);
+        }
+
+        const cifrado = this.ccm.cifrarFrameTcp(frameConPrefijoLen);
+        if (!cifrado) {
+            this.eventos.onDebugLog?.("[WIFI-TCP TX >] No se pudo cifrar el paquete CCM (secuencia agotada).");
+            return false;
+        }
+
+        this.registrarLogFrame("TX >", "TCP", frameConPrefijoLen, ` [CCM SEQ:${cifrado.seq}]`);
+        return this.socketTcp.write(cifrado.frameCifrado);
     }
 
     obtenerPuertoUdpLocal(): number {
@@ -179,6 +221,7 @@ export class WiFiClient {
     async cerrar(): Promise<void> {
         this.conectado = false;
         this.bufferAcumuladoTcp = Buffer.alloc(0);
+        this.ccm.reiniciar();
 
         if (this.socketUdp) {
             const udp = this.socketUdp;

@@ -20,7 +20,7 @@ namespace WiFiSecurity {
         uint8_t  violacionesConsecutivas{0};
         bool     activo{false};
 
-        static constexpr uint32_t TIMEOUT_PRE_AUTH_MS         = 5000;  // 5 s para completar login L2
+        static constexpr uint32_t TIMEOUT_PRE_AUTH_MS         = 30000;  // 3 s para completar login L2
         static constexpr uint32_t COOLDOWN_AUDITORIA_MS       = 30000; // Máx. 1 log SD cada 30 s por slot
 
         // Perfil estricto antes del login (permite keepalive + login, frena floods)

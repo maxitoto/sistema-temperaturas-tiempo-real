@@ -100,12 +100,12 @@ export type ResumenEstadisticoSensoCliente = InferDTO<typeof ResumenEstadisticoS
 const streamSensoresTiempoReal      = llamadoCliente.talVez("suscribirSensoresTiempoReal", HistorialSensoresDTO);
 const rpcObtenerPorMac              = llamadoCliente.alMenosUnaVez("obtenerCensosPorMac", FiltroPorMacDTO, HistorialSensoresDTO);
 const rpcObtenerPorMacYFecha        = llamadoCliente.alMenosUnaVez("obtenerCensosPorMacYFecha", FiltroPorMacYFechaDTO, HistorialSensoresDTO);
-const rpcListarSensores             = llamadoCliente.alMenosUnaVez("listarSensores", FiltroListadoSensoresDTO, ListaSensoresDTO);
-const rpcObtenerSensorPorMac        = llamadoCliente.alMenosUnaVez("obtenerSensorPorMac", ConsultaSensorMacDTO, PerfilSensorDTO);
+const rpcListarSensores              = llamadoCliente.alMenosUnaVez("listarSensores", FiltroListadoSensoresDTO, ListaSensoresDTO, 30000);
+const rpcObtenerSensorPorMac         = llamadoCliente.alMenosUnaVez("obtenerSensorPorMac", ConsultaSensorMacDTO, PerfilSensorDTO, 30000);
 const rpcActualizarMetadatosSensor  = llamadoCliente.exactamenteUnaVez("actualizarMetadatosSensor", ActualizarMetadatosSensorDTO, PerfilSensorDTO);
 const rpcActualizarCalibracion      = llamadoCliente.exactamenteUnaVez("actualizarCalibracionSensor", ActualizarCalibracionSensorDTO, PerfilSensorDTO);
 const rpcEliminarSensorPorMac       = llamadoCliente.exactamenteUnaVez("eliminarSensorPorMac", ConsultaSensorMacDTO, null);
-const rpcObtenerEstadisticasSensores = llamadoCliente.alMenosUnaVez("obtenerEstadisticasSensores", null, EstadisticasSensoresDTO);
+const rpcObtenerEstadisticasSensores = llamadoCliente.alMenosUnaVez("obtenerEstadisticasSensores", null, EstadisticasSensoresDTO, 30000);
 const rpcObtenerEstadisticasSenso   = llamadoCliente.alMenosUnaVez("obtenerEstadisticasSensoPorMac", ConsultaSensorMacDTO, ResumenEstadisticoSensoDTO);
 
 let ultimoLoteTiempoReal: LecturaSensorCliente[] = [];
@@ -142,7 +142,7 @@ export const RPSensor = {
         return res.items;
     },
 
-    listarSensores: async (limiteRegistros = 32, offsetRegistros = 0, soloActivos = false): Promise<ResumenSensorCliente[]> => {
+    listarSensores: async (limiteRegistros = 12, offsetRegistros = 0, soloActivos = false): Promise<ResumenSensorCliente[]> => {
         const res = await rpcListarSensores({ limiteRegistros, offsetRegistros, soloActivos });
         return res.items;
     },

@@ -17,6 +17,19 @@ export enum ProcedimientoSistemaRPC {
 export const BANDERA_ERROR_RPC = 0x8000;
 export type MedioActivoCliente = "NINGUNO" | "UART-S" | "WIFI";
 
+export enum PrioridadRPC {
+    CRITICA = 0, // L1 / L2 (handshake, keepalive, login, logout, cerrar)
+    ALTA    = 1, // Mutaciones y acciones explícitas del operador
+    NORMAL  = 2  // Lecturas, listados y polling periódico
+}
+
+export interface OpcionesInvocacionRPC {
+    deduplicable?: boolean;
+    prioridad?: PrioridadRPC;
+    cacheTtlMs?: number;
+    invalidaCache?: boolean;
+}
+
 // DTOs internos de L1
 export const HandshakeUartsDTO = struct({
     versionProtocolo: T.uint8()
@@ -52,23 +65,48 @@ interface PeticionPendiente {
     timer: ReturnType<typeof setTimeout>;
 }
 
+interface TareaEncoladaRPC {
+    idProc: number;
+    payloadDto: Buffer;
+    prioridad: PrioridadRPC;
+    reintentosBusy: number;
+    resolve: (payload: Buffer) => void;
+    reject: (err: Error) => void;
+}
+
+interface EntradaCacheRPC {
+    payload: Buffer;
+    expiraEnMs: number;
+}
+
 export class FirmwareRPCClient {
     private static readonly INTERVALO_REVISION_KEEPALIVE_MS = 10000;
     private static readonly UMBRAL_SILENCIO_KEEPALIVE_MS    = 40000;
-    private static readonly TIMEOUT_RPC_MS                  = 8000;
+    private static readonly TIMEOUT_RPC_MS                  = 9000;
+
+    // Protección del ESP32 desde el backend
+    private static readonly CAPACIDAD_MAX_COLA_TAREAS       = 24;
+    private static readonly PACING_MIN_WIFI_MS              = 45;
+    private static readonly MAX_REINTENTOS_BUSY             = 3;
+    private static readonly BACKOFF_BUSY_MS                 = [250, 500, 900];
 
     private readonly uarts: UARTSClient;
     private readonly wifi: WiFiClient;
 
-    private medioActivo: MedioActivoCliente = "NINGUNO";
+    private medioActivo: MedioActivoCliente ="NINGUNO";
     private proximoTicket = 1;
     private pendientes = new Map<number, PeticionPendiente>();
     private enVueloPorClave = new Map<string, Promise<Buffer>>();
-    private colaSeriePromesa: Promise<unknown> = Promise.resolve();
+    private cacheRespuestas = new Map<string, EntradaCacheRPC>();
+
+    private colaTareas: TareaEncoladaRPC[] = [];
+    private despachadorActivo = false;
+    private ultimoEnvioMs = 0;
     private ultimoContactoMs = 0;
 
     private listenersStreamPorProc = new Map<number, (payload: Buffer) => void>();
     private udpWiFiVinculado = false;
+    private promesaSuscripcionUdp: Promise<void> | null = null;
     private timerKeepalive?: ReturnType<typeof setInterval>;
 
     private logsVisor: string[] = [];
@@ -157,6 +195,10 @@ export class FirmwareRPCClient {
         this.logsVisor = [];
     }
 
+    invalidarCache(): void {
+        this.cacheRespuestas.clear();
+    }
+
     async conectarPorSerie(rutaPuerto: string): Promise<PerfilEnlaceUartsCliente> {
         await this.desconectar();
         await this.uarts.conectar(rutaPuerto);
@@ -166,7 +208,8 @@ export class FirmwareRPCClient {
         try {
             const resp = await this.invocarPorId(
                 ProcedimientoSistemaRPC.L1_HANDSHAKE_UARTS,
-                HandshakeUartsDTO.serialize({ versionProtocolo: 1 })
+                HandshakeUartsDTO.serialize({ versionProtocolo: 1 }),
+                { prioridad: PrioridadRPC.CRITICA }
             );
             const perfil = PerfilEnlaceUartsDTO.deserialize(resp);
             this.iniciarPulsoKeepaliveAutomatico();
@@ -182,10 +225,15 @@ export class FirmwareRPCClient {
         await this.wifi.conectar(ipServidor);
         this.medioActivo = "WIFI";
         this.udpWiFiVinculado = false;
+        this.promesaSuscripcionUdp = null;
         this.ultimoContactoMs = Date.now();
 
         try {
-            await this.invocarPorId(ProcedimientoSistemaRPC.L1_KEEPALIVE_WIFI);
+            await this.invocarPorId(
+                ProcedimientoSistemaRPC.L1_KEEPALIVE_WIFI,
+                Buffer.alloc(0),
+                { prioridad: PrioridadRPC.CRITICA }
+            );
             this.iniciarPulsoKeepaliveAutomatico();
         } catch (err) {
             await this.desconectar();
@@ -197,9 +245,17 @@ export class FirmwareRPCClient {
         this.detenerPulsoKeepaliveAutomatico();
         try {
             if (this.medioActivo === "UART-S" && this.uarts.estaConectado()) {
-                await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_UARTS);
+                await this.invocarPorId(
+                    ProcedimientoSistemaRPC.L1_CERRAR_UARTS,
+                    Buffer.alloc(0),
+                    { prioridad: PrioridadRPC.CRITICA }
+                );
             } else if (this.medioActivo === "WIFI" && this.wifi.estaConectado()) {
-                await this.invocarPorId(ProcedimientoSistemaRPC.L1_CERRAR_WIFI);
+                await this.invocarPorId(
+                    ProcedimientoSistemaRPC.L1_CERRAR_WIFI,
+                    Buffer.alloc(0),
+                    { prioridad: PrioridadRPC.CRITICA }
+                );
             }
         } catch {
             // Ignora errores si el medio físico ya se cerró
@@ -224,27 +280,75 @@ export class FirmwareRPCClient {
     }
 
     async asegurarCanalUdpStream(): Promise<void> {
-        if (this.medioActivo === "WIFI" && !this.udpWiFiVinculado) {
-            const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
-            const respUdp = await this.invocarPorId(
-                ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
-                SuscripcionUdpDTO.serialize({ puertoEscuchaCliente: puertoUdp })
-            );
-            CanalStreamingUdpDTO.deserialize(respUdp);
-            this.udpWiFiVinculado = true;
+        if (this.medioActivo !== "WIFI" || this.udpWiFiVinculado) {
+            return;
         }
+        if (this.promesaSuscripcionUdp) {
+            return this.promesaSuscripcionUdp;
+        }
+
+        const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
+        this.promesaSuscripcionUdp = this.invocarPorId(
+            ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
+            SuscripcionUdpDTO.serialize({ puertoEscuchaCliente: puertoUdp }),
+            { deduplicable: true, prioridad: PrioridadRPC.CRITICA }
+        )
+            .then(respUdp => {
+                CanalStreamingUdpDTO.deserialize(respUdp);
+                this.udpWiFiVinculado = true;
+            })
+            .finally(() => {
+                this.promesaSuscripcionUdp = null;
+            });
+
+        return this.promesaSuscripcionUdp;
     }
 
     registrarListenerStream(idProc: number, cb: (payload: Buffer) => void): void {
         this.listenersStreamPorProc.set(idProc, cb);
     }
 
-    invocarPorId(idProc: number, payloadDto: Buffer = Buffer.alloc(0), deduplicable = false): Promise<Buffer> {
+    invocarPorId(
+        idProc: number,
+        payloadDto: Buffer = Buffer.alloc(0),
+        opcionesODeduplicable: boolean | OpcionesInvocacionRPC = false
+    ): Promise<Buffer> {
         if (this.medioActivo === "NINGUNO") {
             return Promise.reject(new Error("ConnectionError: el cliente no está conectado al servidor ESP32"));
         }
 
-        const claveVuelo = deduplicable ? `${idProc}:${payloadDto.toString("hex")}` : "";
+        const opts: OpcionesInvocacionRPC =
+            typeof opcionesODeduplicable === "boolean"
+                ? { deduplicable: opcionesODeduplicable }
+                : opcionesODeduplicable;
+
+        const deduplicable = opts.deduplicable ?? false;
+        const prioridad = opts.prioridad ?? (
+            idProc <= 0x0202
+                ? PrioridadRPC.CRITICA
+                : deduplicable
+                    ? PrioridadRPC.NORMAL
+                    : PrioridadRPC.ALTA
+        );
+        const cacheTtlMs = opts.cacheTtlMs ?? 0;
+        const invalidaCache = opts.invalidaCache ?? (!deduplicable && idProc >= 0x0300);
+
+        const claveVuelo = (deduplicable || cacheTtlMs > 0)
+            ? `${idProc}:${payloadDto.toString("hex")}`
+            : "";
+
+        // 1. Respuesta inmediata desde caché del backend si aún está vigente
+        if (cacheTtlMs > 0) {
+            const cached = this.cacheRespuestas.get(claveVuelo);
+            if (cached && cached.expiraEnMs > Date.now()) {
+                return Promise.resolve(Buffer.from(cached.payload));
+            }
+            if (cached) {
+                this.cacheRespuestas.delete(claveVuelo);
+            }
+        }
+
+        // 2. Deduplicación de peticiones idénticas ya en cola o en vuelo
         if (deduplicable) {
             const existente = this.enVueloPorClave.get(claveVuelo);
             if (existente) {
@@ -252,19 +356,123 @@ export class FirmwareRPCClient {
             }
         }
 
-        const ejecutarTransaccion = () => this.enviarYEsperarTicket(idProc, payloadDto);
-
-        // En UART-S (enlace serie punto a punto) encolamos secuencialmente para no saturar el FIFO del ESP32
-        const promesa = (this.medioActivo === "UART-S")
-            ? (this.colaSeriePromesa = this.colaSeriePromesa.then(ejecutarTransaccion, ejecutarTransaccion)) as Promise<Buffer>
-            : ejecutarTransaccion();
-
-        if (deduplicable) {
-            this.enVueloPorClave.set(claveVuelo, promesa);
-            promesa.finally(() => this.enVueloPorClave.delete(claveVuelo)).catch(() => {});
+        // 3. Backpressure local si hay demasiadas consultas NORMAL acumuladas
+        if (this.colaTareas.length >= FirmwareRPCClient.CAPACIDAD_MAX_COLA_TAREAS) {
+            if (prioridad === PrioridadRPC.NORMAL) {
+                return Promise.reject(new Error("BusyError: cola local de consultas saturada"));
+            }
+            // Si llega una tarea CRITICA/ALTA, descarta la consulta NORMAL más antigua para hacer lugar
+            const idxNormal = this.colaTareas.findIndex(t => t.prioridad === PrioridadRPC.NORMAL);
+            if (idxNormal >= 0) {
+                const [descartada] = this.colaTareas.splice(idxNormal, 1);
+                descartada.reject(new Error("BusyError: consulta desplazada por operación prioritaria"));
+            }
         }
 
-        return promesa;
+        const promesa = new Promise<Buffer>((resolve, reject) => {
+            const tarea: TareaEncoladaRPC = {
+                idProc,
+                payloadDto,
+                prioridad,
+                reintentosBusy: 0,
+                resolve,
+                reject
+            };
+            this.insertarOrdenadoPorPrioridad(tarea);
+            void this.ejecutarDespachadorCola();
+        });
+
+        const promesaFinal = promesa.then(res => {
+            if (invalidaCache) {
+                this.cacheRespuestas.clear();
+            } else if (cacheTtlMs > 0 && claveVuelo) {
+                this.cacheRespuestas.set(claveVuelo, {
+                    payload: Buffer.from(res),
+                    expiraEnMs: Date.now() + cacheTtlMs
+                });
+            }
+            return res;
+        });
+
+        if (deduplicable) {
+            this.enVueloPorClave.set(claveVuelo, promesaFinal);
+            promesaFinal.finally(() => this.enVueloPorClave.delete(claveVuelo)).catch(() => {});
+        }
+
+        return promesaFinal;
+    }
+
+    private insertarOrdenadoPorPrioridad(tarea: TareaEncoladaRPC): void {
+        let pos = this.colaTareas.length;
+        for (let i = 0; i < this.colaTareas.length; i++) {
+            if (tarea.prioridad < this.colaTareas[i].prioridad) {
+                pos = i;
+                break;
+            }
+        }
+        this.colaTareas.splice(pos, 0, tarea);
+    }
+
+    private async ejecutarDespachadorCola(): Promise<void> {
+        if (this.despachadorActivo) {
+            return;
+        }
+        this.despachadorActivo = true;
+
+        try {
+            while (this.colaTareas.length > 0 && this.estaConectado()) {
+                const tarea = this.colaTareas.shift()!;
+
+                // Pacing suave en WiFi para no disparar el RateLimiter del ESP32
+                if (this.medioActivo === "WIFI") {
+                    const transcurrido = Date.now() - this.ultimoEnvioMs;
+                    if (transcurrido < FirmwareRPCClient.PACING_MIN_WIFI_MS) {
+                        await new Promise<void>(r =>
+                            setTimeout(r, FirmwareRPCClient.PACING_MIN_WIFI_MS - transcurrido)
+                        );
+                    }
+                }
+
+                if (!this.estaConectado()) {
+                    tarea.reject(new Error("ConnectionError: conexión cerrada"));
+                    break;
+                }
+
+                try {
+                    this.ultimoEnvioMs = Date.now();
+                    const payload = await this.enviarYEsperarTicket(tarea.idProc, tarea.payloadDto);
+                    tarea.resolve(payload);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    const esBusy = msg.startsWith("BusyError:");
+
+                    if (
+                        esBusy &&
+                        this.estaConectado() &&
+                        tarea.reintentosBusy < FirmwareRPCClient.MAX_REINTENTOS_BUSY
+                    ) {
+                        const esperaMs = FirmwareRPCClient.BACKOFF_BUSY_MS[tarea.reintentosBusy] ?? 900;
+                        tarea.reintentosBusy++;
+                        this.registrarLogVisor(
+                            `[COLA RPC] BusyError en 0x${tarea.idProc.toString(16)}; reintento ${tarea.reintentosBusy}/${FirmwareRPCClient.MAX_REINTENTOS_BUSY} en ${esperaMs} ms`
+                        );
+                        await new Promise<void>(r => setTimeout(r, esperaMs));
+                        if (this.estaConectado()) {
+                            this.insertarOrdenadoPorPrioridad(tarea);
+                        } else {
+                            tarea.reject(new Error("ConnectionError: conexión cerrada"));
+                        }
+                    } else {
+                        tarea.reject(err instanceof Error ? err : new Error(msg));
+                    }
+                }
+            }
+        } finally {
+            this.despachadorActivo = false;
+            if (this.colaTareas.length > 0 && this.estaConectado()) {
+                void this.ejecutarDespachadorCola();
+            }
+        }
     }
 
     private enviarYEsperarTicket(idProc: number, payloadDto: Buffer): Promise<Buffer> {
@@ -326,8 +534,7 @@ export class FirmwareRPCClient {
     private iniciarPulsoKeepaliveAutomatico(): void {
         this.detenerPulsoKeepaliveAutomatico();
         this.timerKeepalive = setInterval(() => {
-            // No enviar Keepalive si ya hay llamadas L3 en curso o si hubo actividad reciente en el canal
-            if (this.pendientes.size > 0) {
+            if (this.pendientes.size > 0 || this.colaTareas.length > 0) {
                 return;
             }
             if (Date.now() - this.ultimoContactoMs < FirmwareRPCClient.UMBRAL_SILENCIO_KEEPALIVE_MS) {
@@ -341,7 +548,10 @@ export class FirmwareRPCClient {
                     : null;
 
             if (proc !== null) {
-                this.invocarPorId(proc, Buffer.alloc(0), true).catch(err => {
+                this.invocarPorId(proc, Buffer.alloc(0), {
+                    deduplicable: true,
+                    prioridad: PrioridadRPC.CRITICA
+                }).catch(err => {
                     this.registrarLogVisor(`[KEEPALIVE FALLÓ] ${err.message}. Cerrando conexión.`);
                     void this.cerrarTransporteLocal();
                 });
@@ -360,9 +570,16 @@ export class FirmwareRPCClient {
         this.detenerPulsoKeepaliveAutomatico();
         this.medioActivo = "NINGUNO";
         this.udpWiFiVinculado = false;
+        this.promesaSuscripcionUdp = null;
         this.enVueloPorClave.clear();
-        this.colaSeriePromesa = Promise.resolve();
+        this.cacheRespuestas.clear();
         this.listenersStreamPorProc.clear();
+
+        while (this.colaTareas.length > 0) {
+            const tarea = this.colaTareas.shift()!;
+            tarea.reject(new Error("ConnectionError: conexión cerrada"));
+        }
+
         for (const [, p] of this.pendientes) {
             clearTimeout(p.timer);
             p.reject(new Error("ConnectionError: conexión cerrada"));
@@ -382,24 +599,31 @@ class ConstructorLlamadoCliente {
     alMenosUnaVez<Out = void>(
         nombre: string,
         entradaCodec?: null,
-        salidaCodec?: { deserialize(b: Buffer): Out } | null
+        salidaCodec?: { deserialize(b: Buffer): Out } | null,
+        cacheTtlMs?: number
     ): () => Promise<Out>;
     alMenosUnaVez<In extends Record<string, any>, Out = void>(
         nombre: string,
         entradaCodec: StructCodec<In>,
-        salidaCodec?: { deserialize(b: Buffer): Out } | null
+        salidaCodec?: { deserialize(b: Buffer): Out } | null,
+        cacheTtlMs?: number
     ): (entrada: In) => Promise<Out>;
     alMenosUnaVez(
         nombre: string,
         entradaCodec: StructCodec<any> | null = null,
-        salidaCodec: { deserialize(b: Buffer): any } | null = null
+        salidaCodec: { deserialize(b: Buffer): any } | null = null,
+        cacheTtlMs = 0
     ) {
         const idProc = hashNombreProcedimiento(nombre);
         return async (entrada?: any): Promise<any> => {
             const payload = entradaCodec && entrada !== undefined
                 ? entradaCodec.serialize(entrada)
                 : Buffer.alloc(0);
-            const raw = await this.transporte.invocarPorId(idProc, payload, true);  
+            const raw = await this.transporte.invocarPorId(idProc, payload, {
+                deduplicable: true,
+                prioridad: PrioridadRPC.NORMAL,
+                cacheTtlMs
+            });
             return salidaCodec ? salidaCodec.deserialize(raw) : undefined;
         };
     }
@@ -424,7 +648,11 @@ class ConstructorLlamadoCliente {
             const payload = entradaCodec && entrada !== undefined
                 ? entradaCodec.serialize(entrada)
                 : Buffer.alloc(0);
-            const raw = await this.transporte.invocarPorId(idProc, payload);
+            const raw = await this.transporte.invocarPorId(idProc, payload, {
+                deduplicable: false,
+                prioridad: PrioridadRPC.ALTA,
+                invalidaCache: true
+            });
             return salidaCodec ? salidaCodec.deserialize(raw) : undefined;
         };
     }
@@ -441,7 +669,10 @@ class ConstructorLlamadoCliente {
                     onStreamUpdate(salidaCodec.deserialize(raw));
                 });
             }
-            const primerRaw = await this.transporte.invocarPorId(idProc, Buffer.alloc(0));
+            const primerRaw = await this.transporte.invocarPorId(idProc, Buffer.alloc(0), {
+                deduplicable: true,
+                prioridad: PrioridadRPC.ALTA
+            });
             const primerDato = salidaCodec.deserialize(primerRaw);
             onStreamUpdate?.(primerDato);
             return primerDato;

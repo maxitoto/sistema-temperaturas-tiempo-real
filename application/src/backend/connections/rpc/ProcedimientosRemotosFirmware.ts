@@ -2,12 +2,48 @@
 // ADAPTADOR AL TRANSPORTE RPC EXISTENTE DE ELECTRON
 // ============================================================================
 
-import { clienteFirmware } from "./FirmwareRPCClient";
+import {
+  clienteFirmware,
+  OpcionesInvocacionRPC,
+  PrioridadRPC,
+} from "./FirmwareRPCClient";
+
+// Mapa de política de caché (ms) para consultas que NO cambian a cada instante.
+// Cualquier procedimiento de escritura (no listado aquí) corre con prioridad ALTA e invalida la caché.
+const POLITICA_LECTURA_POR_NOMBRE: Record<string, { cacheTtlMs: number }> = {
+  // En vivo / tiempo real: deduplicables en vuelo, sin caché (o caché muy corta)
+  obtenerEstadoAlarmasActivas:          { cacheTtlMs: 0 },
+  obtenerEstadoTareasRTOS:              { cacheTtlMs: 0 },
+  obtenerInfoCompletaSistemaESP:        { cacheTtlMs: 0 },
+  obtenerEstadoHardwareDirecto:         { cacheTtlMs: 0 },
+  verificarIntegridadAuditoriaAuth:     { cacheTtlMs: 0 },
+
+  // Semi-estáticos / telemetría lenta
+  obtenerInfoRedPublica:                { cacheTtlMs: 4000 },
+  obtenerEspacioMicroSD:                { cacheTtlMs: 20000 },
+  leerHelpLogBios:                      { cacheTtlMs: 5000 },
+  obtenerEstadisticasAuditoriaSensores: { cacheTtlMs: 10000 },
+  listarAuditoriaSensorPorMac:          { cacheTtlMs: 5000 },
+  listarSensosPaginados:                { cacheTtlMs: 5000 },
+  listarAuditoriaSistema:               { cacheTtlMs: 5000 },
+  listarAuditoriaAuth:                  { cacheTtlMs: 5000 },
+
+  // Configuración y esquema (solo cambian ante una mutación, que limpia caché)
+  obtenerCalibracionAmbiente:           { cacheTtlMs: 60000 },
+  obtenerConfiguracionSistema:          { cacheTtlMs: 60000 },
+  obtenerConfiguracionSmtp:             { cacheTtlMs: 60000 },
+  listarCorreos:                        { cacheTtlMs: 60000 },
+  listarServidoresNtp:                  { cacheTtlMs: 60000 },
+  obtenerAuditoriaAuthPorId:            { cacheTtlMs: 60000 },
+  obtenerEstructuraBaseDatos:           { cacheTtlMs: 120000 },
+  obtenerColumnasTablaEstructura:       { cacheTtlMs: 120000 },
+};
 
 export interface InvocadorBinarioRPC {
   invocarPorId(
     idProcedimiento: number,
-    payload?: Uint8Array
+    payload?: Uint8Array,
+    opciones?: OpcionesInvocacionRPC
   ): Promise<Uint8Array>;
 }
 
@@ -608,12 +644,27 @@ function decodificarSensoRow(
 export class ProcedimientosRemotosFirmware {
   constructor(private readonly rpc: InvocadorBinarioRPC) {}
 
+  // Dentro de ProcedimientosRemotosFirmware (reemplaza líneas 611-617):
   private invocar(
     nombreProcedimiento: string,
     payload?: Uint8Array
   ): Promise<Uint8Array> {
     const idProc = hashNombreProcedimiento(nombreProcedimiento);
-    return this.rpc.invocarPorId(idProc, payload);
+    const politica = POLITICA_LECTURA_POR_NOMBRE[nombreProcedimiento];
+    const opciones: OpcionesInvocacionRPC = politica
+      ? {
+          deduplicable: true,
+          prioridad: PrioridadRPC.NORMAL,
+          cacheTtlMs: politica.cacheTtlMs,
+          invalidaCache: false,
+        }
+      : {
+          deduplicable: false,
+          prioridad: PrioridadRPC.ALTA,
+          cacheTtlMs: 0,
+          invalidaCache: true,
+        };
+    return this.rpc.invocarPorId(idProc, payload, opciones);
   }
 
   // ==========================================================================
@@ -1176,14 +1227,17 @@ export class ProcedimientosRemotosFirmware {
 // INSTANCIA EXPORTADA COMO OBJETO PLANO ENUMERABLE PARA clientServices.ts E IPC
 // ============================================================================
 
+// Al final del archivo (reemplaza líneas 1179-1195):
 const instancia = new ProcedimientosRemotosFirmware({
   invocarPorId: async (
     idProcedimiento: number,
-    payload?: Uint8Array
+    payload?: Uint8Array,
+    opciones?: OpcionesInvocacionRPC
   ): Promise<Uint8Array> => {
     const respuesta = await clienteFirmware.invocarPorId(
       idProcedimiento,
-      payload ? Buffer.from(payload) : undefined
+      payload ? Buffer.from(payload) : undefined,
+      opciones
     );
 
     return new Uint8Array(

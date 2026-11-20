@@ -18,23 +18,22 @@ enum IdentificadorProcedimientoL1 : uint16_t {
 
 class RPCMiddlewareInterface : public RPCBase {
 private:
-    inline static uint8_t bufferSalidaL1[64] = {0};
+    inline static uint8_t bufferSalidaL1[96] = {0};
     inline static size_t  longitudSalidaL1   = 0;
 
 public:
-
     static const uint8_t* obtenerBufferSalidaL1()   { return bufferSalidaL1; }
     static size_t         obtenerLongitudSalidaL1() { return longitudSalidaL1; }
 
     static bool despacharProcedimientoConexion(const SobreMensajeRPC& sobre, uint16_t& puertoUdpSolicitadoOut) {
-        puertoUdpSolicitadoOut   = 0;
-        longitudSalidaCompartida = 0;
+        puertoUdpSolicitadoOut = 0;
+        longitudSalidaL1       = 0;
 
         if (sobre.idProcedimiento < PROC_L1_HANDSHAKE_UARTS || sobre.idProcedimiento > PROC_L1_CERRAR_WIFI) {
             return false;
         }
 
-        ejecutarConCapturaNativa(sobre.idTicket, sobre.idProcedimiento, [&]() {
+        try {
             switch (sobre.idProcedimiento) {
                 case PROC_L1_HANDSHAKE_UARTS: {
                     HandshakeUartsDTO entrada{};
@@ -42,29 +41,29 @@ public:
                         throw std::invalid_argument("TypeError: payload invalido para HandshakeUartsDTO");
                     }
                     PerfilEnlaceUartsDTO salida = RPConnectUARTS::iniciarConversacionSerie(entrada);
-                    longitudSalidaCompartida = CodificadorRPC::serializarEnBufferCompartido(
-                        sobre.idTicket, sobre.idProcedimiento, salida, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarEnBufferCompartido(
+                        sobre.idTicket, sobre.idProcedimiento, salida, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
                 }
                 case PROC_L1_KEEPALIVE_UARTS:
                     RPConnectUARTS::notificarEstoyVivoSerie();
-                    longitudSalidaCompartida = CodificadorRPC::serializarAcuseSinPayload(
-                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarAcuseSinPayload(
+                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
 
                 case PROC_L1_CERRAR_UARTS:
                     RPConnectUARTS::cerrarConversacionSerie();
-                    longitudSalidaCompartida = CodificadorRPC::serializarAcuseSinPayload(
-                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarAcuseSinPayload(
+                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
 
                 case PROC_L1_KEEPALIVE_WIFI:
                     RPConnectWiFi::notificarEstoyVivoWiFi();
-                    longitudSalidaCompartida = CodificadorRPC::serializarAcuseSinPayload(
-                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarAcuseSinPayload(
+                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
 
@@ -75,19 +74,28 @@ public:
                     }
                     CanalStreamingUdpDTO salida = RPConnectWiFi::vincularCanalStreamingUDP(entrada);
                     puertoUdpSolicitadoOut = entrada.puertoEscuchaCliente;
-                    longitudSalidaCompartida = CodificadorRPC::serializarEnBufferCompartido(
-                        sobre.idTicket, sobre.idProcedimiento, salida, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarEnBufferCompartido(
+                        sobre.idTicket, sobre.idProcedimiento, salida, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
                 }
                 case PROC_L1_CERRAR_WIFI:
                     RPConnectWiFi::cerrarConversacionWiFi();
-                    longitudSalidaCompartida = CodificadorRPC::serializarAcuseSinPayload(
-                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+                    longitudSalidaL1 = CodificadorRPC::serializarAcuseSinPayload(
+                        sobre.idTicket, sobre.idProcedimiento, bufferSalidaL1, sizeof(bufferSalidaL1)
                     );
                     break;
             }
-        });
+        } catch (const std::exception& e) {
+            longitudSalidaL1 = CodificadorRPC::serializarExcepcionCruda(
+                sobre.idTicket, sobre.idProcedimiento, e.what(), bufferSalidaL1, sizeof(bufferSalidaL1)
+            );
+        } catch (...) {
+            longitudSalidaL1 = CodificadorRPC::serializarExcepcionCruda(
+                sobre.idTicket, sobre.idProcedimiento, "RuntimeError en L1", bufferSalidaL1, sizeof(bufferSalidaL1)
+            );
+        }
+
         return true;
     }
 };
