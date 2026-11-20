@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
+#include <stdint.h>
+#include <string.h>
 #include "PostgresDataTypes.hpp"
 
 namespace DbCommon::Standard {
@@ -43,6 +45,80 @@ namespace DbCommon::Standard {
         UNLOGGED
     };
 
+    // Cabecera física fija de 32 bytes al inicio de cada archivo /db/<Tabla>.pgb
+    struct PgBinHeader {
+        char     magic[8];       // 0..7   ("PGBIN01\0")
+        int64_t  nextIdentityId; // 8..15  Próximo valor SERIAL / IDENTITY (arranca en 1)
+        uint32_t totalSlots;     // 16..19 Total de slots escritos (activos + borrados)
+        uint32_t activeRows;     // 20..23 Total de filas activas (flags & 0x01)
+        uint16_t version;        // 24..25 Versión de formato binario (1)
+        uint16_t recordSize;     // 26..27 Tamaño fijo de cada slot en bytes (múltiplo de 4)
+        uint32_t reserved;       // 28..31 Reservado (0)
+
+        static constexpr const char* MAGIC_STR = "PGBIN01";
+        static constexpr uint16_t FORMAT_VERSION = 1;
+
+        void inicializar(uint16_t tamanoRegistro, int64_t inicioIdentity = 1) {
+            memset(this, 0, sizeof(PgBinHeader));
+            memcpy(magic, MAGIC_STR, 8);
+            nextIdentityId = inicioIdentity;
+            totalSlots     = 0;
+            activeRows     = 0;
+            version        = FORMAT_VERSION;
+            recordSize     = tamanoRegistro;
+            reserved       = 0;
+        }
+
+        bool esValida(uint16_t recordSizeEsperado = 0) const {
+            if (memcmp(magic, MAGIC_STR, 7) != 0) return false;
+            if (version != FORMAT_VERSION || recordSize < 8) return false;
+            if (recordSizeEsperado != 0 && recordSize != recordSizeEsperado) return false;
+            return true;
+        }
+    };
+    static_assert(sizeof(PgBinHeader) == 32, "PgBinHeader debe medir exactamente 32 bytes");
+
+    // Calcula el tamaño binario fijo en disco de una columna según su PgDataType
+    inline uint16_t computeBinaryColumnSize(PgDataType dt, uint16_t maxLength) {
+        switch (dt) {
+            case PgDataType::SMALLINT:         return 2;
+            case PgDataType::INTEGER:          return 4;
+            case PgDataType::BIGINT:           return 8;
+            case PgDataType::REAL:             return 4;
+            case PgDataType::DOUBLE_PRECISION:
+            case PgDataType::DECIMAL:
+            case PgDataType::NUMERIC:
+            case PgDataType::DECFLOAT:         return 8;
+            case PgDataType::BOOLEAN:          return 1;
+            case PgDataType::ENUM:             return 1;
+            case PgDataType::DATE:
+            case PgDataType::TIME:
+            case PgDataType::TIME_TZ:          return 12;
+            case PgDataType::TIMESTAMP:
+            case PgDataType::TIMESTAMP_TZ:     return 20;
+            case PgDataType::INTERVAL:         return 24;
+            case PgDataType::CHAR:
+            case PgDataType::NCHAR:
+            case PgDataType::VARCHAR:
+            case PgDataType::TEXT:
+            case PgDataType::CLOB:
+            case PgDataType::BIT:
+            case PgDataType::BINARY:
+            case PgDataType::VARBINARY:
+            case PgDataType::BLOB:
+            case PgDataType::JSON:
+            case PgDataType::XML:
+            case PgDataType::URI:
+            case PgDataType::DOMAIN_TYPE:
+            case PgDataType::ARRAY:
+            default: {
+                uint16_t len = (maxLength > 0) ? maxLength : 64;
+                if (len > 255) len = 255;
+                return static_cast<uint16_t>(len + 1); // Incluye terminador '\0'
+            }
+        }
+    }
+
     using CheckEvaluatorFn = bool (*)(const String&);
 
     struct ColumnConstraintDef {
@@ -56,6 +132,10 @@ namespace DbCommon::Standard {
         uint8_t scale = 0;
         IntervalField intervalField = IntervalField::NONE;
 
+        // Layout binario fijo dentro del registro .pgb (calculado automáticamente)
+        uint16_t binOffset = 0;
+        uint16_t binSize   = 0;
+
         bool isPrimaryKey = false;
         bool isNotNull = false;
         bool isUnique = false;
@@ -66,8 +146,8 @@ namespace DbCommon::Standard {
 
         bool hasDefault = false;
         String defaultValue = "";
-        bool autoNowAdd = false; // Estampa fecha/hora automáticamente en INSERT
-        bool autoNow = false;    // Actualiza fecha/hora automáticamente en INSERT y UPDATE
+        bool autoNowAdd = false;
+        bool autoNow = false;
 
         String collation = "default";
         String comment = "";

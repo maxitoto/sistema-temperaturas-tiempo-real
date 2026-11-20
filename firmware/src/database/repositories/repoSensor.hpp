@@ -3,20 +3,13 @@
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::Sensor;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Standard::FilterOp;
-    using DbRuntime::Standard::AggregateFunc;
-    using DbRuntime::Standard::ConflictAction;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct SensorDTO {
         PgAuto      idSensor          = 0;
@@ -42,43 +35,39 @@ namespace DbRuntime::Repositories {
 
     class RepoSensor {
     private:
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-        }
+        static constexpr const char* TABLA = "Sensor";
 
     public:
-        static SensorDTO mapear(const PgTuple& r) {
+        static SensorDTO mapear(const PgRowView& r) {
             SensorDTO s{};
-            r["id_sensor"]          >> s.idSensor;
-            r["mac"]                >> s.mac;
-            r["nombre"]             >> s.nombre;
-            r["ubicacion"]          >> s.ubicacion;
-            r["descripcion"]        >> s.descripcion;
-            r["umbral_sup"]         >> s.umbralSup;
-            r["umbral_inf"]         >> s.umbralInf;
-            r["error_sup"]          >> s.errorSup;
-            r["error_inf"]          >> s.errorInf;
-            r["offset"]             >> s.offset;
-            r["activa"]             >> s.activa;
-            r["fecha_creacion"]     >> s.fechaCreacion;
-            r["fecha_modificacion"] >> s.fechaModificacion;
+            s.idSensor          = r.getInt32("id_sensor");
+            s.mac               = r.getCStr("mac");
+            s.nombre            = r.getCStr("nombre");
+            s.ubicacion         = r.getCStr("ubicacion");
+            s.descripcion       = r.getCStr("descripcion");
+            s.umbralSup         = r.getFloat("umbral_sup", 126.0f);
+            s.umbralInf         = r.getFloat("umbral_inf", -55.0f);
+            s.errorSup          = r.getFloat("error_sup", 0.0f);
+            s.errorInf          = r.getFloat("error_inf", 0.0f);
+            s.offset            = r.getFloat("offset", 0.0f);
+            s.activa            = r.getBool("activa", true);
+            s.fechaCreacion     = r.getCStr("fecha_creacion");
+            s.fechaModificacion = r.getCStr("fecha_modificacion");
             return s;
         }
 
         static bool obtenerPorId(int32_t idSensor, SensorDTO& outDto) {
-            asegurarCatalogo();
-            PgTuple fila;
-            if (!Sensor.filter_eq("id_sensor", idSensor).first(fila)) {
-                return false;
-            }
-            outDto = mapear(fila);
-            return true;
+            asegurarEsquemaTabla(TABLA);
+            bool ok = false;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_sensor") == idSensor) {
+                    outDto = mapear(r);
+                    ok = true;
+                    return false;
+                }
+                return true;
+            });
+            return ok;
         }
 
         static SensorDTO exigirPorId(int32_t idSensor) {
@@ -90,15 +79,19 @@ namespace DbRuntime::Repositories {
         }
 
         static bool obtenerPorMac(const char* macHex, SensorDTO& outDto) {
-            asegurarCatalogo();
-            if (macHex == nullptr || macHex[0] == '\0') return false;
+            asegurarEsquemaTabla(TABLA);
+            if (!macHex || macHex[0] == '\0') return false;
 
-            PgTuple fila;
-            if (!Sensor.filter_eq("mac", String(macHex)).first(fila)) {
-                return false;
-            }
-            outDto = mapear(fila);
-            return true;
+            bool ok = false;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (strcasecmp(r.getCStr("mac"), macHex) == 0) {
+                    outDto = mapear(r);
+                    ok = true;
+                    return false;
+                }
+                return true;
+            });
+            return ok;
         }
 
         static SensorDTO exigirPorMac(const char* macHex) {
@@ -107,6 +100,38 @@ namespace DbRuntime::Repositories {
                 throw std::runtime_error("LookupError: no existe un sensor registrado con esa MAC");
             }
             return s;
+        }
+
+        static SensorDTO crearSensor(const SensorDTO& entrada) {
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            if (entrada.mac.vacio()) {
+                throw std::invalid_argument("ValueError: la direccion MAC del sensor es obligatoria");
+            }
+            if (entrada.umbralInf > entrada.umbralSup) {
+                throw std::invalid_argument("ValueError: umbral_inf no puede ser mayor que umbral_sup");
+            }
+
+            SensorDTO dummy{};
+            if (obtenerPorMac(entrada.mac.c_str(), dummy)) {
+                throw std::runtime_error("UniqueViolation: ya existe un sensor con esa MAC");
+            }
+
+            PgRowBuffer row(schema);
+            row.setText("mac",         entrada.mac.c_str());
+            row.setText("nombre",      entrada.nombre.c_str());
+            row.setText("ubicacion",   entrada.ubicacion.c_str());
+            row.setText("descripcion", entrada.descripcion.c_str());
+            row.setFloat("umbral_sup", entrada.umbralSup);
+            row.setFloat("umbral_inf", entrada.umbralInf);
+            row.setFloat("error_sup",  entrada.errorSup);
+            row.setFloat("error_inf",  entrada.errorInf);
+            row.setFloat("offset",     entrada.offset);
+            row.setBool("activa",      entrada.activa);
+
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar el sensor");
+            }
+            return mapear(row.view());
         }
 
         static SensorDTO registrarOAsegurarPorMac(
@@ -118,11 +143,12 @@ namespace DbRuntime::Repositories {
             if (obtenerPorMac(macHex, existente)) {
                 return existente;
             }
-
-            if (!macHex || strlen(macHex) != 16) throw std::invalid_argument("ValueError: mac debe tener 16 caracteres hex");
+            if (!macHex || strlen(macHex) != 16) {
+                throw std::invalid_argument("ValueError: mac debe tener 16 caracteres hex");
+            }
 
             SensorDTO nuevo{};
-            nuevo.mac         = macHex ? macHex : "";
+            nuevo.mac         = macHex;
             nuevo.nombre      = nombreInicial ? nombreInicial : "Sensor DS18B20";
             nuevo.ubicacion   = ubicacionInicial ? ubicacionInicial : "Sin asignar";
             nuevo.descripcion = "";
@@ -135,38 +161,6 @@ namespace DbRuntime::Repositories {
             return crearSensor(nuevo);
         }
 
-        static SensorDTO crearSensor(const SensorDTO& entrada) {
-            asegurarCatalogo();
-
-            if (entrada.mac.vacio()) {
-                throw std::invalid_argument("ValueError: la direccion MAC del sensor es obligatoria");
-            }
-            if (entrada.umbralInf > entrada.umbralSup) {
-                throw std::invalid_argument("ValueError: umbral_inf no puede ser mayor que umbral_sup");
-            }
-
-            auto res = Sensor.create(
-                {
-                    PgCell("mac",         entrada.mac.c_str()),
-                    PgCell("nombre",      entrada.nombre.c_str()),
-                    PgCell("ubicacion",   entrada.ubicacion.c_str()),
-                    PgCell("descripcion", entrada.descripcion.c_str()),
-                    PgCell("umbral_sup",  entrada.umbralSup),
-                    PgCell("umbral_inf",  entrada.umbralInf),
-                    PgCell("error_sup",   entrada.errorSup),
-                    PgCell("error_inf",   entrada.errorInf),
-                    PgCell("offset",      entrada.offset),
-                    PgCell("activa",      entrada.activa)
-                },
-                {"*"}
-            );
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
-            }
-            return mapear(res.returningRows[0]);
-        }
-
         static SensorDTO actualizarMetadatosPorMac(
             const char* macHex,
             const char* nombre,
@@ -174,24 +168,23 @@ namespace DbRuntime::Repositories {
             const char* descripcion,
             bool activa
         ) {
-            asegurarCatalogo();
-
-            auto res = Sensor.filter_eq("mac", String(macHex ? macHex : ""))
-                .returning({"*"})
-                .update({
-                    PgCell("nombre",      nombre ? nombre : ""),
-                    PgCell("ubicacion",   ubicacion ? ubicacion : ""),
-                    PgCell("descripcion", descripcion ? descripcion : ""),
-                    PgCell("activa",      activa)
-                });
-
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.returningRows.empty()) {
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return macHex && strcasecmp(r.getCStr("mac"), macHex) == 0; },
+                [&](PgRowBuffer& row) {
+                    row.setText("nombre",      nombre ? nombre : "");
+                    row.setText("ubicacion",   ubicacion ? ubicacion : "");
+                    row.setText("descripcion", descripcion ? descripcion : "");
+                    row.setBool("activa",      activa);
+                },
+                &updated
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el sensor a actualizar no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static SensorDTO actualizarCalibracionYUmbralesPorMac(
@@ -202,111 +195,103 @@ namespace DbRuntime::Repositories {
             float errorInf,
             float offset
         ) {
-            asegurarCatalogo();
-
+            asegurarEsquemaTabla(TABLA);
             if (umbralInf > umbralSup) {
                 throw std::invalid_argument("ValueError: umbral_inf no puede ser mayor que umbral_sup");
             }
 
-            auto res = Sensor.filter_eq("mac", String(macHex ? macHex : ""))
-                .returning({"*"})
-                .update({
-                    PgCell("umbral_sup", umbralSup),
-                    PgCell("umbral_inf", umbralInf),
-                    PgCell("error_sup",  errorSup),
-                    PgCell("error_inf",  errorInf),
-                    PgCell("offset",     offset)
-                });
-
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.returningRows.empty()) {
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return macHex && strcasecmp(r.getCStr("mac"), macHex) == 0; },
+                [&](PgRowBuffer& row) {
+                    row.setFloat("umbral_sup", umbralSup);
+                    row.setFloat("umbral_inf", umbralInf);
+                    row.setFloat("error_sup",  errorSup);
+                    row.setFloat("error_inf",  errorInf);
+                    row.setFloat("offset",     offset);
+                },
+                &updated
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el sensor a calibrar no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static SensorDTO cambiarEstadoActivoPorMac(const char* macHex, bool activa) {
-            asegurarCatalogo();
-
-            auto res = Sensor.filter_eq("mac", String(macHex ? macHex : ""))
-                .returning({"*"})
-                .update({ PgCell("activa", activa) });
-
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.returningRows.empty()) {
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return macHex && strcasecmp(r.getCStr("mac"), macHex) == 0; },
+                [&](PgRowBuffer& row) { row.setBool("activa", activa); },
+                &updated
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el sensor solicitado no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static void eliminarPorMac(const char* macHex) {
-            asegurarCatalogo();
-
-            auto res = Sensor.filter_eq("mac", String(macHex ? macHex : "")).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.affectedRows == 0) {
+            asegurarEsquemaTabla(TABLA);
+            const uint16_t n = PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return macHex && strcasecmp(r.getCStr("mac"), macHex) == 0; },
+                true
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el sensor a eliminar no existe");
             }
         }
 
         static std::vector<SensorDTO> listarSensoresPaginados(
-            uint16_t limite = 32,
+            uint16_t limite = 12,
             uint16_t offset = 0,
             bool soloActivos = false
         ) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
+            std::vector<SensorDTO> out;
+            out.reserve(limite <= 16 ? limite : 16);
 
-            auto q = Sensor.objects();
-            if (soloActivos) {
-                q.filter_eq("activa", "TRUE");
-            }
-            return q.order_by("id_sensor")
-                    .limit(static_cast<int32_t>(limite))
-                    .offset(static_cast<int32_t>(offset))
-                    .all_as<SensorDTO>(&RepoSensor::mapear);
+            uint32_t matched = 0;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (soloActivos && !r.getBool("activa", true)) return true;
+                if (matched >= offset) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
+            return out;
         }
 
-        static std::vector<SensorDTO> listarPorUbicacion(const char* ubicacion, uint16_t limite = 32) {
-            asegurarCatalogo();
-
-            return Sensor.filter_eq("ubicacion", String(ubicacion ? ubicacion : ""))
-                         .order_by("id_sensor")
-                         .limit(static_cast<int32_t>(limite))
-                         .all_as<SensorDTO>(&RepoSensor::mapear);
+        static std::vector<SensorDTO> listarPorUbicacion(const char* ubicacion, uint16_t limite = 12) {
+            asegurarEsquemaTabla(TABLA);
+            std::vector<SensorDTO> out;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (ubicacion && strcasecmp(r.getCStr("ubicacion"), ubicacion) == 0) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                return true;
+            });
+            return out;
         }
 
         static EstadisticasSensoresDTO obtenerEstadisticasGlobales() {
-            asegurarCatalogo();
-
-            DbRuntime::Engine::PredicateCondition filtroActivos;
-            filtroActivos.columnOrExpr = "activa";
-            filtroActivos.op           = FilterOp::EQ;
-            filtroActivos.valueA       = "TRUE";
-
-            DbRuntime::Engine::PredicateCondition filtroInactivos;
-            filtroInactivos.columnOrExpr = "activa";
-            filtroInactivos.op           = FilterOp::EQ;
-            filtroInactivos.valueA       = "FALSE";
-
-            PgTuple r;
+            asegurarEsquemaTabla(TABLA);
             EstadisticasSensoresDTO out{};
-            if (Sensor.objects()
-                    .annotate("total",     AggregateFunc::COUNT_ALL)
-                    .annotate_filtered("activos",   AggregateFunc::COUNT_COL, "id_sensor", filtroActivos)
-                    .annotate_filtered("inactivos", AggregateFunc::COUNT_COL, "id_sensor", filtroInactivos)
-                    .first(r)) {
-                r["total"]     >> out.totalSensores;
-                r["activos"]   >> out.sensoresActivos;
-                r["inactivos"] >> out.sensoresInactivos;
-            }
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                out.totalSensores++;
+                if (r.getBool("activa", true)) out.sensoresActivos++;
+                else out.sensoresInactivos++;
+                return true;
+            });
             return out;
         }
     };
 
-}
+} // namespace DbRuntime::Repositories

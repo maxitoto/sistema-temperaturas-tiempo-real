@@ -1,20 +1,16 @@
 #pragma once
 #include <Arduino.h>
-#include <time.h>
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::ServidoresNtp;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct ServidorNtpDTO {
         PgAuto     idServer          = 0;
@@ -27,132 +23,184 @@ namespace DbRuntime::Repositories {
 
     class RepoServidoresNtp {
     private:
+        static constexpr const char* TABLA = "ServidoresNtp";
+
         static int64_t epochActual() {
             return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
         }
 
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
+        static int16_t clampPrioridad(int16_t p) {
+            return (p < 1) ? 1 : ((p > 10) ? 10 : p);
         }
 
         static void asegurarSemillaPorDefecto() {
-            if (ServidoresNtp.objects().exists()) {
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            auto& st = PgBinaryStorage::getInstance();
+
+            DbCommon::Standard::PgBinHeader hdr{};
+            if (st.getTableHeader(TABLA, hdr) && hdr.activeRows > 0) {
                 return;
             }
+
             const int64_t ahora = epochActual();
-            ServidoresNtp.create({
-                PgCell("server",             "pool.ntp.org"),
-                PgCell("prioridad",          static_cast<int16_t>(1)),
-                PgCell("activa",             true),
-                PgCell("fecha_creacion",     ahora),
-                PgCell("fecha_modificacion", ahora)
-            });
-            ServidoresNtp.create({
-                PgCell("server",             "time.google.com"),
-                PgCell("prioridad",          static_cast<int16_t>(2)),
-                PgCell("activa",             true),
-                PgCell("fecha_creacion",     ahora),
-                PgCell("fecha_modificacion", ahora)
-            });
+            TransaccionBatch tx;
+            PgRowBuffer r1(schema);
+            r1.setText("server",             "pool.ntp.org");
+            r1.setInt16("prioridad",         1);
+            r1.setBool("activa",             true);
+            r1.setInt64("fecha_creacion",    ahora);
+            r1.setInt64("fecha_modificacion",ahora);
+            st.appendRecord(TABLA, r1);
+
+            PgRowBuffer r2(schema);
+            r2.setText("server",             "time.google.com");
+            r2.setInt16("prioridad",         2);
+            r2.setBool("activa",             true);
+            r2.setInt64("fecha_creacion",    ahora);
+            r2.setInt64("fecha_modificacion",ahora);
+            st.appendRecord(TABLA, r2);
+            tx.confirmar();
         }
 
     public:
-        static ServidorNtpDTO mapear(const PgTuple& r) {
+        static ServidorNtpDTO mapear(const PgRowView& r) {
             ServidorNtpDTO dto{};
-            r["id_server"]          >> dto.idServer;
-            r["server"]             >> dto.server;
-            r["prioridad"]          >> dto.prioridad;
-            r["activa"]             >> dto.activa;
-            r["fecha_creacion"]     >> dto.fechaCreacion;
-            r["fecha_modificacion"] >> dto.fechaModificacion;
+            dto.idServer          = r.getInt32("id_server");
+            dto.server            = r.getCStr("server");
+            dto.prioridad         = r.getInt16("prioridad", 1);
+            dto.activa            = r.getBool("activa", true);
+            dto.fechaCreacion     = r.getInt64("fecha_creacion", 0);
+            dto.fechaModificacion = r.getInt64("fecha_modificacion", 0);
             return dto;
         }
 
-        static std::vector<ServidorNtpDTO> listarActivosPorPrioridad(uint16_t limite = 32) {
-            asegurarCatalogo();
+        static std::vector<ServidorNtpDTO> listarActivosPorPrioridad(uint16_t limite = 16) {
             asegurarSemillaPorDefecto();
-
-            return ServidoresNtp.filter_eq("activa", "TRUE")
-                                .order_by("prioridad")
-                                .limit(static_cast<int32_t>(limite))
-                                .all_as<ServidorNtpDTO>(&RepoServidoresNtp::mapear);
+            std::vector<ServidorNtpDTO> todos;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getBool("activa", true)) {
+                    todos.push_back(mapear(r));
+                }
+                return todos.size() < 32;
+            });
+            std::sort(todos.begin(), todos.end(), [](const ServidorNtpDTO& a, const ServidorNtpDTO& b) {
+                return (a.prioridad != b.prioridad) ? (a.prioridad < b.prioridad) : (a.idServer < b.idServer);
+            });
+            if (todos.size() > limite) todos.resize(limite);
+            return todos;
         }
 
-        static std::vector<ServidorNtpDTO> listarPaginados(uint16_t limite = 32, uint16_t offset = 0) {
-            asegurarCatalogo();
+        static std::vector<ServidorNtpDTO> listarPaginados(uint16_t limite = 16, uint16_t offset = 0) {
             asegurarSemillaPorDefecto();
-
-            return ServidoresNtp.objects()
-                                .order_by("prioridad")
-                                .limit(static_cast<int32_t>(limite))
-                                .offset(static_cast<int32_t>(offset))
-                                .all_as<ServidorNtpDTO>(&RepoServidoresNtp::mapear);
+            std::vector<ServidorNtpDTO> todos;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                todos.push_back(mapear(r));
+                return todos.size() < 32;
+            });
+            std::sort(todos.begin(), todos.end(), [](const ServidorNtpDTO& a, const ServidorNtpDTO& b) {
+                return (a.prioridad != b.prioridad) ? (a.prioridad < b.prioridad) : (a.idServer < b.idServer);
+            });
+            if (offset >= todos.size()) return {};
+            const size_t fin = std::min<size_t>(todos.size(), static_cast<size_t>(offset) + limite);
+            return std::vector<ServidorNtpDTO>(todos.begin() + offset, todos.begin() + fin);
         }
 
         static ServidorNtpDTO crearServidor(const char* host, int16_t prioridad = 1, bool activa = true) {
-            asegurarCatalogo();
             asegurarSemillaPorDefecto();
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            if (!host || host[0] == '\0') {
+                throw std::invalid_argument("ValueError: el host NTP no puede estar vacio");
+            }
 
-            if (host == nullptr || host[0] == '\0') {
+            auto& st = PgBinaryStorage::getInstance();
+            bool dup = false;
+            st.scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (strcasecmp(r.getCStr("server"), host) == 0) { dup = true; return false; }
+                return true;
+            });
+            if (dup) {
+                throw std::runtime_error("UniqueViolation: ya existe un servidor NTP con ese host");
+            }
+
+            const int64_t ahora = epochActual();
+            PgRowBuffer row(schema);
+            row.setText("server",             host);
+            row.setInt16("prioridad",         clampPrioridad(prioridad));
+            row.setBool("activa",             activa);
+            row.setInt64("fecha_creacion",    ahora);
+            row.setInt64("fecha_modificacion",ahora);
+
+            if (!st.appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo crear el servidor NTP");
+            }
+            return mapear(row.view());
+        }
+
+        static ServidorNtpDTO actualizarPorId(int32_t idServer, const char* host, int16_t prioridad, bool activa) {
+            asegurarEsquemaTabla(TABLA);
+            if (!host || host[0] == '\0') {
                 throw std::invalid_argument("ValueError: el host NTP no puede estar vacio");
             }
 
             const int64_t ahora = epochActual();
-            auto res = ServidoresNtp.create(
-                {
-                    PgCell("server",             host),
-                    PgCell("prioridad",          prioridad),
-                    PgCell("activa",             activa),
-                    PgCell("fecha_creacion",     ahora),
-                    PgCell("fecha_modificacion", ahora)
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_server") == idServer; },
+                [&](PgRowBuffer& row) {
+                    row.setText("server",             host);
+                    row.setInt16("prioridad",         clampPrioridad(prioridad));
+                    row.setBool("activa",             activa);
+                    row.setInt64("fecha_modificacion",ahora);
                 },
-                {"*"}
+                &updated
             );
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            if (n == 0) {
+                throw std::runtime_error("LookupError: el servidor NTP solicitado no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static ServidorNtpDTO actualizarPorHost(const char* host, int16_t prioridad, bool activa) {
-            asegurarCatalogo();
-
+            asegurarEsquemaTabla(TABLA);
             const int64_t ahora = epochActual();
-            auto res = ServidoresNtp.filter_eq("server", String(host ? host : ""))
-                .returning({"*"})
-                .update({
-                    PgCell("prioridad",          prioridad),
-                    PgCell("activa",             activa),
-                    PgCell("fecha_modificacion", ahora)
-                });
-
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.returningRows.empty()) {
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return host && strcmp(r.getCStr("server"), host) == 0; },
+                [&](PgRowBuffer& row) {
+                    row.setInt16("prioridad",         clampPrioridad(prioridad));
+                    row.setBool("activa",             activa);
+                    row.setInt64("fecha_modificacion",ahora);
+                },
+                &updated
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el servidor NTP solicitado no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
+        }
+
+        static void eliminarPorId(int32_t idServer) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_server") == idServer; },
+                true
+            );
         }
 
         static void eliminarPorHost(const char* host) {
-            asegurarCatalogo();
-
-            auto res = ServidoresNtp.filter_eq("server", String(host ? host : "")).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.affectedRows == 0) {
+            asegurarEsquemaTabla(TABLA);
+            const uint16_t n = PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return host && strcmp(r.getCStr("server"), host) == 0; },
+                true
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el servidor NTP a eliminar no existe");
             }
         }
     };
 
-}
+} // namespace DbRuntime::Repositories

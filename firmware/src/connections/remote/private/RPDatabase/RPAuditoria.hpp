@@ -46,7 +46,7 @@ struct ResultadoIntegridadAuthDTO {
 
 // 6 * 188 B = 1128 B (< 1536 B de MTU RPC)
 using ListaAuditoriaSistemaDTO = PgList<DbRuntime::Repositories::AuditoriaSistemaDTO, 6>;
-// 16 * 78 B = 1248 B (< 1536 B de MTU RPC)
+// 16 * 80 B = 1280 B (< 1536 B de MTU RPC)
 using ListaResumenAuditoriaAuthDTO = PgList<ResumenAuditoriaAuthDTO, 16>;
 
 namespace RPAuditoria {
@@ -55,17 +55,17 @@ namespace RPAuditoria {
     using DbRuntime::Repositories::AuditoriaSistemaDTO;
     using DbRuntime::Repositories::RepoAuditoriaAuth;
     using DbRuntime::Repositories::AuditoriaAuthDTO;
+    using DbRuntime::Storage::PgRowView;
 
-    // 1. Listar AuditoriaSistema paginada (NO_ADMIN)
+    // 1. Listar AuditoriaSistema paginada (NO_ADMIN) — 0 bytes de heap
     inline auto listarAuditoriaSistema = llamadoSemantico.alMenosUnaVez<FiltroPaginacionAuditoriaDTO, ListaAuditoriaSistemaDTO>(
         "listarAuditoriaSistema",
         [](const FiltroPaginacionAuditoriaDTO& f) -> ListaAuditoriaSistemaDTO {
             const uint16_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 6) ? 6 : f.limiteRegistros;
-            auto filas = RepoAuditoriaSistema::listarRecientes(lim, f.offsetRegistros);
             ListaAuditoriaSistemaDTO out{};
-            for (const auto& r : filas) {
-                if (!out.agregar(r)) break;
-            }
+            RepoAuditoriaSistema::forEachReciente(lim, f.offsetRegistros, [&](const PgRowView& r) -> bool {
+                return out.agregar(RepoAuditoriaSistema::mapear(r));
+            });
             return out;
         },
         RolUsuario::NO_ADMIN
@@ -75,7 +75,7 @@ namespace RPAuditoria {
     inline auto eliminarAuditoriaSistemaPorId = llamadoSemantico.exactamenteUnaVez<IdAuditoriaDTO, void>(
         "eliminarAuditoriaSistemaPorId",
         [](const IdAuditoriaDTO& dto) {
-            DbRuntime::Orm::AuditoriaSistema.filter_eq("id_auditoria_sistema", dto.id).remove();
+            RepoAuditoriaSistema::eliminarPorId(dto.id);
         },
         RolUsuario::ADMIN
     );
@@ -89,41 +89,36 @@ namespace RPAuditoria {
         RolUsuario::ADMIN
     );
 
-    // 4. Listar AuditoriaAuth paginada (NO_ADMIN / ADMIN)
+    // 4. Listar AuditoriaAuth paginada (NO_ADMIN / ADMIN) — 0 bytes de heap, mapeo directo a Resumen
     inline auto listarAuditoriaAuth = llamadoSemantico.alMenosUnaVez<FiltroPaginacionAuditoriaDTO, ListaResumenAuditoriaAuthDTO>(
         "listarAuditoriaAuth",
         [](const FiltroPaginacionAuditoriaDTO& f) -> ListaResumenAuditoriaAuthDTO {
             const uint16_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 16) ? 16 : f.limiteRegistros;
-            auto filas = RepoAuditoriaAuth::listarRecientes(lim, f.offsetRegistros);
             ListaResumenAuditoriaAuthDTO out{};
-            for (const auto& a : filas) {
+            RepoAuditoriaAuth::forEachReciente(lim, f.offsetRegistros, [&](const PgRowView& r) -> bool {
                 ResumenAuditoriaAuthDTO item{};
-                item.idAuditoriaAuth  = a.idAuditoriaAuth;
-                item.seq              = static_cast<uint32_t>(a.seq);
-                item.idUsuario        = a.idUsuario;
-                item.usuarioIntentado = a.usuarioIntentado;
-                item.accion           = a.accion;
-                item.medioConexion    = a.medioConexion;
-                item.origenRemoto     = a.origenRemoto;
-                item.resultado        = a.resultado;
-                item.criticidad       = a.criticidad;
-                item.fechaCreacion    = static_cast<uint32_t>(a.fechaCreacion);
-                if (!out.agregar(item)) break;
-            }
+                item.idAuditoriaAuth  = r.getInt32("id_auditoria_auth");
+                item.seq              = static_cast<uint32_t>(r.getUInt64("seq"));
+                item.idUsuario        = r.getInt32("id_usuario", 0);
+                item.usuarioIntentado = r.getCStr("usuario_intentado");
+                item.accion           = r.getCStr("accion");
+                item.medioConexion    = r.getEnum<MedioConexion>("medio_conexion");
+                item.origenRemoto     = r.getCStr("origen_remoto", "LOCAL");
+                item.resultado        = r.getEnum<ResultadoAuditoria>("resultado");
+                item.criticidad       = r.getEnum<CriticidadEvento>("criticidad");
+                item.fechaCreacion    = static_cast<uint32_t>(r.getInt64("fecha_creacion"));
+                return out.agregar(item);
+            });
             return out;
         },
         RolUsuario::NO_ADMIN
     );
 
-    // 5. Obtener detalle completo de un registro de AuditoriaAuth incluyendo firmas HMAC de 64 chars (ADMIN)
+    // 5. Obtener detalle completo de un registro de AuditoriaAuth incluyendo firmas HMAC (ADMIN)
     inline auto obtenerAuditoriaAuthPorId = llamadoSemantico.alMenosUnaVez<IdAuditoriaDTO, AuditoriaAuthDTO>(
         "obtenerAuditoriaAuthPorId",
         [](const IdAuditoriaDTO& dto) -> AuditoriaAuthDTO {
-            DbRuntime::Storage::PgTuple fila;
-            if (!DbRuntime::Orm::AuditoriaAuth.filter_eq("id_auditoria_auth", dto.id).first(fila)) {
-                throw std::runtime_error("DoesNotExist: id_auditoria_auth no existe");
-            }
-            return RepoAuditoriaAuth::mapear(fila);
+            return RepoAuditoriaAuth::exigirPorId(dto.id);
         },
         RolUsuario::ADMIN
     );
@@ -133,8 +128,9 @@ namespace RPAuditoria {
         "verificarIntegridadAuditoriaAuth",
         []() -> ResultadoIntegridadAuthDTO {
             ResultadoIntegridadAuthDTO out{};
-            out.registrosVerificados = 32;
-            out.cadenaIntegra        = RepoAuditoriaAuth::verificarIntegridadReciente(32);
+            uint16_t verificados = 0;
+            out.cadenaIntegra        = RepoAuditoriaAuth::verificarIntegridadReciente(32, &verificados);
+            out.registrosVerificados = verificados;
             return out;
         },
         RolUsuario::ADMIN
@@ -144,7 +140,7 @@ namespace RPAuditoria {
     inline auto eliminarAuditoriaAuthPorId = llamadoSemantico.exactamenteUnaVez<IdAuditoriaDTO, void>(
         "eliminarAuditoriaAuthPorId",
         [](const IdAuditoriaDTO& dto) {
-            DbRuntime::Orm::AuditoriaAuth.filter_eq("id_auditoria_auth", dto.id).remove();
+            RepoAuditoriaAuth::eliminarPorId(dto.id);
         },
         RolUsuario::ADMIN
     );

@@ -1,5 +1,5 @@
 #include <esp_system.h>
-#include "database/DB_DQL_DML/orm/DjangoManager.hpp"
+#include "database/sql/SchemaPostgreSQL.hpp"
 #include "database/repositories/repoConfiguracionSistema.hpp"
 #include "database/repositories/repoCalibracion.hpp"
 #include "database/repositories/repoServidorNtp.hpp"
@@ -37,8 +37,8 @@ MiddlewareInterface middlewareInterfaceL1(
 void setup() {
     // 1. Vincular y verificar existencia del catálogo físico en MicroSD; si falla tras reintentar, reiniciar limpiamente
     if (!TarjetaSD::getInstance().iniciar() ||
-        !DbRuntime::Orm::runtimeDb.bindToPhysicalCatalog() ||
-        DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
+        !DbSql::Schema::bindOrBootstrapDatabase() ||
+        DbCommon::Engine::PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
         led.encenderLed();
         buzz.sonarBuzz(800, 1.5f);
         vTaskDelay(pdMS_TO_TICKS(3000));

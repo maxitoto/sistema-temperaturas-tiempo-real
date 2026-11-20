@@ -29,13 +29,12 @@ private:
     char claveApCache[65]  = "ESP32secure1234@";
 
     bool cargarConfiguracionDesdeDB() {
-        using DbNotRuntime::Engine::PhysicalSchemaCatalog;
-        using DbRuntime::Orm::runtimeDb;
+        using DbCommon::Engine::PhysicalSchemaCatalog;
         using DbRuntime::Repositories::ConfiguracionRedDTO;
         using DbRuntime::Repositories::RepoConfiguracionRed;
 
         if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-            runtimeDb.bindToPhysicalCatalog();
+            DbSql::Schema::bindOrBootstrapDatabase();
         }
 
         ConfiguracionRedDTO cfg{};

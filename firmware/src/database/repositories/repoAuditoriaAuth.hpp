@@ -1,21 +1,15 @@
 #pragma once
 #include <Arduino.h>
-#include <time.h>
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::AuditoriaAuth;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Standard::FilterOp;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct AuditoriaAuthDTO {
         PgAuto             idAuditoriaAuth  = 0;
@@ -41,20 +35,11 @@ namespace DbRuntime::Repositories {
 
     class RepoAuditoriaAuth {
     private:
+        static constexpr const char* TABLA        = "AuditoriaAuth";
         static constexpr const char* HASH_GENESIS = "0000000000000000000000000000000000000000000000000000000000000000";
 
-       static int64_t epochActual() {
+        static int64_t epochActual() {
             return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
-        }
-
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
         }
 
         static void alimentarHash64(uint64_t& h1, uint64_t& h2, const char* str) {
@@ -66,11 +51,11 @@ namespace DbRuntime::Repositories {
             }
         }
 
-        static String calcularHmacEncadenado(const AuditoriaAuthDTO& dto) {
+        static void calcularHmacEncadenado(const AuditoriaAuthDTO& dto, char hexOut[65]) {
             uint64_t h1 = 0xCBF29CE484222325ULL;
             uint64_t h2 = 0x84222325CBF29CE4ULL;
 
-            char numBuf[32]{};
+            char numBuf[36]{};
             snprintf(numBuf, sizeof(numBuf), "%llu|%d|%lld",
                      static_cast<unsigned long long>(dto.seq),
                      static_cast<int>(dto.idUsuario),
@@ -88,49 +73,50 @@ namespace DbRuntime::Repositories {
             uint64_t h3 = (h1 ^ (h2 >> 29)) * 0x94D049BB133111EBULL;
             uint64_t h4 = (h2 ^ (h1 >> 31)) * 0x2545F4914F6CDD1DULL;
 
-            char hex[65]{};
-            snprintf(hex, sizeof(hex), "%016llX%016llX%016llX%016llX",
+            snprintf(hexOut, 65, "%016llX%016llX%016llX%016llX",
                      static_cast<unsigned long long>(h1),
                      static_cast<unsigned long long>(h2),
                      static_cast<unsigned long long>(h3),
                      static_cast<unsigned long long>(h4));
-            return String(hex);
         }
 
     public:
-        static AuditoriaAuthDTO mapear(const PgTuple& r) {
+        static AuditoriaAuthDTO mapear(const PgRowView& r) {
             AuditoriaAuthDTO dto{};
-            r["id_auditoria_auth"] >> dto.idAuditoriaAuth;
-            r["seq"]               >> dto.seq;
-            r["id_usuario"]        >> dto.idUsuario;
-            r["usuario_intentado"] >> dto.usuarioIntentado;
-            r["accion"]            >> dto.accion;
-            r["tabla_afectada"]    >> dto.tablaAfectada;
-            r["valor_previo"]      >> dto.valorPrevio;
-            r["valor_nuevo"]       >> dto.valorNuevo;
-            r["detalle"]           >> dto.detalle;
-            r["medio_conexion"]    >> dto.medioConexion;
-            r["origen_remoto"]     >> dto.origenRemoto;
-            r["resultado"]         >> dto.resultado;
-            r["criticidad"]        >> dto.criticidad;
-            r["boot_id"]           >> dto.bootId;
-            r["uptime_s"]          >> dto.uptimeS;
-            r["fuente_tiempo"]     >> dto.fuenteTiempo;
-            r["fecha_creacion"]    >> dto.fechaCreacion;
-            r["hash_previo"]       >> dto.hashPrevio;
-            r["hash_registro"]     >> dto.hashRegistro;
+            dto.idAuditoriaAuth  = r.getInt32("id_auditoria_auth");
+            dto.seq              = r.getUInt64("seq");
+            dto.idUsuario        = r.getInt32("id_usuario", 0);
+            dto.usuarioIntentado = r.getCStr("usuario_intentado");
+            dto.accion           = r.getCStr("accion");
+            dto.tablaAfectada    = r.getCStr("tabla_afectada", "NINGUNA");
+            dto.valorPrevio      = r.getCStr("valor_previo");
+            dto.valorNuevo       = r.getCStr("valor_nuevo");
+            dto.detalle          = r.getCStr("detalle");
+            dto.medioConexion    = r.getEnum<MedioConexion>("medio_conexion");
+            dto.origenRemoto     = r.getCStr("origen_remoto", "LOCAL");
+            dto.resultado        = r.getEnum<ResultadoAuditoria>("resultado");
+            dto.criticidad       = r.getEnum<CriticidadEvento>("criticidad");
+            dto.bootId           = r.getUInt32("boot_id");
+            dto.uptimeS          = r.getUInt32("uptime_s");
+            dto.fuenteTiempo     = r.getEnum<FuenteTiempo>("fuente_tiempo");
+            dto.fechaCreacion    = r.getInt64("fecha_creacion");
+            dto.hashPrevio       = r.getCStr("hash_previo");
+            dto.hashRegistro     = r.getCStr("hash_registro");
             return dto;
         }
 
         static AuditoriaAuthDTO registrarEvento(AuditoriaAuthDTO entrada) {
-            asegurarCatalogo();
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            auto& st = PgBinaryStorage::getInstance();
 
-            PgTuple ultimaFila;
-            if (AuditoriaAuth.objects().order_by("-id_auditoria_auth").first(ultimaFila)) {
-                AuditoriaAuthDTO ant = mapear(ultimaFila);
-                entrada.seq        = ant.seq + 1;
-                entrada.hashPrevio = ant.hashRegistro;
-            } else {
+            bool hayAnterior = false;
+            st.scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                entrada.seq        = r.getUInt64("seq") + 1;
+                entrada.hashPrevio = r.getCStr("hash_registro", HASH_GENESIS);
+                hayAnterior = true;
+                return false;
+            });
+            if (!hayAnterior) {
                 entrada.seq        = 1;
                 entrada.hashPrevio = HASH_GENESIS;
             }
@@ -142,113 +128,154 @@ namespace DbRuntime::Repositories {
                 entrada.uptimeS = static_cast<uint32_t>(millis() / 1000UL);
             }
 
-            const String firma = calcularHmacEncadenado(entrada);
-            entrada.hashRegistro = firma.c_str();
+            char firmaHex[65]{};
+            calcularHmacEncadenado(entrada, firmaHex);
+            entrada.hashRegistro = firmaHex;
 
-            std::vector<PgCell> celdas = {
-                PgCell("seq",               entrada.seq),
-                PgCell("usuario_intentado", entrada.usuarioIntentado.c_str()),
-                PgCell("accion",            entrada.accion.c_str()),
-                PgCell("tabla_afectada",    entrada.tablaAfectada.c_str()),
-                PgCell("valor_previo",      entrada.valorPrevio.c_str()),
-                PgCell("valor_nuevo",       entrada.valorNuevo.c_str()),
-                PgCell("detalle",           entrada.detalle.c_str()),
-                PgCell("medio_conexion",    entrada.medioConexion),
-                PgCell("origen_remoto",     entrada.origenRemoto.c_str()),
-                PgCell("resultado",         entrada.resultado),
-                PgCell("criticidad",        entrada.criticidad),
-                PgCell("boot_id",           entrada.bootId),
-                PgCell("uptime_s",          entrada.uptimeS),
-                PgCell("fuente_tiempo",     entrada.fuenteTiempo),
-                PgCell("fecha_creacion",    entrada.fechaCreacion),
-                PgCell("hash_previo",       entrada.hashPrevio.c_str()),
-                PgCell("hash_registro",     entrada.hashRegistro.c_str())
-            };
+            PgRowBuffer row(schema);
+            row.setUInt64("seq",               entrada.seq);
+            if (entrada.idUsuario > 0) row.setInt32("id_usuario", entrada.idUsuario);
+            else                       row.setNull("id_usuario");
+            row.setText("usuario_intentado",   entrada.usuarioIntentado.c_str());
+            row.setText("accion",              entrada.accion.c_str());
+            row.setText("tabla_afectada",      entrada.tablaAfectada.c_str());
+            row.setText("valor_previo",        entrada.valorPrevio.c_str());
+            row.setText("valor_nuevo",         entrada.valorNuevo.c_str());
+            row.setText("detalle",             entrada.detalle.c_str());
+            row.setEnum("medio_conexion",      entrada.medioConexion);
+            row.setText("origen_remoto",       entrada.origenRemoto.c_str());
+            row.setEnum("resultado",           entrada.resultado);
+            row.setEnum("criticidad",          entrada.criticidad);
+            row.setUInt32("boot_id",           entrada.bootId);
+            row.setUInt32("uptime_s",          entrada.uptimeS);
+            row.setEnum("fuente_tiempo",       entrada.fuenteTiempo);
+            row.setInt64("fecha_creacion",     entrada.fechaCreacion);
+            row.setText("hash_previo",         entrada.hashPrevio.c_str());
+            row.setText("hash_registro",       entrada.hashRegistro.c_str());
 
-            if (entrada.idUsuario > 0) {
-                celdas.push_back(PgCell("id_usuario", entrada.idUsuario));
+            if (!st.appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar AuditoriaAuth");
             }
+            return mapear(row.view());
+        }
 
-            auto res = AuditoriaAuth.create(celdas, {"*"});
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+        // Recorrido inverso cero-heap (usado por RPAuditoria::listarAuditoriaAuth para no alocar 16 * 552 B)
+        template <typename CallbackFn>
+        static void forEachReciente(uint16_t limite, uint16_t offset, CallbackFn fn) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0) return;
+
+            uint32_t matched = 0;
+            uint16_t emitted = 0;
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (matched >= offset) {
+                    if (!fn(r)) return false;
+                    if (++emitted >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
+        }
+
+        static bool obtenerPorId(int32_t idAuditoriaAuth, AuditoriaAuthDTO& outDto) {
+            asegurarEsquemaTabla(TABLA);
+            bool ok = false;
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_auditoria_auth") == idAuditoriaAuth) {
+                    outDto = mapear(r);
+                    ok = true;
+                    return false;
+                }
+                return true;
+            });
+            return ok;
+        }
+
+        static AuditoriaAuthDTO exigirPorId(int32_t idAuditoriaAuth) {
+            AuditoriaAuthDTO dto{};
+            if (!obtenerPorId(idAuditoriaAuth, dto)) {
+                throw std::runtime_error("DoesNotExist: id_auditoria_auth no existe");
             }
-            return mapear(res.returningRows[0]);
+            return dto;
         }
 
-        static std::vector<AuditoriaAuthDTO> listarRecientes(uint16_t limite = 32, uint16_t offset = 0) {
-            asegurarCatalogo();
-
-            return AuditoriaAuth.objects()
-                                .order_by("-id_auditoria_auth")
-                                .limit(static_cast<int32_t>(limite))
-                                .offset(static_cast<int32_t>(offset))
-                                .all_as<AuditoriaAuthDTO>(&RepoAuditoriaAuth::mapear);
+        static std::vector<AuditoriaAuthDTO> listarRecientes(uint16_t limite = 16, uint16_t offset = 0) {
+            if (limite == 0 || limite > 16) limite = 16;
+            std::vector<AuditoriaAuthDTO> out;
+            out.reserve(limite);
+            forEachReciente(limite, offset, [&](const PgRowView& r) -> bool {
+                out.push_back(mapear(r));
+                return true;
+            });
+            return out;
         }
 
-        static std::vector<AuditoriaAuthDTO> listarPorUsuario(int32_t idUsuario, uint16_t limite = 32) {
-            asegurarCatalogo();
+        static std::vector<AuditoriaAuthDTO> listarPorUsuario(int32_t idUsuario, uint16_t limite = 16) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 16) limite = 16;
+            std::vector<AuditoriaAuthDTO> out;
 
-            return AuditoriaAuth.filter_eq("id_usuario", idUsuario)
-                                .order_by("-fecha_creacion")
-                                .limit(static_cast<int32_t>(limite))
-                                .all_as<AuditoriaAuthDTO>(&RepoAuditoriaAuth::mapear);
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_usuario") == idUsuario) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                return true;
+            });
+            return out;
         }
 
-        static bool verificarIntegridadReciente(uint16_t cantidad = 32) {
-            asegurarCatalogo();
-
-            auto q = AuditoriaAuth.objects()
-                                  .order_by("seq")
-                                  .limit(static_cast<int32_t>(cantidad));
-
+        // Verifica la cadena HMAC en streaming (1 solo DTO en stack, 0 heap) y devuelve cuántos bloques revisó
+        static bool verificarIntegridadReciente(uint16_t cantidad = 32, uint16_t* verificadosOut = nullptr) {
+            asegurarEsquemaTabla(TABLA);
             bool integra = true;
             bool tienePrevio = false;
+            uint16_t revisados = 0;
             char prevHashRegistro[65]{};
 
-            DbRuntime::Engine::ModuloDQL::getInstance().executeSelectStreaming(
-                q.compiledPlan(),
-                [&](const PgTuple& fila) -> bool {
-                    AuditoriaAuthDTO actual = mapear(fila);
-                    const String esperado = calcularHmacEncadenado(actual);
-                    const size_t lenGuardado = strlen(actual.hashRegistro.c_str());
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                AuditoriaAuthDTO actual = mapear(r);
+                char esperado[65]{};
+                calcularHmacEncadenado(actual, esperado);
 
-                    // PgChar<64> almacena hasta 63 chars hex + '\0'; exigimos coincidencia exacta en los chars guardados
-                    if (lenGuardado < 63 ||
-                        strncasecmp(esperado.c_str(), actual.hashRegistro.c_str(), lenGuardado) != 0) {
-                        integra = false;
-                        return false;
-                    }
-
-                    if (tienePrevio &&
-                        strncasecmp(actual.hashPrevio.c_str(), prevHashRegistro, lenGuardado) != 0) {
-                        integra = false;
-                        return false;
-                    }
-
-                    strncpy(prevHashRegistro, actual.hashRegistro.c_str(), sizeof(prevHashRegistro) - 1);
-                    prevHashRegistro[sizeof(prevHashRegistro) - 1] = '\0';
-                    tienePrevio = true;
-                    return true;
+                const size_t lenGuardado = strlen(actual.hashRegistro.c_str());
+                if (lenGuardado < 63 || strncasecmp(esperado, actual.hashRegistro.c_str(), lenGuardado) != 0) {
+                    integra = false;
+                    return false;
                 }
-            );
+                if (tienePrevio && strncasecmp(actual.hashPrevio.c_str(), prevHashRegistro, lenGuardado) != 0) {
+                    integra = false;
+                    return false;
+                }
 
+                strncpy(prevHashRegistro, actual.hashRegistro.c_str(), sizeof(prevHashRegistro) - 1);
+                prevHashRegistro[sizeof(prevHashRegistro) - 1] = '\0';
+                tienePrevio = true;
+                revisados++;
+                return revisados < cantidad;
+            });
+
+            if (verificadosOut) *verificadosOut = revisados;
             return integra;
         }
 
+        static void eliminarPorId(int32_t idAuditoriaAuth) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_auditoria_auth") == idAuditoriaAuth; },
+                true
+            );
+        }
 
         static uint16_t purgarAnterioresA(int64_t timestampLimite) {
-            asegurarCatalogo();
-
-            char bufLimite[24]{};
-            snprintf(bufLimite, sizeof(bufLimite), "%lld", static_cast<long long>(timestampLimite));
-
-            auto res = AuditoriaAuth.filter("fecha_creacion", FilterOp::LT, String(bufLimite)).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            return res.affectedRows;
+            asegurarEsquemaTabla(TABLA);
+            return PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt64("fecha_creacion") < timestampLimite; },
+                true
+            );
         }
     };
 
-}
+} // namespace DbRuntime::Repositories

@@ -436,15 +436,8 @@ namespace RPSensor {
     inline auto listarSensosPaginados = llamadoSemantico.alMenosUnaVez<FiltroPaginadoSensoDTO, ListaSensoCompletaDTO>(
         "listarSensosPaginados",
         [](const FiltroPaginadoSensoDTO& f) -> ListaSensoCompletaDTO {
-            const int32_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 32) ? 32 : f.limiteRegistros;
-            auto q = (f.idSensor > 0)
-                ? DbRuntime::Orm::Senso.filter_eq("id_sensor", f.idSensor)
-                : DbRuntime::Orm::Senso.objects();
-
-            auto filas = q.order_by("-id_senso")
-                          .limit(lim)
-                          .offset(static_cast<int32_t>(f.offsetRegistros))
-                          .all_as<SensoDTO>(&RepoSenso::mapear);
+            const uint16_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 32) ? 32 : f.limiteRegistros;
+            auto filas = RepoSenso::listarPaginados(f.idSensor, lim, f.offsetRegistros);
 
             ListaSensoCompletaDTO out{};
             for (const auto& r : filas) {
@@ -476,7 +469,7 @@ namespace RPSensor {
     inline auto eliminarSensoPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
         "eliminarSensoPorId",
         [](const IdentificadorRegistroDTO& dto) {
-            DbRuntime::Orm::Senso.filter_eq("id_senso", dto.id).remove();
+            RepoSenso::eliminarPorId(dto.id);
             auditarAccionSensor("ELIMINAR_SENSO_ID", "SENSO");
         },
         RolUsuario::ADMIN
@@ -506,7 +499,7 @@ namespace RPSensor {
     inline auto eliminarAuditoriaSensorPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
         "eliminarAuditoriaSensorPorId",
         [](const IdentificadorRegistroDTO& dto) {
-            DbRuntime::Orm::AuditoriaSensores.filter_eq("id_auditoria_sensor", dto.id).remove();
+            RepoAuditoriaSensores::eliminarPorId(dto.id);
             auditarAccionSensor("ELIMINAR_AUD_SENSOR", "AUDITORIA_SENSORES");
         },
         RolUsuario::ADMIN

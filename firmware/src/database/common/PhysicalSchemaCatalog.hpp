@@ -1,7 +1,9 @@
 #pragma once
 #include <Arduino.h>
+#include <SD.h>
 #include <map>
 #include <vector>
+#include <cstring>
 #include "PostgresDataTypes.hpp"
 #include "PostgresConstraints.hpp"
 #include "../../hardware/driver/tarjetasd/TarjetaSD.hpp"
@@ -9,6 +11,10 @@
 namespace DbCommon::Engine {
 
     struct TablePhysicalSchema {
+        // Prefijo fijo de 8 bytes en cada registro: [flags:1][reserved:3][nullMask:4]
+        static constexpr uint16_t RECORD_HEADER_SIZE = 8;
+        static constexpr size_t   MAX_COLUMNS        = 32;
+
         String schemaName = "public";
         String tableName = "";
         Standard::TablePersistence persistence = Standard::TablePersistence::PERMANENT;
@@ -18,21 +24,62 @@ namespace DbCommon::Engine {
         std::vector<Standard::ColumnConstraintDef> columns;
         std::vector<Standard::TableLevelConstraintDef> tableConstraints;
 
-        const Standard::ColumnConstraintDef* findColumn(const String& colName) const {
-            for (const auto& c : columns) {
-                if (c.columnName.equalsIgnoreCase(colName)) return &c;
+        // Metadatos binarios precalculados para acceso O(1) sin heap
+        uint16_t recordSize       = RECORD_HEADER_SIZE;
+        int8_t   pkColIndex       = -1;
+        int8_t   identityColIndex = -1;
+
+        void recomputeBinaryLayout() {
+            uint16_t off     = RECORD_HEADER_SIZE;
+            pkColIndex       = -1;
+            identityColIndex = -1;
+
+            for (size_t i = 0; i < columns.size(); ++i) {
+                auto& c = columns[i];
+                c.binOffset = off;
+                c.binSize   = Standard::computeBinaryColumnSize(c.dataType, c.maxLength);
+                off = static_cast<uint16_t>(off + c.binSize);
+
+                if (c.isPrimaryKey && pkColIndex < 0) {
+                    pkColIndex = static_cast<int8_t>(i);
+                }
+                if (c.identityMode != Standard::IdentityGeneration::NONE && identityColIndex < 0) {
+                    identityColIndex = static_cast<int8_t>(i);
+                }
             }
-            return nullptr;
+
+            // Alinea el tamaño total del slot a múltiplo de 4 bytes
+            recordSize = static_cast<uint16_t>((off + 3u) & ~3u);
+        }
+
+        int8_t findColumnIndex(const char* colName) const {
+            if (!colName || colName[0] == '\0') return -1;
+            const char* clean = strchr(colName, '.');
+            const char* target = clean ? (clean + 1) : colName;
+            for (size_t i = 0; i < columns.size(); ++i) {
+                if (strcasecmp(columns[i].columnName.c_str(), target) == 0) {
+                    return static_cast<int8_t>(i);
+                }
+            }
+            return -1;
+        }
+
+        int8_t findColumnIndex(const String& colName) const {
+            return findColumnIndex(colName.c_str());
+        }
+
+        const Standard::ColumnConstraintDef* findColumn(const String& colName) const {
+            int8_t idx = findColumnIndex(colName.c_str());
+            return (idx >= 0) ? &columns[static_cast<size_t>(idx)] : nullptr;
         }
 
         Standard::ColumnConstraintDef* findColumnMutable(const String& colName) {
-            for (auto& c : columns) {
-                if (c.columnName.equalsIgnoreCase(colName)) return &c;
-            }
-            return nullptr;
+            int8_t idx = findColumnIndex(colName.c_str());
+            return (idx >= 0) ? &columns[static_cast<size_t>(idx)] : nullptr;
         }
 
         bool hasPrimaryKey() const {
+            if (pkColIndex >= 0) return true;
             for (const auto& c : columns) {
                 if (c.isPrimaryKey) return true;
             }
@@ -77,7 +124,15 @@ namespace DbCommon::Engine {
 
         String baseDir() const { return "/db"; }
         String catalogFilePath() const { return "/db/pg_catalog.cat"; }
-        String tableDataFilePath(const String& tableName) const { return "/db/" + tableName + ".tbl"; }
+        String tableDataFilePath(const String& tableName) const { return "/db/" + tableName + ".pgb"; }
+
+        void clearInMemory() {
+            enums.clear();
+            domains.clear();
+            sequences.clear();
+            tables.clear();
+            indexes.clear();
+        }
 
         bool hasEnum(const String& name) const { return enums.find(normalizeKey(name)) != enums.end(); }
         void registerEnum(const Standard::EnumTypeDefinition& def) { enums[normalizeKey(def.typeName)] = def; }
@@ -86,6 +141,7 @@ namespace DbCommon::Engine {
             auto it = enums.find(normalizeKey(name));
             return (it != enums.end()) ? &(it->second) : nullptr;
         }
+        const std::map<String, Standard::EnumTypeDefinition>& getAllEnums() const { return enums; }
 
         bool hasDomain(const String& name) const { return domains.find(normalizeKey(name)) != domains.end(); }
         void registerDomain(const Standard::DomainTypeDefinition& def) { domains[normalizeKey(def.domainName)] = def; }
@@ -100,12 +156,20 @@ namespace DbCommon::Engine {
         void removeSequence(const String& name) { sequences.erase(normalizeKey(name)); }
 
         bool hasTable(const String& name) const { return tables.find(normalizeKey(name)) != tables.end(); }
-        void registerTable(const TablePhysicalSchema& schema) { tables[normalizeKey(schema.tableName)] = schema; }
+        void registerTable(TablePhysicalSchema schema) {
+            schema.recomputeBinaryLayout();
+            tables[normalizeKey(schema.tableName)] = std::move(schema);
+        }
         void removeTable(const String& name) { tables.erase(normalizeKey(name)); }
 
         const TablePhysicalSchema* getTable(const String& name) const {
             auto it = tables.find(normalizeKey(name));
             return (it != tables.end()) ? &(it->second) : nullptr;
+        }
+
+        const TablePhysicalSchema* getTable(const char* name) const {
+            if (!name || name[0] == '\0') return nullptr;
+            return getTable(String(name));
         }
 
         TablePhysicalSchema* getTableMutable(const String& name) {
@@ -146,86 +210,151 @@ namespace DbCommon::Engine {
             }
         }
 
+        // Escribe el catálogo en streaming directo a SD (sin concatenar un String gigante en RAM)
         bool flushCatalogToSingleFile() const {
             TarjetaSD& sd = TarjetaSD::getInstance();
+            TarjetaSD::ScopedLock lk(sd.obtenerMutex());
             if (!sd.estaInicializada()) return false;
-            if (!sd.existeArchivo(baseDir().c_str())) {
-                sd.crearDirectorio(baseDir().c_str());
+            if (!SD.exists(baseDir().c_str())) {
+                SD.mkdir(baseDir().c_str());
             }
 
-            String out = "# PG_CATALOG_V1\n";
+            String catPath = catalogFilePath();
+            String tmpPath = catPath + ".tmp";
+            if (SD.exists(tmpPath.c_str())) SD.remove(tmpPath.c_str());
+
+            File f = SD.open(tmpPath.c_str(), FILE_WRITE);
+            if (!f) return false;
+
+            f.print("# PG_CATALOG_V2\n");
+
             for (const auto& e : enums) {
-                out += "ENUM|" + e.second.typeName + "|";
+                f.print("ENUM|");
+                f.print(e.second.typeName);
+                f.print("|");
                 for (size_t i = 0; i < e.second.labels.size(); ++i) {
-                    if (i > 0) out += ",";
-                    out += e.second.labels[i];
+                    if (i > 0) f.print(",");
+                    f.print(e.second.labels[i]);
                 }
-                out += "\n";
+                f.print("\n");
             }
+
             for (const auto& d : domains) {
                 const auto& dm = d.second;
-                out += "DOMAIN|" + dm.domainName + "|" + Standard::DataTypeUtils::toString(dm.baseType) + "|"
-                    + "LEN=" + String(dm.maxLength) + ","
-                    + "PREC=" + String(dm.precision) + ","
-                    + "SCL=" + String(dm.scale) + ","
-                    + "NN=" + String(dm.notNull ? 1 : 0) + ","
-                    + "DEF=" + (dm.hasDefault ? dm.defaultValue : String("__NONE__")) + "\n";
+                f.print("DOMAIN|");
+                f.print(dm.domainName);
+                f.print("|");
+                f.print(Standard::DataTypeUtils::toString(dm.baseType));
+                f.print("|LEN=");  f.print(dm.maxLength);
+                f.print(",PREC="); f.print(dm.precision);
+                f.print(",SCL=");  f.print(dm.scale);
+                f.print(",NN=");   f.print(dm.notNull ? 1 : 0);
+                f.print(",DEF=");  f.print(dm.hasDefault ? dm.defaultValue : String("__NONE__"));
+                f.print("\n");
             }
+
             for (const auto& t : tables) {
                 const auto& tb = t.second;
-                out += "TABLE|" + tb.schemaName + "." + tb.tableName + "|OWNER=" + tb.ownerRole + "\n";
+                f.print("TABLE|");
+                f.print(tb.schemaName);
+                f.print(".");
+                f.print(tb.tableName);
+                f.print("|OWNER=");
+                f.print(tb.ownerRole);
+                f.print("\n");
+
                 for (const auto& c : tb.columns) {
-                    out += "COL|" + tb.tableName + "|" + c.columnName + "|"
-                        + Standard::DataTypeUtils::toString(c.dataType) + "|"
-                        + "PK=" + String(c.isPrimaryKey ? 1 : 0) + ","
-                        + "NN=" + String(c.isNotNull ? 1 : 0) + ","
-                        + "UQ=" + String(c.isUnique ? 1 : 0) + ","
-                        + "ID=" + String(static_cast<int>(c.identityMode)) + ","
-                        + "LEN=" + String(c.maxLength) + ","
-                        + "PREC=" + String(c.precision) + ","
-                        + "SCL=" + String(c.scale) + ","
-                        + "ANADD=" + String(c.autoNowAdd ? 1 : 0) + ","
-                        + "ANOW=" + String(c.autoNow ? 1 : 0) + ","
-                        + "ARR=" + String(c.isArray ? 1 : 0) + ","
-                        + "IFLD=" + String(static_cast<int>(c.intervalField)) + ","
-                        + "CTYPE=" + c.customTypeName + ","
-                        + "DEF=" + (c.hasDefault ? (c.defaultValue.isEmpty() ? String("__EMPTY__") : c.defaultValue) : String("__NONE__")) + ","
-                        + "FK=" + (c.isForeignKey ? (c.referencedTable + "." + c.referencedColumn) : "NONE")
-                        + "\n";
+                    f.print("COL|");
+                    f.print(tb.tableName);
+                    f.print("|");
+                    f.print(c.columnName);
+                    f.print("|");
+                    f.print(Standard::DataTypeUtils::toString(c.dataType));
+                    f.print("|PK=");    f.print(c.isPrimaryKey ? 1 : 0);
+                    f.print(",NN=");    f.print(c.isNotNull ? 1 : 0);
+                    f.print(",UQ=");    f.print(c.isUnique ? 1 : 0);
+                    f.print(",ID=");    f.print(static_cast<int>(c.identityMode));
+                    f.print(",LEN=");   f.print(c.maxLength);
+                    f.print(",PREC=");  f.print(c.precision);
+                    f.print(",SCL=");   f.print(c.scale);
+                    f.print(",ANADD="); f.print(c.autoNowAdd ? 1 : 0);
+                    f.print(",ANOW=");  f.print(c.autoNow ? 1 : 0);
+                    f.print(",ARR=");   f.print(c.isArray ? 1 : 0);
+                    f.print(",IFLD=");  f.print(static_cast<int>(c.intervalField));
+                    f.print(",CTYPE="); f.print(c.customTypeName);
+                    f.print(",DEF=");
+                    if (!c.hasDefault) f.print("__NONE__");
+                    else if (c.defaultValue.isEmpty()) f.print("__EMPTY__");
+                    else f.print(c.defaultValue);
+                    f.print(",FK=");
+                    if (c.isForeignKey) {
+                        f.print(c.referencedTable);
+                        f.print(".");
+                        f.print(c.referencedColumn);
+                    } else {
+                        f.print("NONE");
+                    }
+                    f.print("\n");
                 }
             }
+
             for (const auto& idx : indexes) {
-                String cols = "";
+                f.print("INDEX|");
+                f.print(idx.second.indexName);
+                f.print("|");
+                f.print(idx.second.tableName);
+                f.print("|UQ=");
+                f.print(idx.second.isUnique ? 1 : 0);
+                f.print("|COLS=");
                 for (size_t i = 0; i < idx.second.keyColumns.size(); ++i) {
-                    if (i > 0) cols += ",";
-                    cols += idx.second.keyColumns[i];
+                    if (i > 0) f.print(",");
+                    f.print(idx.second.keyColumns[i]);
                 }
-                out += "INDEX|" + idx.second.indexName + "|" + idx.second.tableName
-                    + "|UQ=" + String(idx.second.isUnique ? 1 : 0) + "|COLS=" + cols + "\n";
+                f.print("\n");
             }
-            return sd.escribirArchivo(catalogFilePath().c_str(), out.c_str());
+
+            f.flush();
+            f.close();
+
+            if (SD.exists(catPath.c_str())) SD.remove(catPath.c_str());
+            return SD.rename(tmpPath.c_str(), catPath.c_str());
         }
 
+        // Carga PG_CATALOG_V2 línea por línea; rechaza PG_CATALOG_V1 (viejo formato TSV)
         bool loadCatalogFromSingleFile() {
             TarjetaSD& sd = TarjetaSD::getInstance();
-            if (!sd.estaInicializada() || !sd.existeArchivo(catalogFilePath().c_str())) {
-                return false;
-            }
-            String content = "";
-            if (!sd.leerArchivo(catalogFilePath().c_str(), content) || content.isEmpty()) {
+            TarjetaSD::ScopedLock lk(sd.obtenerMutex());
+            if (!sd.estaInicializada() || !SD.exists(catalogFilePath().c_str())) {
                 return false;
             }
 
-            int start = 0;
-            int len = content.length();
-            while (start < len) {
-                int nl = content.indexOf('\n', start);
-                if (nl == -1) nl = len;
-                String line = content.substring(start, nl);
-                line.trim();
-                start = nl + 1;
+            File f = SD.open(catalogFilePath().c_str(), FILE_READ);
+            if (!f) return false;
 
-                if (line.isEmpty() || line.startsWith("#")) continue;
+            char lineBuf[384]{};
+            bool versionValida = false;
+            bool primeraLinea  = true;
+
+            while (f.available()) {
+                size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
+                while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
+                    --len;
+                }
+                lineBuf[len] = '\0';
+                if (len == 0) continue;
+
+                if (primeraLinea) {
+                    primeraLinea = false;
+                    if (strncmp(lineBuf, "# PG_CATALOG_V2", 15) != 0) {
+                        f.close();
+                        return false;
+                    }
+                    versionValida = true;
+                    continue;
+                }
+
+                if (lineBuf[0] == '#') continue;
+                String line(lineBuf);
 
                 if (line.startsWith("ENUM|")) {
                     int p1 = line.indexOf('|', 5);
@@ -268,7 +397,7 @@ namespace DbCommon::Engine {
                     tb.schemaName = (dot != -1) ? full.substring(0, dot) : "public";
                     tb.tableName  = (dot != -1) ? full.substring(dot + 1) : full;
                     if (!hasTable(tb.tableName)) {
-                        registerTable(tb);
+                        registerTable(std::move(tb));
                     }
                 } else if (line.startsWith("COL|")) {
                     int p1 = line.indexOf('|', 4);
@@ -342,20 +471,54 @@ namespace DbCommon::Engine {
                     registerIndex(idx);
                 }
             }
-            return !tables.empty();
-        }
+            f.close();
 
-        bool ensurePhysicalTableFileExists(const String& tableName) const {
-            TarjetaSD& sd = TarjetaSD::getInstance();
-            if (!sd.estaInicializada()) return true;
-            if (!sd.existeArchivo(baseDir().c_str())) {
-                sd.crearDirectorio(baseDir().c_str());
-            }
-            String path = tableDataFilePath(tableName);
-            if (!sd.existeArchivo(path.c_str())) {
-                return sd.escribirArchivo(path.c_str(), "");
+            if (!versionValida || tables.empty()) return false;
+
+            for (auto& kv : tables) {
+                kv.second.recomputeBinaryLayout();
             }
             return true;
+        }
+
+        // Asegura que /db/<tableName>.pgb exista con una cabecera binaria válida de 32 bytes
+        bool ensurePhysicalTableFileExists(const String& tableName) const {
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            TarjetaSD::ScopedLock lk(sd.obtenerMutex());
+            if (!sd.estaInicializada()) return true;
+            if (!SD.exists(baseDir().c_str())) {
+                SD.mkdir(baseDir().c_str());
+            }
+
+            const TablePhysicalSchema* tb = getTable(tableName);
+            if (!tb) return false;
+
+            String path = tableDataFilePath(tableName);
+            if (SD.exists(path.c_str())) {
+                File f = SD.open(path.c_str(), FILE_READ);
+                if (f) {
+                    Standard::PgBinHeader hdr{};
+                    const bool ok = (f.size() >= sizeof(Standard::PgBinHeader)) &&
+                                    (f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)) == sizeof(hdr)) &&
+                                    hdr.esValida(tb->recordSize);
+                    f.close();
+                    if (ok) return true;
+                }
+            }
+
+            Standard::PgBinHeader hdr{};
+            int64_t startId = 1;
+            if (tb->identityColIndex >= 0) {
+                startId = tb->columns[static_cast<size_t>(tb->identityColIndex)].identityStart;
+            }
+            hdr.inicializar(tb->recordSize, startId);
+
+            File fOut = SD.open(path.c_str(), FILE_WRITE);
+            if (!fOut) return false;
+            const size_t w = fOut.write(reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr));
+            fOut.flush();
+            fOut.close();
+            return w == sizeof(hdr);
         }
     };
 

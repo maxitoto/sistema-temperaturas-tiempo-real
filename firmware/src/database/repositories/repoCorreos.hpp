@@ -3,18 +3,13 @@
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::Correos;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Standard::FilterOp;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct CorreoDTO {
         PgAuto              idCorreo              = 0;
@@ -30,15 +25,7 @@ namespace DbRuntime::Repositories {
 
     class RepoCorreos {
     private:
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-        }
+        static constexpr const char* TABLA = "Correos";
 
         static bool esEmailValido(const char* email) {
             if (email == nullptr) return false;
@@ -49,30 +36,34 @@ namespace DbRuntime::Repositories {
         }
 
     public:
-        static CorreoDTO mapear(const PgTuple& r) {
+        static CorreoDTO mapear(const PgRowView& r) {
             CorreoDTO c{};
-            r["id_correo"]               >> c.idCorreo;
-            r["nombre"]                  >> c.nombre;
-            r["apellido"]                >> c.apellido;
-            r["correo_electronico"]      >> c.correoElectronico;
-            r["tipo_recepcion_mensajes"] >> c.tipoRecepcionMensajes;
-            r["ultimo_estado_envio"]     >> c.ultimoEstadoEnvio;
-            r["activa"]                  >> c.activa;
-            r["fecha_creacion"]          >> c.fechaCreacion;
-            r["fecha_modificacion"]      >> c.fechaModificacion;
+            c.idCorreo              = r.getInt32("id_correo");
+            c.nombre                = r.getCStr("nombre");
+            c.apellido              = r.getCStr("apellido");
+            c.correoElectronico     = r.getCStr("correo_electronico");
+            c.tipoRecepcionMensajes = r.getEnum<TipoRecepcionCorreo>("tipo_recepcion_mensajes");
+            c.ultimoEstadoEnvio     = r.getEnum<EstadoEnvioCorreo>("ultimo_estado_envio");
+            c.activa                = r.getBool("activa", true);
+            c.fechaCreacion         = r.getCStr("fecha_creacion");
+            c.fechaModificacion     = r.getCStr("fecha_modificacion");
             return c;
         }
 
         static bool obtenerPorEmail(const char* email, CorreoDTO& outDto) {
-            asegurarCatalogo();
-            if (email == nullptr || email[0] == '\0') return false;
+            asegurarEsquemaTabla(TABLA);
+            if (!email || email[0] == '\0') return false;
 
-            PgTuple fila;
-            if (!Correos.filter_eq("correo_electronico", String(email)).first(fila)) {
-                return false;
-            }
-            outDto = mapear(fila);
-            return true;
+            bool encontrado = false;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (strcasecmp(r.getCStr("correo_electronico"), email) == 0) {
+                    outDto = mapear(r);
+                    encontrado = true;
+                    return false;
+                }
+                return true;
+            });
+            return encontrado;
         }
 
         static CorreoDTO exigirPorEmail(const char* email) {
@@ -84,40 +75,37 @@ namespace DbRuntime::Repositories {
         }
 
         static std::vector<CorreoDTO> listarPaginados(
-            uint16_t limite = 32,
+            uint16_t limite = 12,
             uint16_t offset = 0,
             bool soloActivos = false
         ) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
+            std::vector<CorreoDTO> out;
+            out.reserve(limite <= 32 ? limite : 32);
 
-            auto q = Correos.objects();
-            if (soloActivos) {
-                q.filter_eq("activa", "TRUE");
-            }
-            return q.order_by("id_correo")
-                    .limit(static_cast<int32_t>(limite))
-                    .offset(static_cast<int32_t>(offset))
-                    .all_as<CorreoDTO>(&RepoCorreos::mapear);
+            uint32_t matched = 0;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (soloActivos && !r.getBool("activa", true)) return true;
+                if (matched >= offset) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
+            return out;
         }
 
         static std::vector<CorreoDTO> listarDestinatariosParaCriticidad(CriticidadEvento criticidad) {
-            asegurarCatalogo();
-
-            auto activos = listarPaginados(32, 0, true);
-            if (criticidad == CriticidadEvento::ALTA) {
-                return activos;
-            }
+            auto activos = listarPaginados(16, 0, true);
+            if (criticidad == CriticidadEvento::ALTA) return activos;
 
             std::vector<CorreoDTO> filtrados;
             for (const auto& d : activos) {
                 if (criticidad == CriticidadEvento::NULA) {
-                    if (d.tipoRecepcionMensajes == TipoRecepcionCorreo::RECIBIR_TODOS) {
-                        filtrados.push_back(d);
-                    }
+                    if (d.tipoRecepcionMensajes == TipoRecepcionCorreo::RECIBIR_TODOS) filtrados.push_back(d);
                 } else {
-                    if (d.tipoRecepcionMensajes != TipoRecepcionCorreo::RECIBIR_EVENTOS_CRITICOS) {
-                        filtrados.push_back(d);
-                    }
+                    if (d.tipoRecepcionMensajes != TipoRecepcionCorreo::RECIBIR_EVENTOS_CRITICOS) filtrados.push_back(d);
                 }
             }
             return filtrados;
@@ -127,33 +115,66 @@ namespace DbRuntime::Repositories {
             const char* nombre,
             const char* apellido,
             const char* email,
-            TipoRecepcionCorreo tipoRecepcion = TipoRecepcionCorreo::RECIBIR_TODOS
+            TipoRecepcionCorreo tipoRecepcion = TipoRecepcionCorreo::RECIBIR_TODOS,
+            bool activa = true
         ) {
-            asegurarCatalogo();
-
-            if (nombre == nullptr || nombre[0] == '\0') {
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            if (!nombre || nombre[0] == '\0') {
                 throw std::invalid_argument("ValueError: el nombre del destinatario es obligatorio");
             }
             if (!esEmailValido(email)) {
                 throw std::invalid_argument("ValueError: el formato de correo_electronico es invalido");
             }
 
-            auto res = Correos.create(
-                {
-                    PgCell("nombre",                  nombre),
-                    PgCell("apellido",                apellido ? apellido : ""),
-                    PgCell("correo_electronico",      email),
-                    PgCell("tipo_recepcion_mensajes", tipoRecepcion),
-                    PgCell("ultimo_estado_envio",     EstadoEnvioCorreo::PENDIENTE),
-                    PgCell("activa",                  true)
-                },
-                {"*"}
-            );
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            CorreoDTO dummy{};
+            if (obtenerPorEmail(email, dummy)) {
+                throw std::runtime_error("UniqueViolation: el correo_electronico ya esta registrado");
             }
-            return mapear(res.returningRows[0]);
+
+            PgRowBuffer row(schema);
+            row.setText("nombre",                  nombre);
+            row.setText("apellido",                apellido ? apellido : "");
+            row.setText("correo_electronico",      email);
+            row.setEnum("tipo_recepcion_mensajes", tipoRecepcion);
+            row.setEnum("ultimo_estado_envio",     EstadoEnvioCorreo::PENDIENTE);
+            row.setBool("activa",                  activa);
+
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo crear el correo");
+            }
+            return mapear(row.view());
+        }
+
+        static CorreoDTO actualizarPorId(
+            int32_t idCorreo,
+            const char* nombre,
+            const char* apellido,
+            const char* email,
+            TipoRecepcionCorreo tipoRecepcion,
+            bool activa
+        ) {
+            asegurarEsquemaTabla(TABLA);
+            if (!nombre || nombre[0] == '\0' || !esEmailValido(email)) {
+                throw std::invalid_argument("ValueError: nombre y correo_electronico validos son obligatorios");
+            }
+
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_correo") == idCorreo; },
+                [&](PgRowBuffer& row) {
+                    row.setText("nombre",                  nombre);
+                    row.setText("apellido",                apellido ? apellido : "");
+                    row.setText("correo_electronico",      email);
+                    row.setEnum("tipo_recepcion_mensajes", tipoRecepcion);
+                    row.setBool("activa",                  activa);
+                },
+                &updated
+            );
+            if (n == 0) {
+                throw std::runtime_error("LookupError: no se encontro el id_correo a actualizar");
+            }
+            return mapear(updated.view());
         }
 
         static CorreoDTO actualizarPorEmail(
@@ -163,50 +184,62 @@ namespace DbRuntime::Repositories {
             TipoRecepcionCorreo tipoRecepcion,
             bool activa
         ) {
-            asegurarCatalogo();
-
-            auto res = Correos.filter_eq("correo_electronico", String(email ? email : ""))
-                .returning({"*"})
-                .update({
-                    PgCell("nombre",                  nombre ? nombre : ""),
-                    PgCell("apellido",                apellido ? apellido : ""),
-                    PgCell("tipo_recepcion_mensajes", tipoRecepcion),
-                    PgCell("activa",                  activa)
-                });
-
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.returningRows.empty()) {
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return email && strcasecmp(r.getCStr("correo_electronico"), email) == 0; },
+                [&](PgRowBuffer& row) {
+                    row.setText("nombre",                  nombre ? nombre : "");
+                    row.setText("apellido",                apellido ? apellido : "");
+                    row.setEnum("tipo_recepcion_mensajes", tipoRecepcion);
+                    row.setBool("activa",                  activa);
+                },
+                &updated
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el correo a actualizar no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static CorreoDTO registrarEstadoEnvioPorEmail(const char* email, EstadoEnvioCorreo estado) {
-            asegurarCatalogo();
-
-            auto res = Correos.filter_eq("correo_electronico", String(email ? email : ""))
-                .returning({"*"})
-                .update({ PgCell("ultimo_estado_envio", estado) });
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return email && strcasecmp(r.getCStr("correo_electronico"), email) == 0; },
+                [&](PgRowBuffer& row) {
+                    row.setEnum("ultimo_estado_envio", estado);
+                },
+                &updated
+            );
+            if (n == 0) {
+                throw std::runtime_error("LookupError: el correo no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
+        }
+
+        static void eliminarPorId(int32_t idCorreo) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_correo") == idCorreo; },
+                true
+            );
         }
 
         static void eliminarPorEmail(const char* email) {
-            asegurarCatalogo();
-
-            auto res = Correos.filter_eq("correo_electronico", String(email ? email : "")).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            if (res.affectedRows == 0) {
+            asegurarEsquemaTabla(TABLA);
+            const uint16_t n = PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return email && strcasecmp(r.getCStr("correo_electronico"), email) == 0; },
+                true
+            );
+            if (n == 0) {
                 throw std::runtime_error("LookupError: el destinatario a eliminar no existe");
             }
         }
     };
 
-}
+} // namespace DbRuntime::Repositories

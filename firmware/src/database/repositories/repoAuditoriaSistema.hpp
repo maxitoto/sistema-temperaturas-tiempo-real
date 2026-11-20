@@ -3,19 +3,13 @@
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::AuditoriaSistema;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Standard::FilterOp;
-    using DbRuntime::Standard::AggregateFunc;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct AuditoriaSistemaDTO {
         PgAuto            idAuditoriaSistema = 0;
@@ -38,112 +32,138 @@ namespace DbRuntime::Repositories {
 
     class RepoAuditoriaSistema {
     private:
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-        }
+        static constexpr const char* TABLA = "AuditoriaSistema";
 
     public:
-        static AuditoriaSistemaDTO mapear(const PgTuple& r) {
+        static AuditoriaSistemaDTO mapear(const PgRowView& r) {
             AuditoriaSistemaDTO dto{};
-            r["id_auditoria_sistema"] >> dto.idAuditoriaSistema;
-            r["criticidad"]           >> dto.criticidad;
-            r["tipo_evento_sistema"]  >> dto.tipoEventoSistema;
-            r["estado_bus"]           >> dto.estadoBus;
-            r["espacio_sd_libre_kb"]  >> dto.espacioSdLibreKb;
-            r["heap_libre_bytes"]     >> dto.heapLibreBytes;
-            r["reset_reason"]         >> dto.resetReason;
-            r["version_firmware"]     >> dto.versionFirmware;
-            r["detalle"]              >> dto.detalle;
-            r["internet"]             >> dto.internet;
-            r["estado_reporte"]       >> dto.estadoReporte;
-            r["boot_id"]              >> dto.bootId;
-            r["uptime_s"]             >> dto.uptimeS;
-            r["fuente_tiempo"]        >> dto.fuenteTiempo;
-            r["activa"]               >> dto.activa;
-            r["fecha_creacion"]       >> dto.fechaCreacion;
+            dto.idAuditoriaSistema = r.getInt32("id_auditoria_sistema");
+            dto.criticidad         = r.getEnum<CriticidadEvento>("criticidad");
+            dto.tipoEventoSistema  = r.getEnum<TipoEvento>("tipo_evento_sistema");
+            dto.estadoBus          = r.getEnum<EstadoBus>("estado_bus");
+            dto.espacioSdLibreKb   = r.getUInt32("espacio_sd_libre_kb");
+            dto.heapLibreBytes     = r.getUInt32("heap_libre_bytes");
+            dto.resetReason        = r.getCStr("reset_reason");
+            dto.versionFirmware    = r.getCStr("version_firmware", "1.0.0");
+            dto.detalle            = r.getCStr("detalle");
+            dto.internet           = r.getBool("internet", false);
+            dto.estadoReporte      = r.getEnum<EstadoEnvioCorreo>("estado_reporte");
+            dto.bootId             = r.getUInt32("boot_id");
+            dto.uptimeS            = r.getUInt32("uptime_s");
+            dto.fuenteTiempo       = r.getEnum<FuenteTiempo>("fuente_tiempo");
+            dto.activa             = r.getBool("activa", true);
+            dto.fechaCreacion      = r.getCStr("fecha_creacion");
             return dto;
         }
 
         static AuditoriaSistemaDTO registrarEvento(const AuditoriaSistemaDTO& entrada) {
-            asegurarCatalogo();
-
+            const auto* schema = asegurarEsquemaTabla(TABLA);
             const uint32_t heapActual   = entrada.heapLibreBytes > 0 ? entrada.heapLibreBytes : ESP.getFreeHeap();
             const uint32_t uptimeActual = entrada.uptimeS > 0 ? entrada.uptimeS : static_cast<uint32_t>(millis() / 1000UL);
 
-            auto res = AuditoriaSistema.create(
-                {
-                    PgCell("criticidad",          entrada.criticidad),
-                    PgCell("tipo_evento_sistema", entrada.tipoEventoSistema),
-                    PgCell("estado_bus",          entrada.estadoBus),
-                    PgCell("espacio_sd_libre_kb", entrada.espacioSdLibreKb),
-                    PgCell("heap_libre_bytes",    heapActual),
-                    PgCell("reset_reason",        entrada.resetReason.c_str()),
-                    PgCell("version_firmware",    entrada.versionFirmware.vacio() ? "1.0.0" : entrada.versionFirmware.c_str()),
-                    PgCell("detalle",             entrada.detalle.c_str()),
-                    PgCell("internet",            entrada.internet),
-                    PgCell("estado_reporte",      entrada.estadoReporte),
-                    PgCell("boot_id",             entrada.bootId),
-                    PgCell("uptime_s",            uptimeActual),
-                    PgCell("fuente_tiempo",       entrada.fuenteTiempo),
-                    PgCell("activa",              true)
-                },
-                {"*"}
-            );
+            PgRowBuffer row(schema);
+            row.setEnum("criticidad",           entrada.criticidad);
+            row.setEnum("tipo_evento_sistema",  entrada.tipoEventoSistema);
+            row.setEnum("estado_bus",           entrada.estadoBus);
+            row.setUInt32("espacio_sd_libre_kb",entrada.espacioSdLibreKb);
+            row.setUInt32("heap_libre_bytes",   heapActual);
+            row.setText("reset_reason",         entrada.resetReason.c_str());
+            row.setText("version_firmware",     entrada.versionFirmware.vacio() ? "1.0.0" : entrada.versionFirmware.c_str());
+            row.setText("detalle",              entrada.detalle.c_str());
+            row.setBool("internet",             entrada.internet);
+            row.setEnum("estado_reporte",       entrada.estadoReporte);
+            row.setUInt32("boot_id",            entrada.bootId);
+            row.setUInt32("uptime_s",           uptimeActual);
+            row.setEnum("fuente_tiempo",        entrada.fuenteTiempo);
+            row.setBool("activa",               true);
 
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar AuditoriaSistema");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(row.view());
         }
 
-        static std::vector<AuditoriaSistemaDTO> listarRecientes(uint16_t limite = 32, uint16_t offset = 0) {
-            asegurarCatalogo();
+        // Recorrido inverso cero-heap (usado por RPAuditoria para llenar ListaAuditoriaSistemaDTO sin vector)
+        template <typename CallbackFn>
+        static void forEachReciente(uint16_t limite, uint16_t offset, CallbackFn fn) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0) return;
 
-            return AuditoriaSistema.objects()
-                                   .order_by("-id_auditoria_sistema")
-                                   .limit(static_cast<int32_t>(limite))
-                                   .offset(static_cast<int32_t>(offset))
-                                   .all_as<AuditoriaSistemaDTO>(&RepoAuditoriaSistema::mapear);
+            uint32_t matched = 0;
+            uint16_t emitted = 0;
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (matched >= offset) {
+                    if (!fn(r)) return false;
+                    if (++emitted >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
         }
 
-        static std::vector<AuditoriaSistemaDTO> listarPendientesReporte(uint16_t limite = 32) {
-            asegurarCatalogo();
+        static std::vector<AuditoriaSistemaDTO> listarRecientes(uint16_t limite = 6, uint16_t offset = 0) {
+            if (limite == 0 || limite > 16) limite = 16;
+            std::vector<AuditoriaSistemaDTO> out;
+            out.reserve(limite);
+            forEachReciente(limite, offset, [&](const PgRowView& r) -> bool {
+                out.push_back(mapear(r));
+                return true;
+            });
+            return out;
+        }
 
-            return AuditoriaSistema.filter_eq("estado_reporte", "PENDIENTE")
-                                   .order_by("id_auditoria_sistema")
-                                   .limit(static_cast<int32_t>(limite))
-                                   .all_as<AuditoriaSistemaDTO>(&RepoAuditoriaSistema::mapear);
+        static std::vector<AuditoriaSistemaDTO> listarPendientesReporte(uint16_t limite = 16) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 16) limite = 16;
+            std::vector<AuditoriaSistemaDTO> out;
+
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getEnum<EstadoEnvioCorreo>("estado_reporte") == EstadoEnvioCorreo::PENDIENTE) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                return true;
+            });
+            return out;
         }
 
         static AuditoriaSistemaDTO actualizarEstadoReporte(int32_t idAuditoriaSistema, EstadoEnvioCorreo nuevoEstado) {
-            asegurarCatalogo();
-
-            auto res = AuditoriaSistema.filter_eq("id_auditoria_sistema", idAuditoriaSistema)
-                .returning({"*"})
-                .update({ PgCell("estado_reporte", nuevoEstado) });
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_auditoria_sistema") == idAuditoriaSistema; },
+                [&](PgRowBuffer& row) { row.setEnum("estado_reporte", nuevoEstado); },
+                &updated
+            );
+            if (n == 0) {
+                throw std::runtime_error("LookupError: id_auditoria_sistema no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
-        
+
+        static void eliminarPorId(int32_t idAuditoriaSistema) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_auditoria_sistema") == idAuditoriaSistema; },
+                true
+            );
+        }
+
         static uint16_t purgarAnterioresA(const char* fechaHoraIsoLimite) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
             if (!fechaHoraIsoLimite || fechaHoraIsoLimite[0] == '\0') return 0;
 
-            auto res = AuditoriaSistema.filter("fecha_creacion", FilterOp::LT, String(fechaHoraIsoLimite)).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            return res.affectedRows;
+            return PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool {
+                    const char* fc = r.getCStr("fecha_creacion");
+                    return fc[0] != '\0' && strcmp(fc, fechaHoraIsoLimite) < 0;
+                },
+                true
+            );
         }
     };
 
-}
+} // namespace DbRuntime::Repositories

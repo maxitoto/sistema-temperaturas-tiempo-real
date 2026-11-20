@@ -3,19 +3,13 @@
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::AuditoriaSensores;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Standard::FilterOp;
-    using DbRuntime::Standard::AggregateFunc;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct AuditoriaSensorDTO {
         PgAuto            idAuditoriaSensor  = 0;
@@ -32,37 +26,29 @@ namespace DbRuntime::Repositories {
     };
 
     struct EstadisticasAuditoriaSensoresDTO {
-        PgInt totalEventos        = 0;
-        PgInt eventosCriticos     = 0;
-        PgInt reportesPendientes  = 0;
+        PgInt totalEventos       = 0;
+        PgInt eventosCriticos    = 0;
+        PgInt reportesPendientes = 0;
     };
 
     class RepoAuditoriaSensores {
     private:
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-        }
+        static constexpr const char* TABLA = "AuditoriaSensores";
 
     public:
-        static AuditoriaSensorDTO mapear(const PgTuple& r) {
+        static AuditoriaSensorDTO mapear(const PgRowView& r) {
             AuditoriaSensorDTO dto{};
-            r["id_auditoria_sensor"]  >> dto.idAuditoriaSensor;
-            r["id_sensor"]            >> dto.idSensor;
-            r["id_senso"]             >> dto.idSenso;
-            r["estado_previo_sensor"] >> dto.estadoPrevioSensor;
-            r["estado_nuevo_sensor"]  >> dto.estadoNuevoSensor;
-            r["estado_bus"]           >> dto.estadoBus;
-            r["tipo_evento_sensor"]   >> dto.tipoEventoSensor;
-            r["criticidad_sensor"]    >> dto.criticidadSensor;
-            r["estado_reporte"]       >> dto.estadoReporte;
-            r["activa"]               >> dto.activa;
-            r["fecha_creacion"]       >> dto.fechaCreacion;
+            dto.idAuditoriaSensor  = r.getInt32("id_auditoria_sensor");
+            dto.idSensor           = r.getInt32("id_sensor");
+            dto.idSenso            = r.getInt32("id_senso");
+            dto.estadoPrevioSensor = r.getEnum<EstadoSensor>("estado_previo_sensor");
+            dto.estadoNuevoSensor  = r.getEnum<EstadoSensor>("estado_nuevo_sensor");
+            dto.estadoBus          = r.getEnum<EstadoBus>("estado_bus");
+            dto.tipoEventoSensor   = r.getEnum<TipoEvento>("tipo_evento_sensor");
+            dto.criticidadSensor   = r.getEnum<CriticidadEvento>("criticidad_sensor");
+            dto.estadoReporte      = r.getEnum<EstadoEnvioCorreo>("estado_reporte");
+            dto.activa             = r.getBool("activa", true);
+            dto.fechaCreacion      = r.getCStr("fecha_creacion");
             return dto;
         }
 
@@ -75,27 +61,22 @@ namespace DbRuntime::Repositories {
             TipoEvento tipoEvento,
             CriticidadEvento criticidad
         ) {
-            asegurarCatalogo();
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            PgRowBuffer row(schema);
+            row.setInt32("id_sensor",           idSensor);
+            row.setInt32("id_senso",            idSenso);
+            row.setEnum("estado_previo_sensor", estadoPrevio);
+            row.setEnum("estado_nuevo_sensor",  estadoNuevo);
+            row.setEnum("estado_bus",           estadoBus);
+            row.setEnum("tipo_evento_sensor",   tipoEvento);
+            row.setEnum("criticidad_sensor",    criticidad);
+            row.setEnum("estado_reporte",       EstadoEnvioCorreo::PENDIENTE);
+            row.setBool("activa",               true);
 
-            auto res = AuditoriaSensores.create(
-                {
-                    PgCell("id_sensor",            idSensor),
-                    PgCell("id_senso",             idSenso),
-                    PgCell("estado_previo_sensor", estadoPrevio),
-                    PgCell("estado_nuevo_sensor",  estadoNuevo),
-                    PgCell("estado_bus",           estadoBus),
-                    PgCell("tipo_evento_sensor",   tipoEvento),
-                    PgCell("criticidad_sensor",    criticidad),
-                    PgCell("estado_reporte",       EstadoEnvioCorreo::PENDIENTE),
-                    PgCell("activa",               true)
-                },
-                {"*"}
-            );
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar evento en AuditoriaSensores");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(row.view());
         }
 
         static std::vector<AuditoriaSensorDTO> listarPorIdSensor(
@@ -103,73 +84,93 @@ namespace DbRuntime::Repositories {
             uint16_t limite = 32,
             uint16_t offset = 0
         ) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 32) limite = 32;
 
-            return AuditoriaSensores.filter_eq("id_sensor", idSensor)
-                                    .order_by("-id_auditoria_sensor")
-                                    .limit(static_cast<int32_t>(limite))
-                                    .offset(static_cast<int32_t>(offset))
-                                    .all_as<AuditoriaSensorDTO>(&RepoAuditoriaSensores::mapear);
+            std::vector<AuditoriaSensorDTO> out;
+            out.reserve(limite);
+            uint32_t matched = 0;
+
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_sensor") != idSensor) return true;
+                if (matched >= offset) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
+            return out;
         }
 
         static std::vector<AuditoriaSensorDTO> listarPendientesReporte(uint16_t limite = 32) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 32) limite = 32;
 
-            return AuditoriaSensores.filter_eq("estado_reporte", "PENDIENTE")
-                                    .order_by("id_auditoria_sensor")
-                                    .limit(static_cast<int32_t>(limite))
-                                    .all_as<AuditoriaSensorDTO>(&RepoAuditoriaSensores::mapear);
+            std::vector<AuditoriaSensorDTO> out;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getEnum<EstadoEnvioCorreo>("estado_reporte") == EstadoEnvioCorreo::PENDIENTE) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                return true;
+            });
+            return out;
         }
 
         static AuditoriaSensorDTO actualizarEstadoReporte(int32_t idAuditoriaSensor, EstadoEnvioCorreo nuevoEstado) {
-            asegurarCatalogo();
-
-            auto res = AuditoriaSensores.filter_eq("id_auditoria_sensor", idAuditoriaSensor)
-                .returning({"*"})
-                .update({ PgCell("estado_reporte", nuevoEstado) });
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            asegurarEsquemaTabla(TABLA);
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_auditoria_sensor") == idAuditoriaSensor; },
+                [&](PgRowBuffer& row) { row.setEnum("estado_reporte", nuevoEstado); },
+                &updated
+            );
+            if (n == 0) {
+                throw std::runtime_error("LookupError: id_auditoria_sensor no existe");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(updated.view());
         }
 
         static EstadisticasAuditoriaSensoresDTO obtenerEstadisticasGlobales() {
-            asegurarCatalogo();
-
-            DbRuntime::Engine::PredicateCondition filtroCriticos;
-            filtroCriticos.columnOrExpr = "criticidad_sensor";
-            filtroCriticos.op           = FilterOp::EQ;
-            filtroCriticos.valueA       = "ALTA";
-
-            DbRuntime::Engine::PredicateCondition filtroPendientes;
-            filtroPendientes.columnOrExpr = "estado_reporte";
-            filtroPendientes.op           = FilterOp::EQ;
-            filtroPendientes.valueA       = "PENDIENTE";
-
-            PgTuple r;
+            asegurarEsquemaTabla(TABLA);
             EstadisticasAuditoriaSensoresDTO out{};
-            if (AuditoriaSensores.objects()
-                    .annotate("total",      AggregateFunc::COUNT_ALL)
-                    .annotate_filtered("criticos",   AggregateFunc::COUNT_COL, "id_auditoria_sensor", filtroCriticos)
-                    .annotate_filtered("pendientes", AggregateFunc::COUNT_COL, "id_auditoria_sensor", filtroPendientes)
-                    .first(r)) {
-                r["total"]      >> out.totalEventos;
-                r["criticos"]   >> out.eventosCriticos;
-                r["pendientes"] >> out.reportesPendientes;
-            }
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                out.totalEventos++;
+                if (r.getEnum<CriticidadEvento>("criticidad_sensor") == CriticidadEvento::ALTA) {
+                    out.eventosCriticos++;
+                }
+                if (r.getEnum<EstadoEnvioCorreo>("estado_reporte") == EstadoEnvioCorreo::PENDIENTE) {
+                    out.reportesPendientes++;
+                }
+                return true;
+            });
             return out;
         }
-        
+
+        static void eliminarPorId(int32_t idAuditoriaSensor) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_auditoria_sensor") == idAuditoriaSensor; },
+                true
+            );
+        }
+
         static uint16_t purgarAnterioresA(const char* fechaHoraIsoLimite) {
-            asegurarCatalogo();
+            asegurarEsquemaTabla(TABLA);
             if (!fechaHoraIsoLimite || fechaHoraIsoLimite[0] == '\0') return 0;
 
-            auto res = AuditoriaSensores.filter("fecha_creacion", FilterOp::LT, String(fechaHoraIsoLimite)).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            return res.affectedRows;
+            return PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool {
+                    const char* fc = r.getCStr("fecha_creacion");
+                    return fc[0] != '\0' && strcmp(fc, fechaHoraIsoLimite) < 0;
+                },
+                true
+            );
         }
     };
-}
+
+} // namespace DbRuntime::Repositories

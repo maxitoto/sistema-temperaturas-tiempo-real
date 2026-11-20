@@ -3,21 +3,14 @@
 #include <stdexcept>
 #include <vector>
 #include "../common/PgDtoTypes.hpp"
-#include "../common/DiagnosticConsole.hpp"
-#include "../DB_DQL_DML/orm/DjangoManager.hpp"
+#include "RepositorioBase.hpp"
 #include "repoSensor.hpp"
 
 namespace DbRuntime::Repositories {
 
-    using DbRuntime::Orm::Senso;
-    using DbRuntime::Orm::runtimeDb;
-    using DbRuntime::Storage::PgCell;
-    using DbRuntime::Storage::PgTuple;
-    using DbRuntime::Storage::RuntimeStorageAndIndexManager;
-    using DbRuntime::Standard::FilterOp;
-    using DbRuntime::Standard::AggregateFunc;
-    using DbNotRuntime::Engine::DdlDiagnosticConsole;
-    using DbNotRuntime::Engine::PhysicalSchemaCatalog;
+    using DbRuntime::Storage::PgBinaryStorage;
+    using DbRuntime::Storage::PgRowBuffer;
+    using DbRuntime::Storage::PgRowView;
 
     struct SensoDTO {
         PgAuto       idSenso              = 0;
@@ -45,6 +38,8 @@ namespace DbRuntime::Repositories {
 
     class RepoSenso {
     private:
+        static constexpr const char* TABLA = "Senso";
+
         static int64_t epochActual() {
             return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
         }
@@ -53,25 +48,15 @@ namespace DbRuntime::Repositories {
             return (tsProvisto > 0) ? tsProvisto : epochActual();
         }
 
-        static void asegurarCatalogo() {
-            if (PhysicalSchemaCatalog::getInstance().getAllTables().empty()) {
-                runtimeDb.bindToPhysicalCatalog();
-            }
-        }
-
-        static void lanzarUltimoErrorDB() {
-            throw std::runtime_error(DdlDiagnosticConsole::getInstance().last().toPsqlFormat().c_str());
-        }
-
     public:
-        static SensoDTO mapear(const PgTuple& r) {
+        static SensoDTO mapear(const PgRowView& r) {
             SensoDTO s{};
-            r["id_senso"]              >> s.idSenso;
-            r["id_sensor"]             >> s.idSensor;
-            r["temperatura_cruda"]     >> s.temperaturaCruda;
-            r["temperatura_corregida"] >> s.temperaturaCorregida;
-            r["estado_sensor"]         >> s.estadoSensor;
-            r["fecha_creacion"]        >> s.fechaCreacion;
+            s.idSenso              = r.getInt32("id_senso");
+            s.idSensor             = r.getInt32("id_sensor");
+            s.temperaturaCruda     = r.getFloat("temperatura_cruda");
+            s.temperaturaCorregida = r.getFloat("temperatura_corregida");
+            s.estadoSensor         = r.getEnum<EstadoSensor>("estado_sensor", EstadoSensor::OK);
+            s.fechaCreacion        = r.getInt64("fecha_creacion");
             return s;
         }
 
@@ -82,62 +67,82 @@ namespace DbRuntime::Repositories {
             EstadoSensor estado = EstadoSensor::OK,
             int64_t fechaCreacion = 0
         ) {
-            asegurarCatalogo();
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            PgRowBuffer row(schema);
+            row.setInt32("id_sensor",             idSensor);
+            row.setFloat("temperatura_cruda",     temperaturaCruda);
+            row.setFloat("temperatura_corregida", temperaturaCorregida);
+            row.setEnum("estado_sensor",          estado);
+            row.setInt64("fecha_creacion",        resolverTimestamp(fechaCreacion));
 
-            const int64_t ts = resolverTimestamp(fechaCreacion);
-            auto res = Senso.create(
-                {
-                    PgCell("id_sensor",             idSensor),
-                    PgCell("temperatura_cruda",     temperaturaCruda),
-                    PgCell("temperatura_corregida", temperaturaCorregida),
-                    PgCell("estado_sensor",         estado),
-                    PgCell("fecha_creacion",        ts)
-                },
-                {"*"}
-            );
-
-            if (!res.success || res.returningRows.empty()) {
-                lanzarUltimoErrorDB();
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar la lectura en Senso");
             }
-            return mapear(res.returningRows[0]);
+            return mapear(row.view());
         }
 
         static uint16_t registrarLoteLecturas(const std::vector<NuevaLecturaSensoDTO>& lote) {
-            asegurarCatalogo();
+            const auto* schema = asegurarEsquemaTabla(TABLA);
             if (lote.empty()) return 0;
 
-            auto& storage = RuntimeStorageAndIndexManager::getInstance();
-            storage.beginBatch();
-
+            auto& st = PgBinaryStorage::getInstance();
+            TransaccionBatch tx;
             uint16_t insertados = 0;
+
             for (const auto& item : lote) {
-                const int64_t ts = resolverTimestamp(item.fechaCreacion);
-                auto res = Senso.create({
-                    PgCell("id_sensor",             item.idSensor),
-                    PgCell("temperatura_cruda",     item.temperaturaCruda),
-                    PgCell("temperatura_corregida", item.temperaturaCorregida),
-                    PgCell("estado_sensor",         item.estadoSensor),
-                    PgCell("fecha_creacion",        ts)
-                });
-                if (res.success) {
-                    insertados += res.affectedRows;
+                PgRowBuffer row(schema);
+                row.setInt32("id_sensor",             item.idSensor);
+                row.setFloat("temperatura_cruda",     item.temperaturaCruda);
+                row.setFloat("temperatura_corregida", item.temperaturaCorregida);
+                row.setEnum("estado_sensor",          item.estadoSensor);
+                row.setInt64("fecha_creacion",        resolverTimestamp(item.fechaCreacion));
+                if (st.appendRecord(TABLA, row)) {
+                    insertados++;
                 }
             }
-
-            if (!storage.commitBatch()) {
-                lanzarUltimoErrorDB();
+            if (!tx.confirmar()) {
+                throw std::runtime_error("IOError: fallo commitBatch en Senso");
             }
             return insertados;
         }
 
         static bool obtenerPorId(int32_t idSenso, SensoDTO& outDto) {
-            asegurarCatalogo();
-            PgTuple fila;
-            if (!Senso.filter_eq("id_senso", idSenso).first(fila)) {
-                return false;
-            }
-            outDto = mapear(fila);
-            return true;
+            asegurarEsquemaTabla(TABLA);
+            bool ok = false;
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_senso") == idSenso) {
+                    outDto = mapear(r);
+                    ok = true;
+                    return false;
+                }
+                return true;
+            });
+            return ok;
+        }
+
+        // Paginación rápida inversa (idSensor == 0 trae todos los sensores)
+        static std::vector<SensoDTO> listarPaginados(
+            int32_t idSensor = 0,
+            uint16_t limite = 32,
+            uint16_t offset = 0
+        ) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 32) limite = 32;
+
+            std::vector<SensoDTO> out;
+            out.reserve(limite);
+            uint32_t matched = 0;
+
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (idSensor > 0 && r.getInt32("id_sensor") != idSensor) return true;
+                if (matched >= offset) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                matched++;
+                return true;
+            });
+            return out;
         }
 
         static std::vector<SensoDTO> listarPorIdSensor(
@@ -145,13 +150,7 @@ namespace DbRuntime::Repositories {
             uint16_t limite = 32,
             uint16_t offset = 0
         ) {
-            asegurarCatalogo();
-
-            return Senso.filter_eq("id_sensor", idSensor)
-                        .order_by("-fecha_creacion")
-                        .limit(static_cast<int32_t>(limite))
-                        .offset(static_cast<int32_t>(offset))
-                        .all_as<SensoDTO>(&RepoSenso::mapear);
+            return listarPaginados(idSensor, limite, offset);
         }
 
         static std::vector<SensoDTO> listarPorIdSensorYRangoFecha(
@@ -160,22 +159,25 @@ namespace DbRuntime::Repositories {
             int64_t timestampHasta,
             uint16_t limite = 32
         ) {
-            asegurarCatalogo();
-
+            asegurarEsquemaTabla(TABLA);
             if (timestampDesde > timestampHasta) {
                 throw std::invalid_argument("ValueError: timestampDesde no puede ser mayor que timestampHasta");
             }
+            if (limite == 0 || limite > 32) limite = 32;
 
-            char bufDesde[24]{};
-            char bufHasta[24]{};
-            snprintf(bufDesde, sizeof(bufDesde), "%lld", static_cast<long long>(timestampDesde));
-            snprintf(bufHasta, sizeof(bufHasta), "%lld", static_cast<long long>(timestampHasta));
+            std::vector<SensoDTO> out;
+            out.reserve(limite);
 
-            return Senso.filter_eq("id_sensor", idSensor)
-                        .filter("fecha_creacion", FilterOp::BETWEEN, String(bufDesde), String(bufHasta))
-                        .order_by("-fecha_creacion")
-                        .limit(static_cast<int32_t>(limite))
-                        .all_as<SensoDTO>(&RepoSenso::mapear);
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_sensor") != idSensor) return true;
+                const int64_t ts = r.getInt64("fecha_creacion");
+                if (ts >= timestampDesde && ts <= timestampHasta) {
+                    out.push_back(mapear(r));
+                    if (out.size() >= limite) return false;
+                }
+                return true;
+            });
+            return out;
         }
 
         static std::vector<SensoDTO> listarPorMac(const char* macHex, uint16_t limite = 32) {
@@ -194,36 +196,50 @@ namespace DbRuntime::Repositories {
         }
 
         static ResumenEstadisticoSensoDTO obtenerEstadisticasPorSensor(int32_t idSensor) {
-            asegurarCatalogo();
-
-            PgTuple r;
+            asegurarEsquemaTabla(TABLA);
             ResumenEstadisticoSensoDTO out{};
-            if (Senso.filter_eq("id_sensor", idSensor)
-                     .annotate("total",    AggregateFunc::COUNT_ALL)
-                     .annotate("temp_min", AggregateFunc::MIN, "temperatura_corregida")
-                     .annotate("temp_max", AggregateFunc::MAX, "temperatura_corregida")
-                     .annotate("temp_avg", AggregateFunc::AVG, "temperatura_corregida")
-                     .first(r)) {
-                r["total"]    >> out.totalLecturas;
-                r["temp_min"] >> out.temperaturaMinima;
-                r["temp_max"] >> out.temperaturaMaxima;
-                r["temp_avg"] >> out.temperaturaPromedio;
+            double suma = 0.0;
+            bool primero = true;
+
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (r.getInt32("id_sensor") != idSensor) return true;
+                const float t = r.getFloat("temperatura_corregida");
+                out.totalLecturas++;
+                suma += static_cast<double>(t);
+                if (primero) {
+                    out.temperaturaMinima = t;
+                    out.temperaturaMaxima = t;
+                    primero = false;
+                } else {
+                    if (t < out.temperaturaMinima) out.temperaturaMinima = t;
+                    if (t > out.temperaturaMaxima) out.temperaturaMaxima = t;
+                }
+                return true;
+            });
+
+            if (out.totalLecturas > 0) {
+                out.temperaturaPromedio = static_cast<float>(suma / static_cast<double>(out.totalLecturas));
             }
             return out;
         }
 
+        static void eliminarPorId(int32_t idSenso) {
+            asegurarEsquemaTabla(TABLA);
+            PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_senso") == idSenso; },
+                true
+            );
+        }
+
         static uint16_t purgarAnterioresA(int64_t timestampLimite) {
-            asegurarCatalogo();
-
-            char bufLimite[24]{};
-            snprintf(bufLimite, sizeof(bufLimite), "%lld", static_cast<long long>(timestampLimite));
-
-            auto res = Senso.filter("fecha_creacion", FilterOp::LT, String(bufLimite)).remove();
-            if (!res.success) {
-                lanzarUltimoErrorDB();
-            }
-            return res.affectedRows;
+            asegurarEsquemaTabla(TABLA);
+            return PgBinaryStorage::getInstance().deleteWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool { return r.getInt64("fecha_creacion") < timestampLimite; },
+                true
+            );
         }
     };
 
-}
+} // namespace DbRuntime::Repositories
