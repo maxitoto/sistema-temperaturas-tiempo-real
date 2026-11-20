@@ -10,7 +10,7 @@
 
 class RPCMiddlewareMessage : public RPCBase {
 public:
-    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 80;
+    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 56;
     using InvocadorBorradoFn = MascaraClientes (*)(const SobreMensajeRPC&, MascaraClientes& refSuscriptoresStream);
     using EmisorStreamFn     = size_t (*)(uint16_t ticketSecuencia, uint16_t idProc, uint8_t* bufferOut, size_t capMax);
     using FuncionDifusionL1  = void (*)(const uint8_t* buffer, size_t longitud, MascaraClientes destinatarios, CanalSalida canal);
@@ -86,7 +86,6 @@ public:
     // Emite un ciclo de todos los servicios registrados con semántica talVez que tengan clientes suscritos
     static void emitirStreamsTalVezActivos(FuncionDifusionL1 callbackDifusion) {
         if (!callbackDifusion) return;
-        static uint8_t bufferStream[CAPACIDAD_BUFFER_COMPARTIDO];;
 
         for (size_t i = 0; i < totalRegistrados; ++i) {
             if (registro[i].semantica == SemanticaEntrega::TAL_VEZ &&
@@ -95,11 +94,11 @@ public:
                 size_t len = registro[i].emitirStream(
                     secuenciaStreamGlobal++,
                     registro[i].idHashNombre,
-                    bufferStream,
-                    sizeof(bufferStream)
+                    bufferSalidaCompartido,
+                    CAPACIDAD_BUFFER_COMPARTIDO
                 );
                 if (len > 0) {
-                    callbackDifusion(bufferStream, len, registro[i].suscriptoresStream, CanalSalida::STREAMING_TELEMETRIA);
+                    callbackDifusion(bufferSalidaCompartido, len, registro[i].suscriptoresStream, CanalSalida::STREAMING_TELEMETRIA);
                 }
             }
         }

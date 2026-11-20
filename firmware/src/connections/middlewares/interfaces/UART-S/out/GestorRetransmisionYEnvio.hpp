@@ -9,7 +9,7 @@
  * Constante: CAPACIDAD_COLA_SALIDA
  * ¿Para qué sirve?: Define cuántos segmentos pueden estar en tránsito o esperando confirmación simultáneamente.
  */
-static const uint8_t CAPACIDAD_COLA_SALIDA = 32;
+static const uint8_t CAPACIDAD_COLA_SALIDA = 16;
 
 /**
  * Constante: MAXIMO_INTENTOS_RETRANSMISION

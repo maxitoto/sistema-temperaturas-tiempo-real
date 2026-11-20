@@ -8,7 +8,7 @@
  * Constante: CAPACIDAD_BUFFER_MENSAJE_COMPLETO
  * ¿Para qué sirve?: Define el tamaño máximo en bytes que puede tener un mensaje reensamblado para la aplicación.
  */
-static const size_t CAPACIDAD_BUFFER_MENSAJE_COMPLETO = 1536;
+static const size_t CAPACIDAD_BUFFER_MENSAJE_COMPLETO = 512;
 
 /**
  * Clase: ReensambladorOrdenadoEntrante

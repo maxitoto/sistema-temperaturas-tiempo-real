@@ -74,6 +74,19 @@ public:
         try {
             fn();
             return true;
+        } catch (const std::bad_alloc&) {
+            char msgOom[72];
+            snprintf(
+                msgOom, sizeof(msgOom),
+                "std::bad_alloc (heapLibre:%uB maxBloque:%uB)",
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(ESP.getMaxAllocHeap())
+            );
+            longitudSalidaCompartida = CodificadorRPC::serializarExcepcionCruda(
+                idTicket, idProcedimiento, msgOom,
+                bufferSalidaCompartido, CAPACIDAD_BUFFER_COMPARTIDO
+            );
+            return false;
         } catch (const std::exception& e) {
             longitudSalidaCompartida = CodificadorRPC::serializarExcepcionCruda(
                 idTicket, idProcedimiento, e.what(),

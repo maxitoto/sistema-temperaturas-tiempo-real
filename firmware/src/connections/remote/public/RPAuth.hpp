@@ -110,6 +110,8 @@ public:
                 static_cast<uint8_t>(usuarioDb.rol),
                 EXPIRACION_SESION_SEGUNDOS
             };
+        } catch (const std::bad_alloc&) {
+            throw;
         } catch (...) {
             bool bloqueadoAhora = false;
 

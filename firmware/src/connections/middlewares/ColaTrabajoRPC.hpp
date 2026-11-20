@@ -29,8 +29,8 @@ struct RespuestaEncoladaRPC {
 
 class ColaTrabajoRPC {
 public:
-    static constexpr uint8_t CAPACIDAD_PETICIONES = 4; // Tope estricto de trabajo pendiente
-    static constexpr uint8_t CAPACIDAD_RESPUESTAS = 2; // Doble buffer de salida hacia TaskComms
+    static constexpr uint8_t CAPACIDAD_PETICIONES = 2; // Tope estricto de trabajo pendiente
+    static constexpr uint8_t CAPACIDAD_RESPUESTAS = 1; // Doble buffer de salida hacia TaskComms
 
 private:
     PeticionEncoladaRPC  poolPeticiones[CAPACIDAD_PETICIONES]{};

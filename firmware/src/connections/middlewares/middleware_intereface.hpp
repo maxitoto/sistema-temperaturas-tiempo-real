@@ -35,7 +35,7 @@ private:
     WiFiUdpPlainRuntime& wifiUdp;
     ColaTrabajoRPC&      colaRpc;
 
-    uint8_t              bufferEntradaSerie[RPCBase::CAPACIDAD_BUFFER_COMPARTIDO]{0};
+    uint8_t bufferEntradaSerie[512]{0};
     AcumuladorFramingTcp acumuladoresTcp[WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS]{};
 
     // Estado de seguridad y control de tráfico (100% estático, cero heap)
