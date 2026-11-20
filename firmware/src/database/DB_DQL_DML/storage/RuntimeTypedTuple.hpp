@@ -13,12 +13,13 @@ namespace DbRuntime::Storage {
     using DbCommon::Standard::DataTypeUtils;
     using DbCommon::Dto::PgText;
 
+    // Alineado de mayor a menor: 8 (num) + 16 (String) + 28 (columnName) + 1 + 1 + 2 pad = 56 B
     struct PgCell {
-        char columnName[32] = {0};
-        PgDataType type     = PgDataType::TEXT;
-        bool isNull         = false;
         PgValueUnion num{};
         String rawText      = "";
+        char columnName[28] = {0};
+        PgDataType type     = PgDataType::TEXT;
+        bool isNull         = false;
 
         PgCell() = default;
 
@@ -61,8 +62,17 @@ namespace DbRuntime::Storage {
             : PgCell(String(col ? col : ""), String(DbCommon::Dto::PgEnumTraits<TEnum>::toString(val)), PgDataType::ENUM) {}
 
         void setColumnName(const String& col) {
-            strncpy(columnName, col.c_str(), sizeof(columnName) - 1);
-            columnName[sizeof(columnName) - 1] = '\0';
+            setColumnNameCStr(col.c_str(), col.length());
+        }
+
+        void setColumnNameCStr(const char* col, size_t len) {
+            if (!col || len == 0) {
+                columnName[0] = '\0';
+                return;
+            }
+            if (len >= sizeof(columnName)) len = sizeof(columnName) - 1;
+            memcpy(columnName, col, len);
+            columnName[len] = '\0';
         }
 
         void setValue(const String& literal, PgDataType dt = PgDataType::TEXT) {
@@ -105,9 +115,14 @@ namespace DbRuntime::Storage {
         PgTuple() = default;
 
         void reserve(size_t n) { cells.reserve(n); }
+        void clear() { cells.clear(); }
 
         const PgCell* findCell(const String& colName) const {
-            const char* target = colName.c_str();
+            return findCellCStr(colName.c_str());
+        }
+
+        const PgCell* findCellCStr(const char* target) const {
+            if (!target) return nullptr;
             for (const auto& c : cells) {
                 if (strcasecmp(c.columnName, target) == 0) return &c;
             }
@@ -137,6 +152,13 @@ namespace DbRuntime::Storage {
             cells.emplace_back(colName, value, dt);
         }
 
+        void appendParsedCell(const char* colName, size_t colLen, const String& valStr, PgDataType dt) {
+            cells.emplace_back();
+            PgCell& c = cells.back();
+            c.setColumnNameCStr(colName, colLen);
+            c.setValue(valStr, dt);
+        }
+
         void removeColumn(const String& colName) {
             const char* target = colName.c_str();
             for (auto it = cells.begin(); it != cells.end(); ++it) {
@@ -148,62 +170,62 @@ namespace DbRuntime::Storage {
         }
 
         String getText(const char* colName, const char* fallback = "") const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->rawText : String(fallback);
         }
 
         const char* getRawText(const char* colName, const char* defaultVal = "") const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->rawText.c_str() : defaultVal;
         }
 
         int16_t getSmallInt(const char* colName, int16_t fallback = 0) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? static_cast<int16_t>(c->asInt64()) : fallback;
         }
 
         int32_t getInt(const char* colName, int32_t fallback = 0) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? static_cast<int32_t>(c->asInt64()) : fallback;
         }
 
         int64_t getBigInt(const char* colName, int64_t fallback = 0) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->asInt64() : fallback;
         }
 
         float getFloat(const char* colName, float fallback = 0.0f) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->asFloat() : fallback;
         }
 
         double getDouble(const char* colName, double fallback = 0.0) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->asDouble() : fallback;
         }
 
         bool getBool(const char* colName, bool fallback = false) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->asBool() : fallback;
         }
 
         RTOS::PgDate getDate(const char* colName, const char* fallback = "1970-01-01") const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return RTOS::PgDate((c && !c->isNull) ? c->rawText.c_str() : fallback);
         }
 
         RTOS::PgDateTime getDateTime(const char* colName, const char* fallback = "1970-01-01 00:00:00") const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return RTOS::PgDateTime((c && !c->isNull) ? c->rawText.c_str() : fallback);
         }
 
         int64_t getEpochSeconds(const char* colName, int64_t fallback = 0) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (c && !c->isNull) ? c->asInt64() : fallback;
         }
 
         bool isNull(const char* colName) const {
-            const PgCell* c = findCell(colName);
+            const PgCell* c = findCellCStr(colName);
             return (!c || c->isNull);
         }
 
@@ -230,14 +252,18 @@ namespace DbRuntime::Storage {
             return line;
         }
 
-        static PgTuple deserializeTsvFromCStr(const char* rawLine, const DbCommon::Engine::TablePhysicalSchema* schema = nullptr) {
-            PgTuple tuple;
-            if (!rawLine) return tuple;
+        static void deserializeTsvInto(
+            const char* rawLine,
+            const DbCommon::Engine::TablePhysicalSchema* schema,
+            PgTuple& tuple
+        ) {
+            tuple.clear();
+            if (!rawLine) return;
 
             while (*rawLine == ' ' || *rawLine == '\t' || *rawLine == '\r' || *rawLine == '\n') {
                 ++rawLine;
             }
-            if (*rawLine == '\0') return tuple;
+            if (*rawLine == '\0') return;
 
             if (schema) tuple.reserve(schema->columns.size());
 
@@ -251,7 +277,7 @@ namespace DbRuntime::Storage {
 
                 const char* eq = static_cast<const char*>(memchr(p, '=', static_cast<size_t>(endToken - p)));
                 if (eq != nullptr) {
-                    char colBuf[32];
+                    char colBuf[28];
                     size_t colLen = static_cast<size_t>(eq - p);
                     if (colLen >= sizeof(colBuf)) colLen = sizeof(colBuf) - 1;
                     memcpy(colBuf, p, colLen);
@@ -261,21 +287,36 @@ namespace DbRuntime::Storage {
                     size_t valLen = static_cast<size_t>(endToken - valStart);
                     String valStr = "";
                     if (valLen > 0) {
-                        valStr.reserve(valLen);
+                        if (valLen > 11) valStr.reserve(valLen);
                         valStr.concat(valStart, static_cast<unsigned int>(valLen));
                     }
 
                     PgDataType dt = PgDataType::TEXT;
                     if (schema) {
-                        const auto* colDef = schema->findColumn(colBuf);
-                        if (colDef) dt = colDef->dataType;
+                        const size_t idx = tuple.size();
+                        if (idx < schema->columns.size() &&
+                            strcasecmp(schema->columns[idx].columnName.c_str(), colBuf) == 0) {
+                            dt = schema->columns[idx].dataType;
+                        } else {
+                            for (const auto& colDef : schema->columns) {
+                                if (strcasecmp(colDef.columnName.c_str(), colBuf) == 0) {
+                                    dt = colDef.dataType;
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    tuple.set(colBuf, valStr, dt);
+                    tuple.appendParsedCell(colBuf, colLen, valStr, dt);
                 }
 
                 if (!tab) break;
                 p = tab + 1;
             }
+        }
+
+        static PgTuple deserializeTsvFromCStr(const char* rawLine, const DbCommon::Engine::TablePhysicalSchema* schema = nullptr) {
+            PgTuple tuple;
+            deserializeTsvInto(rawLine, schema, tuple);
             return tuple;
         }
 
@@ -322,7 +363,7 @@ namespace DbRuntime::Storage {
         };
 
         CellView operator[](const char* colName) const {
-            return CellView{ findCell(colName) };
+            return CellView{ findCellCStr(colName) };
         }
     };
 

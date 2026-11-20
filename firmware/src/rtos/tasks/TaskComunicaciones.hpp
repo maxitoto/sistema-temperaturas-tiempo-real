@@ -18,6 +18,7 @@ namespace RTOS::Tasks {
         inline static uint16_t mascaraAutenticadosPrevia = 0;
         inline static bool     serieConectadoPrevio      = false;
         inline static uint8_t  clientesWifiPrevios       = 0;
+        inline static uint32_t ultimoSonidoDesconexionMs = 0;
 
         static uint16_t calcularMascaraAutenticadosActual() {
             uint16_t m = 0;
@@ -61,9 +62,12 @@ namespace RTOS::Tasks {
                             static_cast<uint8_t>(CriticidadEvento::BAJA)
                         );
                     } else if (antes && !ahora) {
-                        if (!sonidoDesconexionEmitido) {
-                            encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+                        const uint32_t ahoraMs = millis();
+                        if (!sonidoDesconexionEmitido &&
+                            (ultimoSonidoDesconexionMs == 0 || (ahoraMs - ultimoSonidoDesconexionMs) >= 3000)) {
+                            encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);  
                             sonidoDesconexionEmitido = true;
+                            ultimoSonidoDesconexionMs = ahoraMs;
                         }
                         encolarAuditoria(
                             TipoRegistroDB::AUDITORIA_RED,
@@ -80,8 +84,11 @@ namespace RTOS::Tasks {
             }
 
             if (!sonidoDesconexionEmitido) {
-                if ((serieConectadoPrevio && !serieAhora) || (wifiAhora < clientesWifiPrevios)) {
+                const uint32_t ahoraMs = millis();
+                if (((serieConectadoPrevio && !serieAhora) || (wifiAhora < clientesWifiPrevios)) &&
+                    (ultimoSonidoDesconexionMs == 0 || (ahoraMs - ultimoSonidoDesconexionMs) >= 3000)) {
                     encolarSonido(TipoSonidoEvento::CLIENTE_DESCONECTADO);
+                    ultimoSonidoDesconexionMs = ahoraMs;
                 }
             }
 

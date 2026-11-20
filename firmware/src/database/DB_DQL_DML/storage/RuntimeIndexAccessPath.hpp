@@ -41,9 +41,16 @@ namespace DbRuntime::Storage {
         static constexpr size_t MAX_SELECT_ROWS_RAM = 32;
 
     private:
+        static constexpr size_t LINE_BUF_CAP = 1024;
+        static constexpr size_t IO_CHUNK_CAP = 512;
+
         std::map<String, int64_t> sequenceCounters;
         uint8_t batchDepth = 0;
         std::map<String, String> pendingBatchAppends;
+
+        // Buffers compartidos bajo lockEngine(): reemplazan los 3 static lineBuf[640] previos
+        char    lineBuf[LINE_BUF_CAP]{};
+        uint8_t ioChunk[IO_CHUNK_CAP]{};
 
         RuntimeStorageAndIndexManager() = default;
 
@@ -52,6 +59,20 @@ namespace DbRuntime::Storage {
             k.trim();
             k.toLowerCase();
             return k;
+        }
+
+        size_t readSingleLineAtOpenFile(File& f, uint32_t byteOffset) {
+            if (!f.seek(byteOffset)) return 0;
+            int n = f.read(reinterpret_cast<uint8_t*>(lineBuf), LINE_BUF_CAP - 1);
+            if (n <= 0) return 0;
+
+            const char* nl = static_cast<const char*>(memchr(lineBuf, '\n', static_cast<size_t>(n)));
+            size_t len = nl ? static_cast<size_t>(nl - lineBuf) : static_cast<size_t>(n);
+            while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
+                --len;
+            }
+            lineBuf[len] = '\0';
+            return len;
         }
 
         void recoverInterruptedTmpFile(const String& tableName) {
@@ -150,25 +171,46 @@ namespace DbRuntime::Storage {
 
             File f = SD.open(path.c_str(), FILE_READ);
             if (!f) return false;
-            if (!f.seek(byteOffset)) {
-                f.close();
-                return false;
-            }
 
-            static char lineBuf[640];
-            size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
+            const size_t len = readSingleLineAtOpenFile(f, byteOffset);
             f.close();
-
-            while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
-                --len;
-            }
-            lineBuf[len] = '\0';
             if (len == 0) return false;
 
-            outTuple = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
+            PgTuple::deserializeTsvInto(lineBuf, schema, outTuple);
             return true;
         }
 
+        // Lee una lista de offsets puntuales abriendo el archivo 1 sola vez y reutilizando 1 PgTuple
+        template <typename CallbackFn>
+        void forEachRowAtOffsets(const String& tableName, const uint32_t* offsets, size_t count, CallbackFn fn) {
+            if (!offsets || count == 0) return;
+
+            auto lk = lockEngine();
+            flushPendingBatchForTable(tableName);
+
+            TarjetaSD& sd = TarjetaSD::getInstance();
+            if (!sd.estaInicializada()) return;
+
+            auto& cat = DbNotRuntime::Engine::PhysicalSchemaCatalog::getInstance();
+            const auto* schema = cat.getTable(tableName);
+            String path = cat.tableDataFilePath(tableName);
+            if (!SD.exists(path.c_str())) return;
+
+            File f = SD.open(path.c_str(), FILE_READ);
+            if (!f) return;
+
+            PgTuple row;
+            if (schema) row.reserve(schema->columns.size());
+
+            for (size_t i = 0; i < count; ++i) {
+                if (readSingleLineAtOpenFile(f, offsets[i]) == 0) continue;
+                PgTuple::deserializeTsvInto(lineBuf, schema, row);
+                if (!fn(row)) break;
+            }
+            f.close();
+        }
+
+        // Escaneo secuencial en bloques de 512 B con 1 sola PgTuple reutilizada en RAM
         template <typename CallbackFn>
         void forEachRowStreaming(const String& tableName, CallbackFn fn) {
             auto lk = lockEngine();
@@ -185,27 +227,81 @@ namespace DbRuntime::Storage {
             File f = SD.open(path.c_str(), FILE_READ);
             if (!f) return;
 
-            static char lineBuf[640];
-            uint16_t iterCount = 0;
-            while (f.available()) {
-                uint32_t offset = static_cast<uint32_t>(f.position());
-                size_t len = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
-                while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
-                    --len;
-                }
-                lineBuf[len] = '\0';
-                if (len == 0) continue;
+            PgTuple row;
+            if (schema) row.reserve(schema->columns.size());
 
-                PgTuple row = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
-                if (++iterCount % 16 == 0) {
+            uint32_t currentFilePos  = 0;
+            uint32_t lineStartOffset = 0;
+            size_t   lineLen         = 0;
+            bool     skippingLong    = false;
+            bool     stopRequested   = false;
+            uint16_t iterCount       = 0;
+
+            auto dispatchLine = [&]() -> bool {
+                while (lineLen > 0 && (lineBuf[lineLen - 1] == '\r' || lineBuf[lineLen - 1] == ' ' || lineBuf[lineLen - 1] == '\t')) {
+                    --lineLen;
+                }
+                lineBuf[lineLen] = '\0';
+                if (lineLen == 0) return true;
+
+                PgTuple::deserializeTsvInto(lineBuf, schema, row);
+                if ((++iterCount & 63u) == 0) {
                     vTaskDelay(1);
                 }
-                if (!fn(row, offset)) break;
+                return fn(row, lineStartOffset);
+            };
+
+            while (!stopRequested) {
+                int bytesRead = f.read(ioChunk, IO_CHUNK_CAP);
+                if (bytesRead <= 0) break;
+
+                size_t pos = 0;
+                const size_t n = static_cast<size_t>(bytesRead);
+                while (pos < n && !stopRequested) {
+                    const uint8_t* nl = static_cast<const uint8_t*>(memchr(ioChunk + pos, '\n', n - pos));
+                    const size_t segEnd = nl ? static_cast<size_t>(nl - ioChunk) : n;
+                    const size_t segLen = segEnd - pos;
+
+                    if (lineLen == 0 && !skippingLong) {
+                        lineStartOffset = currentFilePos + static_cast<uint32_t>(pos);
+                    }
+
+                    if (!skippingLong && segLen > 0) {
+                        const size_t capLibre = (LINE_BUF_CAP - 1) - lineLen;
+                        if (segLen <= capLibre) {
+                            memcpy(lineBuf + lineLen, ioChunk + pos, segLen);
+                            lineLen += segLen;
+                        } else {
+                            if (capLibre > 0) {
+                                memcpy(lineBuf + lineLen, ioChunk + pos, capLibre);
+                                lineLen += capLibre;
+                            }
+                            skippingLong = true;
+                        }
+                    }
+
+                    if (nl != nullptr) {
+                        if (!dispatchLine()) {
+                            stopRequested = true;
+                        }
+                        lineLen      = 0;
+                        skippingLong = false;
+                        pos          = segEnd + 1;
+                    } else {
+                        pos = n;
+                    }
+                }
+                currentFilePos += static_cast<uint32_t>(n);
             }
+
+            if (!stopRequested && lineLen > 0) {
+                dispatchLine();
+            }
+
             f.close();
         }
 
-        // Reescribe una tabla línea por línea en streaming (1 sola PgTuple en RAM a la vez y alimentando al Watchdog)
+        // Reescribe una tabla línea por línea con lectura en bloques de 512 B y 1 sola PgTuple en RAM
         template <typename TransformFn>
         bool rewriteTableStreaming(const String& tableName, TransformFn fn) {
             auto lk = lockEngine();
@@ -230,28 +326,71 @@ namespace DbRuntime::Storage {
             if (SD.exists(path.c_str())) {
                 File fIn = SD.open(path.c_str(), FILE_READ);
                 if (fIn) {
-                    static char lineBuf[640];
-                    uint16_t iterCount = 0;
-                    while (fIn.available()) {
-                        size_t len = fIn.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
-                        while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ' || lineBuf[len - 1] == '\t')) {
-                            --len;
-                        }
-                        lineBuf[len] = '\0';
-                        if (len == 0) continue;
+                    PgTuple row;
+                    if (schema) row.reserve(schema->columns.size());
 
-                        PgTuple row = PgTuple::deserializeTsvFromCStr(lineBuf, schema);
+                    size_t   lineLen      = 0;
+                    bool     skippingLong = false;
+                    uint16_t iterCount    = 0;
+
+                    auto processLine = [&]() {
+                        while (lineLen > 0 && (lineBuf[lineLen - 1] == '\r' || lineBuf[lineLen - 1] == ' ' || lineBuf[lineLen - 1] == '\t')) {
+                            --lineLen;
+                        }
+                        lineBuf[lineLen] = '\0';
+                        if (lineLen == 0) return;
+
+                        PgTuple::deserializeTsvInto(lineBuf, schema, row);
                         if (fn(row)) {
                             String rowTsv = row.serializeTsv();
                             size_t expected = rowTsv.length();
                             if (expected > 0 && fOut.write(reinterpret_cast<const uint8_t*>(rowTsv.c_str()), expected) != expected) {
                                 writeOk = false;
-                                break;
                             }
                         }
-                        if (++iterCount % 16 == 0) {
+                        if ((++iterCount & 63u) == 0) {
                             vTaskDelay(1);
                         }
+                    };
+
+                    while (writeOk) {
+                        int bytesRead = fIn.read(ioChunk, IO_CHUNK_CAP);
+                        if (bytesRead <= 0) break;
+
+                        size_t pos = 0;
+                        const size_t n = static_cast<size_t>(bytesRead);
+                        while (pos < n && writeOk) {
+                            const uint8_t* nl = static_cast<const uint8_t*>(memchr(ioChunk + pos, '\n', n - pos));
+                            const size_t segEnd = nl ? static_cast<size_t>(nl - ioChunk) : n;
+                            const size_t segLen = segEnd - pos;
+
+                            if (!skippingLong && segLen > 0) {
+                                const size_t capLibre = (LINE_BUF_CAP - 1) - lineLen;
+                                if (segLen <= capLibre) {
+                                    memcpy(lineBuf + lineLen, ioChunk + pos, segLen);
+                                    lineLen += segLen;
+                                } else {
+                                    if (capLibre > 0) {
+                                        memcpy(lineBuf + lineLen, ioChunk + pos, capLibre);
+                                        lineLen += capLibre;
+                                    }
+                                    skippingLong = true;
+                                }
+                            }
+
+                            if (nl != nullptr) {
+                                processLine();
+                                lineLen      = 0;
+                                skippingLong = false;
+                                pos          = segEnd + 1;
+                            } else {
+                                pos = n;
+                            }
+                        }
+                    }
+
+                    if (writeOk && lineLen > 0) {
+                        processLine();
                     }
                     fIn.close();
                 }
@@ -288,7 +427,6 @@ namespace DbRuntime::Storage {
             return sd.anexarArchivo(path.c_str(), lineTsv.c_str());
         }
 
-        // Solo sincroniza el contador de secuencias (IDENTITY) sin guardar índices B-Tree en RAM
         bool rebuildIndexesForTable(const String& tableName) {
             auto lk = lockEngine();
             flushPendingBatchForTable(tableName);

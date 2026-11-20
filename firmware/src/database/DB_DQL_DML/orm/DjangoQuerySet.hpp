@@ -385,14 +385,17 @@ namespace DbRuntime::Orm {
         }
 
         // Ejecuta la consulta SELECT y mapea cada fila a un struct/DTO de C++ sin overhead dinámico.
+        // Mapea cada fila en streaming directo a TStruct sin acumular PgTuples en RAM
         template <typename TStruct>
         std::vector<TStruct> all_as(TStruct (*mapper)(const PgTuple&)) const {
-            std::vector<PgTuple> rows = all();
             std::vector<TStruct> out;
-            out.reserve(rows.size());
-            for (const auto& r : rows) {
-                out.push_back(mapper(r));
+            if (plan.limitCount > 0 && plan.limitCount <= 64) {
+                out.reserve(static_cast<size_t>(plan.limitCount));
             }
+            ModuloDQL::getInstance().executeSelectStreaming(plan, [&](const PgTuple& r) -> bool {
+                out.push_back(mapper(r));
+                return true;
+            });
             return out;
         }
 
@@ -429,8 +432,9 @@ namespace DbRuntime::Orm {
         }
 
         // Cuenta el total de filas que satisfacen el QuerySet (.count() en Django).
+        // Cuenta el total real de filas en streaming sin cargar tuplas en RAM
         size_t count() const {
-            return all().size();
+            return ModuloDQL::getInstance().executeCount(plan);
         }
 
         // Ejecuta un UPDATE determinista sobre las filas filtradas por este QuerySet.

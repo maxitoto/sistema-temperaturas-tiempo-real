@@ -198,22 +198,45 @@ namespace DbRuntime::Repositories {
         static bool verificarIntegridadReciente(uint16_t cantidad = 32) {
             asegurarCatalogo();
 
-            auto filas = AuditoriaAuth.objects()
-                                      .order_by("seq")
-                                      .limit(static_cast<int32_t>(cantidad))
-                                      .all_as<AuditoriaAuthDTO>(&RepoAuditoriaAuth::mapear);
+            auto q = AuditoriaAuth.objects()
+                                  .order_by("seq")
+                                  .limit(static_cast<int32_t>(cantidad));
 
-            for (size_t i = 0; i < filas.size(); ++i) {
-                const String esperado = calcularHmacEncadenado(filas[i]);
-                if (!esperado.equalsIgnoreCase(filas[i].hashRegistro.c_str())) {
-                    return false;
+            bool integra = true;
+            bool tienePrevio = false;
+            char prevHashRegistro[65]{};
+
+            DbRuntime::Engine::ModuloDQL::getInstance().executeSelectStreaming(
+                q.compiledPlan(),
+                [&](const PgTuple& fila) -> bool {
+                    AuditoriaAuthDTO actual = mapear(fila);
+                    const String esperado = calcularHmacEncadenado(actual);
+                    const size_t lenGuardado = strlen(actual.hashRegistro.c_str());
+
+                    // PgChar<64> almacena hasta 63 chars hex + '\0'; exigimos coincidencia exacta en los chars guardados
+                    if (lenGuardado < 63 ||
+                        strncasecmp(esperado.c_str(), actual.hashRegistro.c_str(), lenGuardado) != 0) {
+                        integra = false;
+                        return false;
+                    }
+
+                    if (tienePrevio &&
+                        strncasecmp(actual.hashPrevio.c_str(), prevHashRegistro, lenGuardado) != 0) {
+                        integra = false;
+                        return false;
+                    }
+
+                    strncpy(prevHashRegistro, actual.hashRegistro.c_str(), sizeof(prevHashRegistro) - 1);
+                    prevHashRegistro[sizeof(prevHashRegistro) - 1] = '\0';
+                    tienePrevio = true;
+                    return true;
                 }
-                if (i > 0 && strcmp(filas[i].hashPrevio.c_str(), filas[i - 1].hashRegistro.c_str()) != 0) {
-                    return false;
-                }
-            }
-            return true;
+            );
+
+            return integra;
         }
+
+
         static uint16_t purgarAnterioresA(int64_t timestampLimite) {
             asegurarCatalogo();
 
