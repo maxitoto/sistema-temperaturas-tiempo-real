@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Thermometer,
   RefreshCw,
   Sliders,
+  BellRing,
   Edit3,
   Trash2,
   PlusCircle,
@@ -11,6 +12,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
+  TrendingUp,
+  TrendingDown,
+  ListOrdered,
+  Loader2,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -29,8 +34,9 @@ import {
   inputLocalAEpochSegundos,
 } from "../lib/format";
 import { LABEL_ESTADO_SENSOR } from "../lib/labels";
+import { NumericInput } from "../components/ui/NumericInput";
+import { CalibrationWizardModal } from "../components/calibration/CalibrationWizardModal";
 import {
-  CalibracionAmbienteDTO,
   EstadoSensor,
   LecturaSensorCliente,
   PerfilSensorCliente,
@@ -41,45 +47,58 @@ import {
 } from "#types/rpc.types";
 
 const PAGE_SIZE_SENSO = 15;
+type ModoTablaSenso = "RECIENTES" | "PICOS_ALTOS" | "PICOS_BAJOS";
 
-export function SensoresView() {
+export function SensoresView({
+  macInicial,
+  onIrAConfigAmbiente,
+}: {
+  macInicial?: string;
+  onIrAConfigAmbiente?: () => void;
+}) {
   const { rol } = useAuth();
   const esAdmin = rol === RolUsuario.ADMIN;
 
   // Catálogo y selección
   const [sensores, setSensores] = useState<ResumenSensorCliente[]>([]);
   const [soloActivos, setSoloActivos] = useState(false);
-  const [macSeleccionada, setMacSeleccionada] = useState<string>("");
+  const [wizardAbierto, setWizardAbierto] = useState(false);
+  const [macSeleccionada, setMacSeleccionada] = useState<string>(
+    macInicial ? macInicial.toUpperCase() : ""
+  );
   const [perfil, setPerfil] = useState<PerfilSensorCliente | null>(null);
   const [statsSenso, setStatsSenso] =
     useState<ResumenEstadisticoSensoCliente | null>(null);
 
-  // Calibración ambiental global
-  const [ambiente, setAmbiente] = useState<CalibracionAmbienteDTO | null>(null);
-  const [formAmbiente, setFormAmbiente] = useState({
-    altura: 0,
-    presionAtmosferica: 1013.25,
-    tempCongelacionRef: 0,
-    tempEbullicionRef: 100,
-    activa: true,
-  });
+  // Estados de carga + tokens anti-race-condition (evita sensores "colados")
+  const [cargandoCatalogo, setCargandoCatalogo] = useState(false);
+  const [cargandoDetalle, setCargandoDetalle] = useState(false);
+  const [cargandoHistorial, setCargandoHistorial] = useState(false);
+  const [cargandoTabla, setCargandoTabla] = useState(false);
+  const [guardandoAccion, setGuardandoAccion] = useState<string | null>(null);
 
-  // Edición de metadatos y calibración del sensor (ADMIN)
+  const detalleReqRef = useRef(0);
+  const historialReqRef = useRef(0);
+  const tablaReqRef = useRef(0);
+
+  // Formularios separados (ADMIN): Metadatos | Umbrales TL/TH | Calibración 2P/Offset
   const [formMeta, setFormMeta] = useState({
     nombre: "",
     ubicacion: "",
     descripcion: "",
     activa: true,
   });
+  const [formUmbrales, setFormUmbrales] = useState({
+    umbralInf: -55,
+    umbralSup: 126,
+  });
   const [formCalib, setFormCalib] = useState({
-    umbralSup: 40,
-    umbralInf: 0,
-    errorSup: 0,
     errorInf: 0,
+    errorSup: 0,
     offset: 0,
   });
 
-  // Historial gráfico por MAC / Rango de fechas
+  // Historial gráfico por MAC / Rango de fechas (fragmentado)
   const [modoHistorial, setModoHistorial] = useState<"ULTIMOS" | "FECHAS">(
     "ULTIMOS"
   );
@@ -94,8 +113,10 @@ export function SensoresView() {
     []
   );
 
-  // Explorador paginado tabla Senso
+  // Explorador tabla Senso (Paginado + Picos altos/bajos)
   const [filtroIdSensorPag, setFiltroIdSensorPag] = useState<number>(0);
+  const [modoTablaSenso, setModoTablaSenso] =
+    useState<ModoTablaSenso>("RECIENTES");
   const [offsetSenso, setOffsetSenso] = useState<number>(0);
   const [filasSenso, setFilasSenso] = useState<SensoRowDTO[]>([]);
 
@@ -110,43 +131,52 @@ export function SensoresView() {
     fechaAInputLocal(new Date(Date.now() - 7 * 86400 * 1000))
   );
 
-  const cargarCatalogo = useCallback(async () => {
-    const [lista, amb] = await Promise.all([
-      safeRpc(
-        () => client.listarSensores(32, 0, soloActivos),
-        "listarSensores"
-      ),
-      safeRpc(
-        () => client.obtenerCalibracionAmbiente(),
-        "obtenerCalibracionAmbiente",
-        { silent: true }
-      ),
-    ]);
-    if (lista) {
-      setSensores(lista);
-      if (lista.length > 0 && !lista.some((s) => s.mac === macSeleccionada)) {
-        setMacSeleccionada(lista[0].mac);
+  useEffect(() => {
+    if (macInicial) {
+      setMacSeleccionada(macInicial.toUpperCase());
+    }
+  }, [macInicial]);
+
+  const cargarCatalogo = useCallback(
+    async (forzarSinCache = false) => {
+      setCargandoCatalogo(true);
+      if (forzarSinCache) {
+        await safeRpc(() => client.invalidarCache(), "invalidarCache", {
+          silent: true,
+        });
       }
-    }
-    if (amb) {
-      setAmbiente(amb);
-      setFormAmbiente({
-        altura: amb.altura,
-        presionAtmosferica: amb.presionAtmosferica,
-        tempCongelacionRef: amb.tempCongelacionRef,
-        tempEbullicionRef: amb.tempEbullicionRef,
-        activa: amb.activa,
-      });
-    }
-  }, [soloActivos, macSeleccionada]);
+      const lista = await safeRpc(
+        () => client.listarSensores(12, 0, soloActivos),
+        "listarSensores"
+      );
+      setCargandoCatalogo(false);
+      if (lista) {
+        setSensores(lista);
+        setMacSeleccionada((prev) => {
+          if (
+            prev &&
+            lista.some((s) => s.mac.toUpperCase() === prev.toUpperCase())
+          ) {
+            return prev;
+          }
+          return lista.length > 0 ? lista[0].mac.toUpperCase() : "";
+        });
+      }
+    },
+    [soloActivos]
+  );
 
   const cargarDetalleSensor = useCallback(async (mac: string) => {
+    const reqId = ++detalleReqRef.current;
     if (!mac) {
       setPerfil(null);
       setStatsSenso(null);
       setSerieHistorica([]);
+      setCargandoDetalle(false);
       return;
     }
+
+    setCargandoDetalle(true);
     const [det, st, hist] = await Promise.all([
       safeRpc(() => client.obtenerSensorPorMac(mac), "obtenerSensorPorMac"),
       safeRpc(
@@ -160,6 +190,10 @@ export function SensoresView() {
         { silent: true }
       ),
     ]);
+
+    if (reqId !== detalleReqRef.current) return;
+    setCargandoDetalle(false);
+
     if (det) {
       setPerfil(det);
       setFormMeta({
@@ -168,9 +202,11 @@ export function SensoresView() {
         descripcion: det.descripcion,
         activa: det.activa,
       });
-      setFormCalib({
+      setFormUmbrales({
         umbralSup: det.umbralSup,
         umbralInf: det.umbralInf,
+      });
+      setFormCalib({
         errorSup: det.errorSup,
         errorInf: det.errorInf,
         offset: det.offset,
@@ -181,62 +217,108 @@ export function SensoresView() {
     if (hist) setSerieHistorica([...hist].reverse());
   }, []);
 
-  const cargarTablaSenso = useCallback(async () => {
-    const rows = await safeRpc(
-      () =>
-        client.listarSensosPaginados({
-          idSensor: filtroIdSensorPag,
-          limiteRegistros: PAGE_SIZE_SENSO,
-          offsetRegistros: offsetSenso,
-        }),
-      "listarSensosPaginados"
-    );
-    if (rows) setFilasSenso(rows);
-  }, [filtroIdSensorPag, offsetSenso]);
+  const cargarTablaSenso = useCallback(
+    async (forzarSinCache = false) => {
+      const reqId = ++tablaReqRef.current;
+      setCargandoTabla(true);
+      if (forzarSinCache) {
+        await safeRpc(() => client.invalidarCache(), "invalidarCache", {
+          silent: true,
+        });
+      }
+
+      let rows: SensoRowDTO[] | null = null;
+      if (modoTablaSenso === "RECIENTES") {
+        rows = await safeRpc(
+          () =>
+            client.listarSensosPaginados({
+              idSensor: filtroIdSensorPag,
+              limiteRegistros: PAGE_SIZE_SENSO,
+              offsetRegistros: offsetSenso,
+            }),
+          "listarSensosPaginados"
+        );
+      } else {
+        rows = await safeRpc(
+          () =>
+            client.listarPicosSensos(
+              filtroIdSensorPag,
+              modoTablaSenso === "PICOS_ALTOS" ? "ALTOS" : "BAJOS",
+              PAGE_SIZE_SENSO,
+              320
+            ),
+          "listarPicosSensos"
+        );
+      }
+
+      if (reqId !== tablaReqRef.current) return;
+      setCargandoTabla(false);
+      if (rows) setFilasSenso(rows);
+    },
+    [filtroIdSensorPag, offsetSenso, modoTablaSenso]
+  );
 
   useEffect(() => {
-    cargarCatalogo();
+    void cargarCatalogo(false);
   }, [cargarCatalogo]);
 
   useEffect(() => {
     if (macSeleccionada) {
-      cargarDetalleSensor(macSeleccionada);
+      void cargarDetalleSensor(macSeleccionada);
     }
   }, [macSeleccionada, cargarDetalleSensor]);
 
   useEffect(() => {
-    cargarTablaSenso();
+    void cargarTablaSenso(false);
   }, [cargarTablaSenso]);
+
+  const aplicarAtajoRango = (horas: number) => {
+    const ahora = new Date();
+    setFechaHasta(fechaAInputLocal(ahora));
+    setFechaDesde(fechaAInputLocal(new Date(ahora.getTime() - horas * 3600 * 1000)));
+    setModoHistorial("FECHAS");
+    if (limiteHistorial < 64) setLimiteHistorial(128);
+  };
 
   const consultarHistorial = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!macSeleccionada) return;
+    const reqId = ++historialReqRef.current;
+    setCargandoHistorial(true);
+
     if (modoHistorial === "ULTIMOS") {
+      const lim = Math.max(1, Math.min(32, Math.round(limiteHistorial)));
       const res = await safeRpc(
-        () => client.obtenerCensosPorMac(macSeleccionada, limiteHistorial),
+        () => client.obtenerCensosPorMac(macSeleccionada, lim),
         "obtenerCensosPorMac"
       );
+      if (reqId !== historialReqRef.current) return;
+      setCargandoHistorial(false);
       if (res) setSerieHistorica([...res].reverse());
     } else {
-      const desde = inputLocalAEpochSegundos(fechaDesde);
-      const hasta = inputLocalAEpochSegundos(fechaHasta);
+      const desde = inputLocalAEpochSegundos(fechaDesde, false);
+      const hasta = inputLocalAEpochSegundos(fechaHasta, true);
+      const maxReg = Math.max(1, Math.min(320, Math.round(limiteHistorial)));
       const res = await safeRpc(
         () =>
-          client.obtenerCensosPorMacYFecha(
+          client.obtenerCensosPorMacYFechaFragmentado(
             macSeleccionada,
             desde,
             hasta,
-            limiteHistorial
+            maxReg
           ),
-        "obtenerCensosPorMacYFecha"
+        "obtenerCensosPorMacYFechaFragmentado"
       );
-      if (res) setSerieHistorica([...res].reverse());
+      if (reqId !== historialReqRef.current) return;
+      setCargandoHistorial(false);
+      if (res) setSerieHistorica(res);
     }
   };
 
   const guardarMetadatos = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!perfil) return;
+    setGuardandoAccion("META");
     const actualizado = await safeRpc(
       () =>
         client.actualizarMetadatosSensor(
@@ -249,38 +331,70 @@ export function SensoresView() {
       "actualizarMetadatosSensor",
       { mensajeExito: "Metadatos del sensor actualizados." }
     );
+    setGuardandoAccion(null);
     if (actualizado) {
       setPerfil(actualizado);
-      cargarCatalogo();
+      void cargarCatalogo(false);
     }
   };
 
-  const guardarCalibracion = async (e: React.FormEvent) => {
+  const guardarSoloUmbrales = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!perfil) return;
+    setGuardandoAccion("UMBRALES");
     const actualizado = await safeRpc(
       () =>
         client.actualizarCalibracionSensor(
           perfil.mac,
-          Number(formCalib.umbralSup),
-          Number(formCalib.umbralInf),
-          Number(formCalib.errorSup),
-          Number(formCalib.errorInf),
-          Number(formCalib.offset)
+          formUmbrales.umbralSup,
+          formUmbrales.umbralInf,
+          perfil.errorSup,
+          perfil.errorInf,
+          perfil.offset
         ),
       "actualizarCalibracionSensor",
-      { mensajeExito: "Calibración y umbrales aplicados en el ESP32." }
+      {
+        mensajeExito: `Umbrales de alarma actualizados (TL ${formUmbrales.umbralInf}°C / TH ${formUmbrales.umbralSup}°C).`,
+      }
     );
+    setGuardandoAccion(null);
     if (actualizado) {
       setPerfil(actualizado);
-      cargarCatalogo();
+      void cargarCatalogo(false);
+    }
+  };
+
+  const guardarSoloCalibracion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!perfil) return;
+    setGuardandoAccion("CALIB");
+    const actualizado = await safeRpc(
+      () =>
+        client.actualizarCalibracionSensor(
+          perfil.mac,
+          perfil.umbralSup,
+          perfil.umbralInf,
+          formCalib.errorSup,
+          formCalib.errorInf,
+          formCalib.offset
+        ),
+      "actualizarCalibracionSensor",
+      {
+        mensajeExito:
+          "Calibración de 2 puntos y offset aplicada sin modificar los umbrales de alarma.",
+      }
+    );
+    setGuardandoAccion(null);
+    if (actualizado) {
+      setPerfil(actualizado);
+      void cargarCatalogo(false);
     }
   };
 
   const eliminarSensor = async (mac: string) => {
     if (
       !window.confirm(
-        `¿Eliminar el sensor ${mac} y sus referencias del catálogo?`
+        `¿Desactivar el sensor ${mac} en el catálogo del sistema?`
       )
     ) {
       return;
@@ -288,45 +402,32 @@ export function SensoresView() {
     await safeRpc(
       () => client.eliminarSensorPorMac(mac),
       "eliminarSensorPorMac",
-      { mensajeExito: `Sensor ${mac} eliminado.` }
+      { mensajeExito: `Sensor ${mac} desactivado.` }
     );
-    if (macSeleccionada === mac) setMacSeleccionada("");
-    cargarCatalogo();
-  };
-
-  const guardarAmbiente = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const res = await safeRpc(
-      () =>
-        client.actualizarCalibracionAmbiente({
-          altura: Number(formAmbiente.altura),
-          presionAtmosferica: Number(formAmbiente.presionAtmosferica),
-          tempCongelacionRef: Number(formAmbiente.tempCongelacionRef),
-          tempEbullicionRef: Number(formAmbiente.tempEbullicionRef),
-          activa: formAmbiente.activa,
-        }),
-      "actualizarCalibracionAmbiente",
-      { mensajeExito: "Calibración ambiental global actualizada." }
-    );
-    if (res) setAmbiente(res);
+    if (macSeleccionada.toUpperCase() === mac.toUpperCase()) {
+      setMacSeleccionada("");
+    }
+    void cargarCatalogo(true);
   };
 
   const registrarSensoManual = async (e: React.FormEvent) => {
     e.preventDefault();
+    setGuardandoAccion("SENSO");
     const creado = await safeRpc(
       () =>
         client.crearSensoManual({
-          idSensor: Number(nuevoSenso.idSensor),
-          temperaturaCruda: Number(nuevoSenso.temperaturaCruda),
-          temperaturaCorregida: Number(nuevoSenso.temperaturaCorregida),
+          idSensor: Math.round(nuevoSenso.idSensor),
+          temperaturaCruda: nuevoSenso.temperaturaCruda,
+          temperaturaCorregida: nuevoSenso.temperaturaCorregida,
           estadoSensor: Number(nuevoSenso.estadoSensor) as EstadoSensor,
         }),
       "crearSensoManual",
       { mensajeExito: "Censo manual registrado en PostgreSQL embebido." }
     );
+    setGuardandoAccion(null);
     if (creado) {
-      cargarTablaSenso();
-      if (macSeleccionada) cargarDetalleSensor(macSeleccionada);
+      void cargarTablaSenso(false);
+      if (macSeleccionada) void cargarDetalleSensor(macSeleccionada);
     }
   };
 
@@ -336,11 +437,11 @@ export function SensoresView() {
       "eliminarSensoPorId",
       { mensajeExito: `Registro Senso #${idSenso} eliminado.` }
     );
-    cargarTablaSenso();
+    void cargarTablaSenso(false);
   };
 
   const purgarSensos = async () => {
-    const limiteSeg = inputLocalAEpochSegundos(fechaPurga);
+    const limiteSeg = inputLocalAEpochSegundos(fechaPurga, false);
     if (!limiteSeg) return;
     if (
       !window.confirm(
@@ -351,10 +452,12 @@ export function SensoresView() {
     }
     const eliminados = await safeRpc(
       () => client.purgarSensosAnterioresA(limiteSeg),
-      "purgarSensosAnterioresA"
+      "purgarSensosAnterioresA",
+      { mensajeExito: "Purga histórica completada." }
     );
     if (eliminados !== null) {
-      cargarTablaSenso();
+      setOffsetSenso(0);
+      void cargarTablaSenso(false);
     }
   };
 
@@ -373,8 +476,32 @@ export function SensoresView() {
             <h1 className="text-lg font-bold">
               Catálogo de Sensores DS18B20 ({sensores.length})
             </h1>
+            {cargandoCatalogo && (
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {esAdmin && sensores.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-solid btn-warning px-3 py-1.5 text-xs font-bold"
+                  onClick={() => setWizardAbierto(true)}
+                >
+                <Sliders className="h-3.5 w-3.5" />
+                Asistente de Calibración (Wizard)
+              </button>
+            )}
+            {onIrAConfigAmbiente && (
+              <button
+                type="button"
+                className="btn btn-outline px-2.5 py-1.5 text-xs"
+                onClick={onIrAConfigAmbiente}
+                title="La Calibración Ambiental Global ahora vive en Configuración"
+              > 
+                <Globe className="h-3.5 w-3.5 text-info" />
+                Calibración Ambiental Global
+              </button>
+            )}
             <label className="flex cursor-pointer items-center gap-1.5 text-xs">
               <input
                 type="checkbox"
@@ -384,10 +511,17 @@ export function SensoresView() {
               Solo activos
             </label>
             <button
+              type="button"
               className="btn btn-outline px-3 py-1.5 text-xs"
-              onClick={cargarCatalogo}
+              disabled={cargandoCatalogo}
+              onClick={() => {
+                void cargarCatalogo(true);
+                if (macSeleccionada) void cargarDetalleSensor(macSeleccionada);
+              }}
             >
-              <RefreshCw className="h-3.5 w-3.5" />
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${cargandoCatalogo ? "animate-spin" : ""}`}
+              />
               Actualizar
             </button>
           </div>
@@ -409,11 +543,12 @@ export function SensoresView() {
             </thead>
             <tbody className="divide-y divide-border">
               {sensores.map((s) => {
-                const seleccionado = s.mac === macSeleccionada;
+                const seleccionado =
+                  s.mac.toUpperCase() === macSeleccionada.toUpperCase();
                 return (
                   <tr
                     key={s.mac}
-                    onClick={() => setMacSeleccionada(s.mac)}
+                    onClick={() => setMacSeleccionada(s.mac.toUpperCase())}
                     className={`cursor-pointer transition-colors ${
                       seleccionado ? "bg-primary-light" : "hover:bg-secondary/40"
                     }`}
@@ -432,7 +567,9 @@ export function SensoresView() {
                       {s.umbralInf.toFixed(1)} / {s.umbralSup.toFixed(1)}
                     </td>
                     <td className="px-3 py-2 font-mono">
-                      {s.offset >= 0 ? `+${s.offset.toFixed(2)}` : s.offset.toFixed(2)}
+                      {s.offset >= 0
+                        ? `+${s.offset.toFixed(2)}`
+                        : s.offset.toFixed(2)}
                     </td>
                     <td className="px-3 py-2">
                       <span
@@ -452,8 +589,8 @@ export function SensoresView() {
                       >
                         <button
                           className="btn btn-icon btn-error"
-                          onClick={() => eliminarSensor(s.mac)}
-                          title="Eliminar sensor"
+                          onClick={() => void eliminarSensor(s.mac)}
+                          title="Desactivar sensor"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -468,7 +605,9 @@ export function SensoresView() {
                     colSpan={esAdmin ? 8 : 7}
                     className="px-3 py-6 text-center text-foreground-secondary"
                   >
-                    No hay sensores registrados en la base de datos.
+                    {cargandoCatalogo
+                      ? "Cargando catálogo de sensores..."
+                      : "No hay sensores registrados en la base de datos."}
                   </td>
                 </tr>
               )}
@@ -478,69 +617,91 @@ export function SensoresView() {
       </div>
 
       {/* Perfil, Estadísticas e Historial Gráfico del Sensor Seleccionado */}
-      {perfil && (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      {macSeleccionada && (
+        <div
+          className={`grid grid-cols-1 gap-4 transition-opacity xl:grid-cols-3 ${
+            cargandoDetalle ? "opacity-75" : "opacity-100"
+          }`}
+        >
           {/* Columna izquierda: Perfil y Estadísticas */}
           <div className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
-            <div>
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs text-primary">
-                  {perfil.mac}
-                </span>
-                <span className="rounded bg-secondary px-2 py-0.5 font-mono text-xs">
-                  ID #{perfil.idSensor}
-                </span>
-              </div>
-              <h2 className="mt-1 text-base font-bold">
-                {perfil.nombre || "Sensor DS18B20"}
-              </h2>
-              <p className="text-xs text-foreground-secondary">
-                {perfil.ubicacion || "Sin ubicación"} ·{" "}
-                {perfil.descripcion || "Sin descripción"}
-              </p>
-              <div className="mt-2 space-y-0.5 text-[11px] text-foreground-secondary">
-                <div>Creado: {perfil.fechaCreacion || "—"}</div>
-                <div>Modificado: {perfil.fechaModificacion || "—"}</div>
+            {perfil ? (
+              <>
                 <div>
-                  Puntos calib.: E_inf={perfil.errorInf.toFixed(2)}°C · E_sup=
-                  {perfil.errorSup.toFixed(2)}°C · Offset=
-                  {perfil.offset.toFixed(2)}°C
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-primary">
+                      {perfil.mac}
+                      {cargandoDetalle && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      )}
+                    </span>
+                    <span className="rounded bg-secondary px-2 py-0.5 font-mono text-xs">
+                      ID #{perfil.idSensor}
+                    </span>
+                  </div>
+                  <h2 className="mt-1 text-base font-bold">
+                    {perfil.nombre || "Sensor DS18B20"}
+                  </h2>
+                  <p className="text-xs text-foreground-secondary">
+                    {perfil.ubicacion || "Sin ubicación"} ·{" "}
+                    {perfil.descripcion || "Sin descripción"}
+                  </p>
+                  <div className="mt-2 space-y-0.5 text-[11px] text-foreground-secondary">
+                    <div>Creado: {perfil.fechaCreacion || "—"}</div>
+                    <div>Modificado: {perfil.fechaModificacion || "—"}</div>
+                    <div>
+                      Umbrales: TL={perfil.umbralInf.toFixed(1)}°C · TH=
+                      {perfil.umbralSup.toFixed(1)}°C
+                    </div>
+                    <div>
+                      Calibración: E_inf={perfil.errorInf.toFixed(2)}°C · E_sup=
+                      {perfil.errorSup.toFixed(2)}°C · Offset=
+                      {perfil.offset.toFixed(2)}°C
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
 
-            {statsSenso && (
-              <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
-                <div className="rounded-lg border border-border bg-background p-2.5">
-                  <div className="text-foreground-secondary">Total lecturas</div>
-                  <div className="text-base font-bold">
-                    {statsSenso.totalLecturas}
+                {statsSenso && (
+                  <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
+                    <div className="rounded-lg border border-border bg-background p-2.5">
+                      <div className="text-foreground-secondary">
+                        Total lecturas
+                      </div>
+                      <div className="text-base font-bold">
+                        {statsSenso.totalLecturas}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-2.5">
+                      <div className="text-foreground-secondary">Promedio</div>
+                      <div className="text-base font-bold text-primary">
+                        {statsSenso.totalLecturas > 0
+                          ? `${statsSenso.temperaturaPromedio.toFixed(2)} °C`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-2.5">
+                      <div className="text-foreground-secondary">Mínima</div>
+                      <div className="text-base font-bold text-info">
+                        {statsSenso.totalLecturas > 0
+                          ? `${statsSenso.temperaturaMinima.toFixed(2)} °C`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-background p-2.5">
+                      <div className="text-foreground-secondary">Máxima</div>
+                      <div className="text-base font-bold text-error">
+                        {statsSenso.totalLecturas > 0
+                          ? `${statsSenso.temperaturaMaxima.toFixed(2)} °C`
+                          : "—"}
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-lg border border-border bg-background p-2.5">
-                  <div className="text-foreground-secondary">Promedio</div>
-                  <div className="text-base font-bold text-primary">
-                    {statsSenso.totalLecturas > 0
-                      ? `${statsSenso.temperaturaPromedio.toFixed(2)} °C`
-                      : "—"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border bg-background p-2.5">
-                  <div className="text-foreground-secondary">Mínima</div>
-                  <div className="text-base font-bold text-info">
-                    {statsSenso.totalLecturas > 0
-                      ? `${statsSenso.temperaturaMinima.toFixed(2)} °C`
-                      : "—"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border bg-background p-2.5">
-                  <div className="text-foreground-secondary">Máxima</div>
-                  <div className="text-base font-bold text-error">
-                    {statsSenso.totalLecturas > 0
-                      ? `${statsSenso.temperaturaMaxima.toFixed(2)} °C`
-                      : "—"}
-                  </div>
-                </div>
+                )}
+              </>
+            ) : (
+              <div className="flex h-48 items-center justify-center gap-2 text-xs text-foreground-secondary">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                Cargando perfil del sensor {macSeleccionada}...
               </div>
             )}
           </div>
@@ -551,23 +712,28 @@ export function SensoresView() {
               <div className="flex items-center gap-2">
                 <History className="h-4 w-4 text-primary" />
                 <h3 className="text-sm font-bold">
-                  Curva Histórica de Censos ({perfil.mac})
+                  Curva Histórica de Censos ({perfil?.mac || macSeleccionada})
                 </h3>
+                <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">
+                  {serieHistorica.length} pts
+                </span>
               </div>
 
               <form
                 onSubmit={consultarHistorial}
-                className="flex flex-wrap items-center gap-2 text-xs"
+                className="flex flex-wrap items-center gap-1.5 text-xs"
               >
                 <select
                   value={modoHistorial}
-                  onChange={(e) =>
-                    setModoHistorial(e.target.value as "ULTIMOS" | "FECHAS")
-                  }
+                  onChange={(e) => {
+                    const modo = e.target.value as "ULTIMOS" | "FECHAS";
+                    setModoHistorial(modo);
+                    setLimiteHistorial(modo === "FECHAS" ? 128 : 32);
+                  }}
                   className="rounded border border-border bg-background px-2 py-1"
                 >
-                  <option value="ULTIMOS">Últimos N</option>
-                  <option value="FECHAS">Rango de fechas</option>
+                  <option value="ULTIMOS">Últimos N (máx 32)</option>
+                  <option value="FECHAS">Rango de fechas (fragmentado)</option>
                 </select>
 
                 {modoHistorial === "FECHAS" && (
@@ -587,27 +753,64 @@ export function SensoresView() {
                   </>
                 )}
 
-                <input
-                  type="number"
-                  min={1}
-                  max={32}
+                <NumericInput
                   value={limiteHistorial}
-                  onChange={(e) => setLimiteHistorial(Number(e.target.value))}
-                  className="w-16 rounded border border-border bg-background px-2 py-1"
-                  title="Límite (máx 32 por paquete)"
+                  onChange={setLimiteHistorial}
+                  decimals={0}
+                  allowNegative={false}
+                  min={1}
+                  max={modoHistorial === "FECHAS" ? 320 : 32}
+                  className="w-16 rounded border border-border bg-background px-2 py-1 font-mono"
+                  title={
+                    modoHistorial === "FECHAS"
+                      ? "Máximo de puntos (se consulta en bloques de 32)"
+                      : "Límite (máx 32)"
+                  }
                 />
 
                 <button
                   type="submit"
+                  disabled={cargandoHistorial}
                   className="btn btn-solid btn-primary px-3 py-1 text-xs"
                 >
-                  <Search className="h-3.5 w-3.5" />
+                  {cargandoHistorial ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Search className="h-3.5 w-3.5" />
+                  )}
                   Consultar
                 </button>
               </form>
             </div>
 
-            <div className="h-60 w-full rounded-lg border border-border bg-background p-2">
+            {modoHistorial === "FECHAS" && (
+              <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px] text-foreground-secondary">
+                <span>Atajos:</span>
+                {[
+                  { label: "Última 1h", h: 1 },
+                  { label: "Últimas 6h", h: 6 },
+                  { label: "Últimas 24h", h: 24 },
+                  { label: "Últimos 7 días", h: 168 },
+                ].map((it) => (
+                  <button
+                    key={it.label}
+                    type="button"
+                    onClick={() => aplicarAtajoRango(it.h)}
+                    className="rounded border border-border bg-secondary px-2 py-0.5 hover:border-primary"
+                  >
+                    {it.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="relative h-60 w-full rounded-lg border border-border bg-background p-2">
+              {(cargandoDetalle || cargandoHistorial) && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-lg bg-background/70 text-xs backdrop-blur-[1px]">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  Consultando historial en MicroSD...
+                </div>
+              )}
               {chartHistorico.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartHistorico}>
@@ -616,7 +819,11 @@ export function SensoresView() {
                       stroke="currentColor"
                       className="opacity-15"
                     />
-                    <XAxis dataKey="hora" tick={{ fontSize: 10 }} minTickGap={25} />
+                    <XAxis
+                      dataKey="hora"
+                      tick={{ fontSize: 10 }}
+                      minTickGap={25}
+                    />
                     <YAxis
                       domain={["auto", "auto"]}
                       tick={{ fontSize: 11 }}
@@ -636,7 +843,8 @@ export function SensoresView() {
                       dataKey="temp"
                       stroke="#10b981"
                       strokeWidth={2}
-                      dot={{ r: 2 }}
+                      dot={chartHistorico.length <= 40 ? { r: 2 } : false}
+                      isAnimationActive={false}
                       name="Temp. Corregida (°C)"
                     />
                   </LineChart>
@@ -651,289 +859,288 @@ export function SensoresView() {
         </div>
       )}
 
-      {/* Formularios Exclusivos ADMIN: Metadatos, Calibración 2 Puntos y Ambiente */}
+      {/* Formularios Exclusivos ADMIN: 3 tarjetas independientes (Metadatos | Umbrales | Calibración) */}
       {esAdmin && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          {/* Metadatos del sensor */}
+          {/* 1. Metadatos del sensor */}
           <form
             onSubmit={guardarMetadatos}
-            className="space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+            className="flex flex-col justify-between space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
           >
-            <div className="flex items-center gap-2 text-sm font-bold">
-              <Edit3 className="h-4 w-4 text-primary" />
-              Metadatos del Sensor {perfil ? `#${perfil.idSensor}` : ""}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <Edit3 className="h-4 w-4 text-primary" />
+                Metadatos del Sensor {perfil ? `#${perfil.idSensor}` : ""}
+              </div>
+              <div>
+                <label className="mb-1 block text-xs">Nombre</label>
+                <input
+                  type="text"
+                  maxLength={31}
+                  disabled={!perfil}
+                  value={formMeta.nombre}
+                  onChange={(e) =>
+                    setFormMeta({ ...formMeta, nombre: e.target.value })
+                  }
+                  className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs">Ubicación</label>
+                <input
+                  type="text"
+                  maxLength={31}
+                  disabled={!perfil}
+                  value={formMeta.ubicacion}
+                  onChange={(e) =>
+                    setFormMeta({ ...formMeta, ubicacion: e.target.value })
+                  }
+                  className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs">Descripción</label>
+                <input
+                  type="text"
+                  maxLength={127}
+                  disabled={!perfil}
+                  value={formMeta.descripcion}
+                  onChange={(e) =>
+                    setFormMeta({ ...formMeta, descripcion: e.target.value })
+                  }
+                  className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  disabled={!perfil}
+                  checked={formMeta.activa}
+                  onChange={(e) =>
+                    setFormMeta({ ...formMeta, activa: e.target.checked })
+                  }
+                />
+                Sensor habilitado para muestreo y alarmas
+              </label>
             </div>
-            <div>
-              <label className="mb-1 block text-xs">Nombre</label>
-              <input
-                type="text"
-                maxLength={31}
-                disabled={!perfil}
-                value={formMeta.nombre}
-                onChange={(e) =>
-                  setFormMeta({ ...formMeta, nombre: e.target.value })
-                }
-                className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs">Ubicación</label>
-              <input
-                type="text"
-                maxLength={31}
-                disabled={!perfil}
-                value={formMeta.ubicacion}
-                onChange={(e) =>
-                  setFormMeta({ ...formMeta, ubicacion: e.target.value })
-                }
-                className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs">Descripción</label>
-              <input
-                type="text"
-                maxLength={127}
-                disabled={!perfil}
-                value={formMeta.descripcion}
-                onChange={(e) =>
-                  setFormMeta({ ...formMeta, descripcion: e.target.value })
-                }
-                className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-xs"
-              />
-            </div>
-            <label className="flex items-center gap-2 text-xs">
-              <input
-                type="checkbox"
-                disabled={!perfil}
-                checked={formMeta.activa}
-                onChange={(e) =>
-                  setFormMeta({ ...formMeta, activa: e.target.checked })
-                }
-              />
-              Sensor habilitado para muestreo y alarmas
-            </label>
             <button
               type="submit"
-              disabled={!perfil}
+              disabled={!perfil || guardandoAccion === "META"}
               className="btn btn-solid btn-primary w-full text-xs font-semibold"
             >
+              {guardandoAccion === "META" && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
               Guardar Metadatos
             </button>
           </form>
 
-          {/* Calibración de 2 puntos + Umbrales */}
+          {/* 2. Umbrales de Alarma Térmica (SEPARADOS de la calibración) */}
           <form
-            onSubmit={guardarCalibracion}
-            className="space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+            onSubmit={guardarSoloUmbrales}
+            className="flex flex-col justify-between space-y-3 rounded-xl border border-alert-err-border/70 bg-card p-4 text-card-foreground shadow-xs"
           >
-            <div className="flex items-center gap-2 text-sm font-bold">
-              <Sliders className="h-4 w-4 text-warning" />
-              Calibración 2 Puntos y Umbrales
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <label className="mb-1 block">Umbral Inf. TL (°C)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  disabled={!perfil}
-                  value={formCalib.umbralInf}
-                  onChange={(e) =>
-                    setFormCalib({
-                      ...formCalib,
-                      umbralInf: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-sm font-bold text-alert-err-icon">
+                <BellRing className="h-4 w-4" />
+                Umbrales de Alarma (TL / TH)
               </div>
-              <div>
-                <label className="mb-1 block">Umbral Sup. TH (°C)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  disabled={!perfil}
-                  value={formCalib.umbralSup}
-                  onChange={(e) =>
-                    setFormCalib({
-                      ...formCalib,
-                      umbralSup: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
+              <p className="text-[11px] text-foreground-secondary">
+                Define el rango térmico seguro del producto. Si la temperatura
+                corregida sale de estos límites se activa la sirena y el LED.
+                No modifica la calibración del sensor.
+              </p>
+              <div className="grid grid-cols-2 gap-2.5 text-xs">
+                <div>
+                  <label className="mb-1 block font-medium">
+                    Mínimo TL (°C)
+                  </label>
+                  <NumericInput
+                    value={formUmbrales.umbralInf}
+                    onChange={(v) =>
+                      setFormUmbrales((p) => ({ ...p, umbralInf: v }))
+                    }
+                    decimals={2}
+                    min={-55}
+                    max={126}
+                    disabled={!perfil}
+                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block font-medium">
+                    Máximo TH (°C)
+                  </label>
+                  <NumericInput
+                    value={formUmbrales.umbralSup}
+                    onChange={(v) =>
+                      setFormUmbrales((p) => ({ ...p, umbralSup: v }))
+                    }
+                    decimals={2}
+                    min={-55}
+                    max={126}
+                    disabled={!perfil}
+                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="mb-1 block">Medición Hielo (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  disabled={!perfil}
-                  value={formCalib.errorInf}
-                  onChange={(e) =>
-                    setFormCalib({
-                      ...formCalib,
-                      errorInf: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block">Medición Ebullición (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  disabled={!perfil}
-                  value={formCalib.errorSup}
-                  onChange={(e) =>
-                    setFormCalib({
-                      ...formCalib,
-                      errorSup: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
-              </div>
-            </div>
-            <div className="text-xs">
-              <label className="mb-1 block">Offset lineal adicional (°C)</label>
-              <input
-                type="number"
-                step="0.01"
-                disabled={!perfil}
-                value={formCalib.offset}
-                onChange={(e) =>
-                  setFormCalib({
-                    ...formCalib,
-                    offset: Number(e.target.value),
-                  })
-                }
-                className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-              />
+              {formUmbrales.umbralInf > formUmbrales.umbralSup && (
+                <div className="rounded border border-alert-err-border bg-alert-err-bg px-2.5 py-1.5 text-[11px] text-alert-err-icon">
+                  El umbral inferior (TL) no puede superar al superior (TH).
+                </div>
+              )}
             </div>
             <button
               type="submit"
-              disabled={!perfil}
-              className="btn btn-solid btn-warning w-full text-xs font-semibold"
+              disabled={
+                !perfil ||
+                guardandoAccion === "UMBRALES" ||
+                formUmbrales.umbralInf > formUmbrales.umbralSup
+              }
+              className="btn btn-solid btn-error w-full text-xs font-semibold"
             >
-              Aplicar Calibración al Sensor
+              {guardandoAccion === "UMBRALES" && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
+              Guardar Umbrales de Alarma
             </button>
           </form>
 
-          {/* Calibración Ambiental Global */}
+          {/* 3. Calibración de Precisión (2 Puntos + Offset, SEPARADA de umbrales) */}
           <form
-            onSubmit={guardarAmbiente}
-            className="space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+            onSubmit={guardarSoloCalibracion}
+            className="flex flex-col justify-between space-y-3 rounded-xl border border-alert-warn-border/70 bg-card p-4 text-card-foreground shadow-xs"
           >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-bold">
-                <Globe className="h-4 w-4 text-info" />
-                Calibración Ambiental Global
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-sm font-bold text-warning">
+                <Sliders className="h-4 w-4" />
+                Calibración de Precisión (Manual)
               </div>
-              {ambiente && (
-                <span className="font-mono text-[10px] text-foreground-secondary">
-                  Mod: {formatearEpochSegundos(ambiente.fechaModificacion)}
-                </span>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <label className="mb-1 block">Altura s.n.m. (m)</label>
-                <input
-                  type="number"
-                  step="1"
-                  value={formAmbiente.altura}
-                  onChange={(e) =>
-                    setFormAmbiente({
-                      ...formAmbiente,
-                      altura: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
+              <p className="text-[11px] text-foreground-secondary">
+                Ajuste fino metrológico mediante puntos de hielo / ebullición u
+                offset lineal. Conserva los umbrales de alarma actuales.
+              </p>
+              <div className="grid grid-cols-2 gap-2.5 text-xs">
+                <div>
+                  <label className="mb-1 block">Medición Hielo (°C)</label>
+                  <NumericInput
+                    value={formCalib.errorInf}
+                    onChange={(v) =>
+                      setFormCalib((p) => ({ ...p, errorInf: v }))
+                    }
+                    decimals={2}
+                    min={-55}
+                    max={126}
+                    disabled={!perfil}
+                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block">Medición Ebullición (°C)</label>
+                  <NumericInput
+                    value={formCalib.errorSup}
+                    onChange={(v) =>
+                      setFormCalib((p) => ({ ...p, errorSup: v }))
+                    }
+                    decimals={2}
+                    min={-55}
+                    max={126}
+                    disabled={!perfil}
+                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="mb-1 block">Presión Atm. (hPa)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={formAmbiente.presionAtmosferica}
-                  onChange={(e) =>
-                    setFormAmbiente({
-                      ...formAmbiente,
-                      presionAtmosferica: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block">Ref. Congelación (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={formAmbiente.tempCongelacionRef}
-                  onChange={(e) =>
-                    setFormAmbiente({
-                      ...formAmbiente,
-                      tempCongelacionRef: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block">Ref. Ebullición (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={formAmbiente.tempEbullicionRef}
-                  onChange={(e) =>
-                    setFormAmbiente({
-                      ...formAmbiente,
-                      tempEbullicionRef: Number(e.target.value),
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono"
+              <div className="text-xs">
+                <label className="mb-1 block">Offset lineal adicional (°C)</label>
+                <NumericInput
+                  value={formCalib.offset}
+                  onChange={(v) => setFormCalib((p) => ({ ...p, offset: v }))}
+                  decimals={2}
+                  min={-20}
+                  max={20}
+                  disabled={!perfil}
+                  className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
                 />
               </div>
             </div>
-            <label className="flex items-center gap-2 text-xs">
-              <input
-                type="checkbox"
-                checked={formAmbiente.activa}
-                onChange={(e) =>
-                  setFormAmbiente({ ...formAmbiente, activa: e.target.checked })
-                }
-              />
-              Compensación barométrica activa
-            </label>
             <button
               type="submit"
-              className="btn btn-solid btn-info w-full text-xs font-semibold"
+              disabled={!perfil || guardandoAccion === "CALIB"}
+              className="btn btn-solid btn-warning w-full text-xs font-semibold"
             >
-              Guardar Parámetros Ambientales
+              {guardandoAccion === "CALIB" && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
+              Aplicar Calibración al Sensor
             </button>
           </form>
         </div>
       )}
 
-      {/* Explorador Paginado de la Tabla Senso (Cruda vs Corregida + Estado) */}
+      {/* Explorador Paginado + Picos de la Tabla Senso */}
       <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-bold">
-              Explorador de Tabla <code>Senso</code> (Temperatura Cruda vs.
-              Corregida)
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold">
+                Explorador de Tabla <code>Senso</code> (Cruda vs. Corregida)
+              </h2>
+              {cargandoTabla && (
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              )}
+            </div>
             <p className="text-xs text-foreground-secondary">
-              Registros almacenados en MicroSD con estado de diagnóstico DS18B20
+              {modoTablaSenso === "RECIENTES"
+                ? "Registros almacenados en MicroSD con paginación binaria"
+                : modoTablaSenso === "PICOS_ALTOS"
+                  ? "Top picos más altos detectados (sobre últimas 320 lecturas válidas)"
+                  : "Top picos más bajos detectados (sobre últimas 320 lecturas válidas)"}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex rounded-lg bg-secondary p-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setModoTablaSenso("RECIENTES");
+                  setOffsetSenso(0);
+                }}
+                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-semibold ${
+                  modoTablaSenso === "RECIENTES"
+                    ? "bg-card text-foreground shadow-xs"
+                    : "text-foreground-secondary hover:text-foreground"
+                }`}
+              >
+                <ListOrdered className="h-3.5 w-3.5" />
+                Recientes
+              </button>
+              <button
+                type="button"
+                onClick={() => setModoTablaSenso("PICOS_ALTOS")}
+                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-semibold ${
+                  modoTablaSenso === "PICOS_ALTOS"
+                    ? "bg-card text-error shadow-xs"
+                    : "text-foreground-secondary hover:text-foreground"
+                }`}
+              >
+                <TrendingUp className="h-3.5 w-3.5" />
+                Picos Altos
+              </button>
+              <button
+                type="button"
+                onClick={() => setModoTablaSenso("PICOS_BAJOS")}
+                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-semibold ${
+                  modoTablaSenso === "PICOS_BAJOS"
+                    ? "bg-card text-info shadow-xs"
+                    : "text-foreground-secondary hover:text-foreground"
+                }`}
+              >
+                <TrendingDown className="h-3.5 w-3.5" />
+                Picos Bajos
+              </button>
+            </div>
+
             <select
               value={filtroIdSensorPag}
               onChange={(e) => {
@@ -951,24 +1158,42 @@ export function SensoresView() {
             </select>
 
             <button
+              type="button"
               className="btn btn-outline px-2.5 py-1"
-              disabled={offsetSenso === 0}
-              onClick={() =>
-                setOffsetSenso((o) => Math.max(0, o - PAGE_SIZE_SENSO))
-              }
+              disabled={cargandoTabla}
+              onClick={() => void cargarTablaSenso(true)}
+              title="Recargar sin caché"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${cargandoTabla ? "animate-spin" : ""}`}
+              />
             </button>
-            <span className="font-mono">
-              Offset {offsetSenso} – {offsetSenso + filasSenso.length}
-            </span>
-            <button
-              className="btn btn-outline px-2.5 py-1"
-              disabled={filasSenso.length < PAGE_SIZE_SENSO}
-              onClick={() => setOffsetSenso((o) => o + PAGE_SIZE_SENSO)}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
+
+            {modoTablaSenso === "RECIENTES" && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-outline px-2.5 py-1"
+                  disabled={offsetSenso === 0 || cargandoTabla}
+                  onClick={() =>
+                    setOffsetSenso((o) => Math.max(0, o - PAGE_SIZE_SENSO))
+                  }
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <span className="font-mono">
+                  Offset {offsetSenso} – {offsetSenso + filasSenso.length}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-outline px-2.5 py-1"
+                  disabled={filasSenso.length < PAGE_SIZE_SENSO || cargandoTabla}
+                  onClick={() => setOffsetSenso((o) => o + PAGE_SIZE_SENSO)}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -981,46 +1206,40 @@ export function SensoresView() {
             >
               <div>
                 <label className="mb-1 block">ID Sensor</label>
-                <input
-                  type="number"
-                  min={1}
+                <NumericInput
                   value={nuevoSenso.idSensor}
-                  onChange={(e) =>
-                    setNuevoSenso({
-                      ...nuevoSenso,
-                      idSensor: Number(e.target.value),
-                    })
+                  onChange={(v) =>
+                    setNuevoSenso((p) => ({ ...p, idSensor: v }))
                   }
+                  decimals={0}
+                  allowNegative={false}
+                  min={1}
                   className="w-20 rounded border border-border bg-card px-2 py-1 font-mono"
                 />
               </div>
               <div>
                 <label className="mb-1 block">Cruda (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
+                <NumericInput
                   value={nuevoSenso.temperaturaCruda}
-                  onChange={(e) =>
-                    setNuevoSenso({
-                      ...nuevoSenso,
-                      temperaturaCruda: Number(e.target.value),
-                    })
+                  onChange={(v) =>
+                    setNuevoSenso((p) => ({ ...p, temperaturaCruda: v }))
                   }
+                  decimals={2}
+                  min={-55}
+                  max={126}
                   className="w-24 rounded border border-border bg-card px-2 py-1 font-mono"
                 />
               </div>
               <div>
                 <label className="mb-1 block">Corregida (°C)</label>
-                <input
-                  type="number"
-                  step="0.01"
+                <NumericInput
                   value={nuevoSenso.temperaturaCorregida}
-                  onChange={(e) =>
-                    setNuevoSenso({
-                      ...nuevoSenso,
-                      temperaturaCorregida: Number(e.target.value),
-                    })
+                  onChange={(v) =>
+                    setNuevoSenso((p) => ({ ...p, temperaturaCorregida: v }))
                   }
+                  decimals={2}
+                  min={-55}
+                  max={126}
                   className="w-24 rounded border border-border bg-card px-2 py-1 font-mono"
                 />
               </div>
@@ -1045,6 +1264,7 @@ export function SensoresView() {
               </div>
               <button
                 type="submit"
+                disabled={guardandoAccion === "SENSO"}
                 className="btn btn-solid btn-success px-3 py-1 text-xs font-semibold"
               >
                 <PlusCircle className="h-3.5 w-3.5" />
@@ -1064,7 +1284,7 @@ export function SensoresView() {
               </div>
               <button
                 type="button"
-                onClick={purgarSensos}
+                onClick={() => void purgarSensos()}
                 className="btn btn-solid btn-error px-3 py-1 text-xs font-semibold"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -1074,7 +1294,11 @@ export function SensoresView() {
           </div>
         )}
 
-        <div className="overflow-x-auto">
+        <div
+          className={`overflow-x-auto transition-opacity ${
+            cargandoTabla ? "opacity-55" : "opacity-100"
+          }`}
+        >
           <table className="w-full text-left text-xs">
             <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
               <tr>
@@ -1117,7 +1341,7 @@ export function SensoresView() {
                     <td className="px-3 py-2 text-right">
                       <button
                         className="btn btn-icon btn-error"
-                        onClick={() => eliminarSenso(row.idSenso)}
+                        onClick={() => void eliminarSenso(row.idSenso)}
                         title="Eliminar registro"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -1132,7 +1356,9 @@ export function SensoresView() {
                     colSpan={esAdmin ? 7 : 6}
                     className="px-3 py-6 text-center text-foreground-secondary"
                   >
-                    Sin registros en esta página.
+                    {cargandoTabla
+                      ? "Consultando registros en MicroSD..."
+                      : "Sin registros en esta vista."}
                   </td>
                 </tr>
               )}
@@ -1140,6 +1366,20 @@ export function SensoresView() {
           </table>
         </div>
       </div>
+      {esAdmin && (
+        <CalibrationWizardModal
+          open={wizardAbierto}
+          sensores={sensores}
+          macInicial={macSeleccionada}
+          onClose={() => setWizardAbierto(false)}
+          onIrAConfigAmbiente={onIrAConfigAmbiente}
+          onCompletado={() => {
+            void cargarCatalogo(true);
+            if (macSeleccionada) void cargarDetalleSensor(macSeleccionada);
+            void cargarTablaSenso(true);
+          }}
+        />
+      )}
     </div>
   );
 }

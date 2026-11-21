@@ -100,7 +100,7 @@ namespace RTOS::Tasks {
             ultimoGuardadoLoteDbMs   = millis();
 
             // Corre en Core 1 con chequeo ligero cada 200ms
-            return tarea.iniciarEnNucleo("TaskSensores", &ejecutarCiclo, 200, 4096, 3, 1);
+            return tarea.iniciarEnNucleo("TaskSensores", &ejecutarCiclo, 200, 6144, 3, 1);
         }
     };
 

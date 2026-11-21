@@ -18,9 +18,47 @@ export function fechaAInputLocal(date: Date): string {
   )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function inputLocalAEpochSegundos(value: string): number {
+export function inputLocalAEpochSegundos(
+  value: string,
+  finDeMinuto = false
+): number {
   if (!value) return 0;
-  return Math.floor(new Date(value).getTime() / 1000);
+  const ms = new Date(value).getTime();
+  if (!Number.isFinite(ms)) return 0;
+  const seg = Math.floor(ms / 1000);
+  // datetime-local sin segundos trunca a :00; para extremos "Hasta" incluimos todo ese minuto (:59)
+  return finDeMinuto && value.length <= 16 ? seg + 59 : seg;
+}
+
+export function redondearDecimal(valor: number, decimales = 2): number {
+  if (!Number.isFinite(valor)) return 0;
+  const factor = 10 ** decimales;
+  const r = Math.round((valor + Number.EPSILON) * factor) / factor;
+  return Object.is(r, -0) ? 0 : r;
+}
+
+export function formatearNumeroInput(valor: number, decimales = 2): string {
+  if (!Number.isFinite(valor)) return "";
+  const limpio = redondearDecimal(valor, decimales);
+  return String(limpio);
+}
+
+export function parsearNumeroInput(
+  raw: string,
+  decimales = 2
+): number | null {
+  const normalizado = raw.trim().replace(",", ".");
+  if (
+    normalizado === "" ||
+    normalizado === "-" ||
+    normalizado === "." ||
+    normalizado === "-."
+  ) {
+    return null;
+  }
+  const n = Number(normalizado);
+  if (!Number.isFinite(n)) return null;
+  return redondearDecimal(n, decimales);
 }
 
 export function inputLocalAFechaIsoSql(value: string): string {

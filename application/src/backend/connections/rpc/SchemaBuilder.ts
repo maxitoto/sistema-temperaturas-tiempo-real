@@ -93,8 +93,8 @@ export const T = {
     float: (): FieldCodec<number> => ({
         size: 4,
         align: 4,
-        encode: (v, b, o) => b.writeFloatLE(v ?? 0, o),
-        decode: (b, o) => b.readFloatLE(o)
+        encode: (v, b, o) => b.writeFloatLE(Number.isFinite(v) ? v : 0, o),
+        decode: (b, o) => limpiarFloat32(b.readFloatLE(o))
     }),
 
     double: (): FieldCodec<number> => ({
@@ -251,6 +251,12 @@ export function listOf<Item>(
             return this.deserialize(buf).items;
         }
     };
+}
+
+// Elimina ruido IEEE-754 al promover float32 del ESP32 a double de JS (ej. 0.8199999928 -> 0.82)
+export function limpiarFloat32(v: number): number {
+    if (!Number.isFinite(v) || v === 0) return 0;
+    return Number(v.toPrecision(7));
 }
 
 export type InferDTO<C> = C extends FieldCodec<infer U> ? U : never;

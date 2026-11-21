@@ -70,6 +70,19 @@ namespace DbRuntime::Repositories {
             return ok;
         }
 
+        static bool existePorMac(const char* macHex) {
+            if (!macHex || macHex[0] == '\0') return false;
+            bool existe = false;
+            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                if (strcasecmp(r.getCStr("mac"), macHex) == 0) {
+                    existe = true;
+                    return false;
+                }
+                return true;
+            });
+            return existe;
+        }
+
         static SensorDTO exigirPorId(int32_t idSensor) {
             SensorDTO s{};
             if (!obtenerPorId(idSensor, s)) {
@@ -112,7 +125,7 @@ namespace DbRuntime::Repositories {
             }
 
             SensorDTO dummy{};
-            if (obtenerPorMac(entrada.mac.c_str(), dummy)) {
+            if (existePorMac(entrada.mac.c_str())) {
                 throw std::runtime_error("UniqueViolation: ya existe un sensor con esa MAC");
             }
 
@@ -134,31 +147,48 @@ namespace DbRuntime::Repositories {
             return mapear(row.view());
         }
 
-        static SensorDTO registrarOAsegurarPorMac(
+        __attribute__((noinline))
+        static bool asegurarPorMacEnDestino(
             const char* macHex,
+            SensorDTO& outDto,
             const char* nombreInicial = "Sensor DS18B20",
             const char* ubicacionInicial = "Sin asignar"
         ) {
-            SensorDTO existente{};
-            if (obtenerPorMac(macHex, existente)) {
-                return existente;
+            if (obtenerPorMac(macHex, outDto)) {
+                return true;
             }
             if (!macHex || strlen(macHex) != 16) {
                 throw std::invalid_argument("ValueError: mac debe tener 16 caracteres hex");
             }
 
-            SensorDTO nuevo{};
-            nuevo.mac         = macHex;
-            nuevo.nombre      = nombreInicial ? nombreInicial : "Sensor DS18B20";
-            nuevo.ubicacion   = ubicacionInicial ? ubicacionInicial : "Sin asignar";
-            nuevo.descripcion = "";
-            nuevo.umbralSup   = 126.0f;
-            nuevo.umbralInf   = -55.0f;
-            nuevo.errorSup    = 0.0f;
-            nuevo.errorInf    = 0.0f;
-            nuevo.offset      = 0.0f;
-            nuevo.activa      = true;
-            return crearSensor(nuevo);
+            const auto* schema = asegurarEsquemaTabla(TABLA);
+            PgRowBuffer row(schema);
+            row.setText("mac",         macHex);
+            row.setText("nombre",      nombreInicial ? nombreInicial : "Sensor DS18B20");
+            row.setText("ubicacion",   ubicacionInicial ? ubicacionInicial : "Sin asignar");
+            row.setText("descripcion", "");
+            row.setFloat("umbral_sup", 126.0f);
+            row.setFloat("umbral_inf", -55.0f);
+            row.setFloat("error_sup",  0.0f);
+            row.setFloat("error_inf",  0.0f);
+            row.setFloat("offset",     0.0f);
+            row.setBool("activa",      true);
+
+            if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
+                throw std::runtime_error("IOError: no se pudo registrar el sensor");
+            }
+            outDto = mapear(row.view());
+            return true;
+        }
+
+        static SensorDTO registrarOAsegurarPorMac(
+            const char* macHex,
+            const char* nombreInicial = "Sensor DS18B20",
+            const char* ubicacionInicial = "Sin asignar"
+        ) {
+            SensorDTO out{};
+            asegurarPorMacEnDestino(macHex, out, nombreInicial, ubicacionInicial);
+            return out;
         }
 
         static SensorDTO actualizarMetadatosPorMac(

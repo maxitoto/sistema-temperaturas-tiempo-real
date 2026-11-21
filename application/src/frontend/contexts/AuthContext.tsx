@@ -3,6 +3,7 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { toast } from "react-toastify";
@@ -26,6 +27,7 @@ interface AuthContextValue {
   desconectarTransporte: () => Promise<void>;
   login: (usuarioInput: string, clavePlana: string) => Promise<void>;
   logout: () => Promise<void>;
+  registrarActividadSesion: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -41,6 +43,7 @@ const AuthContext = createContext<AuthContextValue>({
   desconectarTransporte: async () => {},
   login: async () => {},
   logout: async () => {},
+  registrarActividadSesion: () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -53,6 +56,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [rol, setRol] = useState<RolUsuario>(RolUsuario.NINGUNO);
   const [segundosRestantes, setSegundosRestantes] = useState(0);
 
+  const duracionSesionSegRef = useRef<number>(1800);
+  const ultimaActividadMsRef = useRef<number>(Date.now());
+  const ultimoResetThrottleMsRef = useRef<number>(0);
+
   const limpiarEstadoLocal = useCallback(() => {
     setMedioActivo("NINGUNO");
     setConectado(false);
@@ -61,6 +68,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUsuario("");
     setRol(RolUsuario.NINGUNO);
     setSegundosRestantes(0);
+  }, []);
+
+  const registrarActividadSesion = useCallback(() => {
+    const ahora = Date.now();
+    if (ahora - ultimoResetThrottleMsRef.current < 1500) {
+      return;
+    }
+    ultimoResetThrottleMsRef.current = ahora;
+    ultimaActividadMsRef.current = ahora;
+    setSegundosRestantes(duracionSesionSegRef.current);
   }, []);
 
   useEffect(() => {
@@ -76,24 +93,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })();
   }, [limpiarEstadoLocal]);
 
+  // Sesión deslizante: se renueva con interacción real del usuario o acciones RPC explícitas
   useEffect(() => {
-    if (!usuario || rol === RolUsuario.NINGUNO || segundosRestantes <= 0) {
+    if (!usuario || rol === RolUsuario.NINGUNO) {
       return;
     }
+
+    ultimaActividadMsRef.current = Date.now();
+    const onActividad = () => registrarActividadSesion();
+
+    window.addEventListener("pointerdown", onActividad, { passive: true });
+    window.addEventListener("keydown", onActividad, { passive: true });
+    window.addEventListener("wheel", onActividad, { passive: true });
+    window.addEventListener("rpc:actividad-usuario", onActividad);
+
     const id = window.setInterval(() => {
-      setSegundosRestantes((prev) => {
-        if (prev <= 1) {
-          window.clearInterval(id);
-          toast.warning("La sesión L2 ha expirado. Inicie sesión nuevamente.");
-          void client.cerrarSesion().catch(() => {});
-          limpiarEstadoLocal();
-          return 0;
-        }
-        return prev - 1;
-      });
+      const transcurridoSeg = Math.floor(
+        (Date.now() - ultimaActividadMsRef.current) / 1000
+      );
+      const restante = Math.max(
+        0,
+        duracionSesionSegRef.current - transcurridoSeg
+      );
+      setSegundosRestantes(restante);
+
+      if (restante <= 0) {
+        window.clearInterval(id);
+        toast.warning(
+          "La sesión L2 expiró por inactividad. Inicie sesión nuevamente."
+        );
+        void client.cerrarSesion().catch(() => {});
+        limpiarEstadoLocal();
+      }
     }, 1000);
-    return () => window.clearInterval(id);
-  }, [usuario, rol, segundosRestantes, limpiarEstadoLocal]);
+
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("pointerdown", onActividad);
+      window.removeEventListener("keydown", onActividad);
+      window.removeEventListener("wheel", onActividad);
+      window.removeEventListener("rpc:actividad-usuario", onActividad);
+    };
+  }, [usuario, rol, registrarActividadSesion, limpiarEstadoLocal]);
 
   const conectarSerie = async (rutaPuerto: string) => {
     try {
@@ -142,9 +183,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const sesion = await client.iniciarSesion(usuarioInput, clavePlana);
       const rolNum = sesion.rolAsignado as RolUsuario;
+      const ttl =
+        sesion.tiempoExpiracionSegundos > 0
+          ? sesion.tiempoExpiracionSegundos
+          : 1800;
+      duracionSesionSegRef.current = ttl;
+      ultimaActividadMsRef.current = Date.now();
       setUsuario(usuarioInput);
       setRol(rolNum);
-      setSegundosRestantes(sesion.tiempoExpiracionSegundos);
+      setSegundosRestantes(ttl);
       if (rolNum === RolUsuario.NINGUNO) {
         toast.warning(
           "Usuario autenticado sin rol asignado (NINGUNO). Solicite habilitación a un Administrador."
@@ -189,6 +236,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         desconectarTransporte,
         login,
         logout,
+        registrarActividadSesion,
       }}
     >
       {children}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import "../styles/index.css";
@@ -13,14 +13,46 @@ import { SensoresView } from "../views/SensoresView";
 import { DatabaseSqlView } from "../views/DatabaseSqlView";
 import { AuditoriasView } from "../views/AuditoriasView";
 import { UsuariosView } from "../views/UsuariosView";
-import { ConfiguracionView } from "../views/ConfiguracionView";
+import { InteractiveTour } from "../components/tour/InteractiveTour";
+import {
+  ConfiguracionView,
+  TabConfiguracion,
+} from "../views/ConfiguracionView";
 import { BiosHardwareView } from "../views/BiosHardwareView";
 import { RolUsuario } from "#types/rpc.types";
+
+export interface DestinoNavegacion {
+  vista: Vista;
+  sensorMac?: string;
+  configTab?: TabConfiguracion;
+}
 
 function Shell() {
   const { usuario, rol, conectado } = useAuth();
   const { theme } = useTheme();
   const [vista, setVista] = useState<Vista>("dashboard");
+  const [sensorMacInicial, setSensorMacInicial] = useState<string>("");
+  const [configTabInicial, setConfigTabInicial] =
+    useState<TabConfiguracion>("SISTEMA");
+  const [tourTrigger, setTourTrigger] = useState(0);
+
+  const navegarA = useCallback(
+    (destino: DestinoNavegacion) => {
+      if (destino.vista === "bios" && rol !== RolUsuario.ADMIN) return;
+      if (destino.sensorMac !== undefined) {
+        setSensorMacInicial(destino.sensorMac);
+      }
+      if (destino.configTab) {
+        setConfigTabInicial(
+          destino.configTab === "WIFI" && rol !== RolUsuario.ADMIN
+            ? "SISTEMA"
+            : destino.configTab
+        );
+      }
+      setVista(destino.vista);
+    },
+    [rol]
+  );
 
   if (!conectado || !usuario || rol === RolUsuario.NINGUNO) {
     return (
@@ -36,17 +68,26 @@ function Shell() {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <TopBar />
+      <TopBar onAbrirAyuda={() => setTourTrigger((n) => n + 1)} />
       <AlarmBanner />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar vista={vista} onVista={setVista} />
         <main className="flex-1 overflow-auto">
-          {vista === "dashboard" && <DashboardView />}
-          {vista === "sensores" && <SensoresView />}
+          {vista === "dashboard" && <DashboardView onNavegar={navegarA} />}
+          {vista === "sensores" && (
+            <SensoresView
+              macInicial={sensorMacInicial}
+              onIrAConfigAmbiente={() =>
+                navegarA({ vista: "configuracion", configTab: "AMBIENTE" })
+              }
+            />
+          )}
           {vista === "database" && <DatabaseSqlView />}
           {vista === "auditorias" && <AuditoriasView />}
           {vista === "usuarios" && <UsuariosView />}
-          {vista === "configuracion" && <ConfiguracionView />}
+          {vista === "configuracion" && (
+            <ConfiguracionView tabInicial={configTabInicial} />
+          )}
           {vista === "bios" && rol === RolUsuario.ADMIN && <BiosHardwareView />}
         </main>
       </div>
@@ -54,6 +95,7 @@ function Shell() {
         position="bottom-right"
         theme={theme === "dark" ? "dark" : "light"}
       />
+      <InteractiveTour vista={vista} rol={rol} triggerManual={tourTrigger} />
     </div>
   );
 }

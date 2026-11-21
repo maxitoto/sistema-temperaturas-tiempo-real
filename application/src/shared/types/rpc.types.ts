@@ -507,6 +507,7 @@ export interface ServiceClientAPI {
   obtenerMedioActivo(): Promise<MedioActivoCliente>;
   obtenerLogsVisor(): Promise<string[]>;
   limpiarLogsVisor(): Promise<void>;
+  invalidarCache(): Promise<void>;
   iniciarSesion(usuario: string, clavePlana: string): Promise<SesionIniciadaCliente>;
   cerrarSesion(): Promise<void>;
 
@@ -546,7 +547,19 @@ export interface ServiceClientAPI {
     timestampHasta: number,
     limiteRegistros?: number
   ): Promise<LecturaSensorCliente[]>;
+  obtenerCensosPorMacYFechaFragmentado(
+    macHex: string,
+    timestampDesde: number,
+    timestampHasta: number,
+    maxRegistros?: number
+  ): Promise<LecturaSensorCliente[]>;
   listarSensosPaginados(filtro: FiltroPaginadoSensoDTO): Promise<SensoRowDTO[]>;
+  listarPicosSensos(
+    idSensor: number,
+    orden: "ALTOS" | "BAJOS",
+    limite?: number,
+    maxMuestras?: number
+  ): Promise<SensoRowDTO[]>;
   obtenerEstadisticasSensores(): Promise<EstadisticasSensoresCliente>;
   obtenerEstadisticasSensoPorMac(mac: string): Promise<ResumenEstadisticoSensoCliente>;
   obtenerCalibracionAmbiente(): Promise<CalibracionAmbienteDTO>;

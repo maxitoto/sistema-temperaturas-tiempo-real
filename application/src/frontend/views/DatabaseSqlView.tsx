@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Database,
   Play,
@@ -12,6 +12,7 @@ import {
   Clock,
   Sparkles,
   Layers,
+  Loader2,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { client, safeRpc } from "../lib/service";
@@ -26,6 +27,8 @@ import {
 
 const SQL_PRESETS: Array<{ label: string; sql: string }> = [
   { label: "SHOW TABLES", sql: "SHOW TABLES;" },
+  { label: "\\d Senso", sql: "\\d Senso;" },
+  { label: "COUNT(*) Senso", sql: "SELECT COUNT(*) FROM Senso;" },
   { label: "SELECT Sensor", sql: "SELECT * FROM Sensor LIMIT 10;" },
   {
     label: "SELECT Senso (últimos 12)",
@@ -44,26 +47,18 @@ const SQL_PRESETS: Array<{ label: string; sql: string }> = [
     sql: "INSERT INTO LaboratorioPrueba (nombre, temp) VALUES ('Heladera Vacunas', 4.25);",
   },
   {
-    label: "SELECT Prueba",
-    sql: "SELECT * FROM LaboratorioPrueba;",
-  },
-  {
-    label: "ALTER TABLE Prueba",
-    sql: "ALTER TABLE LaboratorioPrueba ADD COLUMN observacion VARCHAR(48);",
-  },
-  {
     label: "DROP TABLE Prueba",
     sql: "DROP TABLE IF EXISTS LaboratorioPrueba;",
   },
 ];
 
-// Geometría determinística para el grafo visual ER sin dependencias externas
-const ER_COLS = 3;
-const CARD_W = 236;
-const CARD_H = 104;
-const GAP_X = 64;
-const GAP_Y = 54;
-const PAD = 24;
+// Geometría compacta: 4 columnas x 3 filas (~756x268 px) visible completa sin scroll
+const ER_COLS = 4;
+const CARD_W = 168;
+const CARD_H = 68;
+const GAP_X = 20;
+const GAP_Y = 20;
+const PAD = 12;
 
 interface PosicionNodo {
   x: number;
@@ -81,7 +76,9 @@ export function DatabaseSqlView() {
   );
   const [tablaSeleccionada, setTablaSeleccionada] = useState<string>("");
   const [columnas, setColumnas] = useState<ColumnaEstructuraDTO[]>([]);
+  const [cargandoEstructura, setCargandoEstructura] = useState(false);
   const [cargandoColumnas, setCargandoColumnas] = useState(false);
+  const colsReqRef = useRef(0);
 
   // Estado Terminal SQL (Solo ADMIN)
   const [sqlInput, setSqlInput] = useState<string>("SHOW TABLES;");
@@ -90,24 +87,29 @@ export function DatabaseSqlView() {
     useState<ResultadoSqlTerminalDTO | null>(null);
   const [historialComandos, setHistorialComandos] = useState<string[]>([]);
 
-  const cargarEstructura = useCallback(async () => {
+  const cargarEstructura = useCallback(async (forzarSinCache = false) => {
+    setCargandoEstructura(true);
+    if (forzarSinCache) {
+      await safeRpc(() => client.invalidarCache(), "invalidarCache", {
+        silent: true,
+      });
+    }
     const est = await safeRpc(
       () => client.obtenerEstructuraBaseDatos(),
       "obtenerEstructuraBaseDatos"
     );
+    setCargandoEstructura(false);
     if (est) {
       setEstructura(est);
-      if (
-        est.tablas.length > 0 &&
-        (!tablaSeleccionada ||
-          !est.tablas.some((t) => t.nombreTabla === tablaSeleccionada))
-      ) {
-        setTablaSeleccionada(est.tablas[0].nombreTabla);
-      }
+      setTablaSeleccionada((prev) => {
+        if (prev && est.tablas.some((t) => t.nombreTabla === prev)) return prev;
+        return est.tablas.length > 0 ? est.tablas[0].nombreTabla : "";
+      });
     }
-  }, [tablaSeleccionada]);
+  }, []);
 
   const cargarColumnas = useCallback(async (nombreTabla: string) => {
+    const reqId = ++colsReqRef.current;
     if (!nombreTabla) {
       setColumnas([]);
       return;
@@ -117,17 +119,18 @@ export function DatabaseSqlView() {
       () => client.obtenerColumnasTablaEstructura(nombreTabla),
       "obtenerColumnasTablaEstructura"
     );
+    if (reqId !== colsReqRef.current) return;
     setCargandoColumnas(false);
     if (cols) setColumnas(cols);
   }, []);
 
   useEffect(() => {
-    cargarEstructura();
+    void cargarEstructura(false);
   }, [cargarEstructura]);
 
   useEffect(() => {
     if (tablaSeleccionada) {
-      cargarColumnas(tablaSeleccionada);
+      void cargarColumnas(tablaSeleccionada);
     }
   }, [tablaSeleccionada, cargarColumnas]);
 
@@ -152,7 +155,7 @@ export function DatabaseSqlView() {
           cmdUpper.includes("ALTER") ||
           cmdUpper.includes("DROP")
         ) {
-          await cargarEstructura();
+          await cargarEstructura(true);
           if (tablaSeleccionada) {
             await cargarColumnas(tablaSeleccionada);
           }
@@ -168,7 +171,6 @@ export function DatabaseSqlView() {
     }
   };
 
-  // Cálculo de coordenadas del Grafo ER
   const layoutEr = useMemo(() => {
     const tablas = estructura?.tablas ?? [];
     const posiciones: Record<string, PosicionNodo> = {};
@@ -208,18 +210,18 @@ export function DatabaseSqlView() {
   return (
     <div className="space-y-4 p-4">
       {/* Encabezado del Módulo */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3.5 text-card-foreground shadow-xs">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-light text-primary">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-light text-primary">
             <Database className="h-5 w-5" />
           </div>
           <div>
-            <h1 className="text-lg font-bold">
+            <h1 className="text-base font-bold">
               SGBD PostgreSQL Embebido · Esquema Relacional y Terminal SQL
             </h1>
             <p className="text-xs text-foreground-secondary">
               {estructura
-                ? `${estructura.totalTablas} tablas · ${estructura.totalRelacionesFk} claves foráneas · ${estructura.totalEnums} tipos ENUM en MicroSD`
+                ? `${estructura.totalTablas} tablas binarias (.pgb) · ${estructura.totalRelacionesFk} claves foráneas · ${estructura.totalEnums} tipos ENUM`
                 : "Cargando catálogo relacional desde el ESP32..."}
             </p>
           </div>
@@ -228,44 +230,44 @@ export function DatabaseSqlView() {
         <button
           type="button"
           className="btn btn-outline px-3 py-1.5 text-xs"
+          disabled={cargandoEstructura}
           onClick={() => {
-            void cargarEstructura();
+            void cargarEstructura(true);
             if (tablaSeleccionada) void cargarColumnas(tablaSeleccionada);
           }}
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+          <RefreshCw
+            className={`h-3.5 w-3.5 ${cargandoEstructura ? "animate-spin" : ""}`}
+          />
           Sincronizar Esquema
         </button>
       </div>
 
-      {/* Sub-vista 1: Grafo ER Interactivo + Inspector de Columnas */}
+      {/* Sub-vista 1: Grafo ER Compacto + Inspector Delgado */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         {/* Lienzo Visual ER (8 cols) */}
-        <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-8">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="rounded-xl border border-border bg-card p-3.5 text-card-foreground shadow-xs xl:col-span-8">
+          <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Layers className="h-4 w-4 text-primary" />
               <h2 className="text-sm font-bold">
-                Diagrama Entidad-Relación (Haga clic en una tabla para
-                inspeccionar)
+                Diagrama Entidad-Relación (clic en una tabla)
               </h2>
             </div>
             <div className="flex items-center gap-3 text-[11px] text-foreground-secondary">
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs bg-primary" /> Tabla
-                seleccionada
+                <span className="h-2 w-2 rounded-xs bg-primary" /> Seleccionada
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs bg-info" /> Relación FK
-                vinculada
+                <span className="h-2 w-2 rounded-xs bg-info" /> Relación FK
               </span>
             </div>
           </div>
 
-          <div className="overflow-auto rounded-lg border border-border bg-background">
+          <div className="overflow-x-auto rounded-lg border border-border bg-background">
             {estructura && estructura.tablas.length > 0 ? (
               <div
-                className="relative"
+                className="relative mx-auto"
                 style={{
                   width: `${layoutEr.width}px`,
                   height: `${layoutEr.height}px`,
@@ -280,27 +282,27 @@ export function DatabaseSqlView() {
                   <defs>
                     <marker
                       id="fk-arrow"
-                      markerWidth="8"
-                      markerHeight="8"
-                      refX="7"
-                      refY="4"
+                      markerWidth="7"
+                      markerHeight="7"
+                      refX="6"
+                      refY="3.5"
                       orient="auto"
                     >
                       <path
-                        d="M0,1 L7,4 L0,7 Z"
+                        d="M0,1 L6,3.5 L0,6 Z"
                         fill="currentColor"
                         className="text-foreground-secondary/60"
                       />
                     </marker>
                     <marker
                       id="fk-arrow-active"
-                      markerWidth="9"
-                      markerHeight="9"
-                      refX="8"
-                      refY="4.5"
+                      markerWidth="8"
+                      markerHeight="8"
+                      refX="7"
+                      refY="4"
                       orient="auto"
                     >
-                      <path d="M0,1 L8,4.5 L0,8 Z" fill="var(--info)" />
+                      <path d="M0,1 L7,4 L0,7 Z" fill="var(--info)" />
                     </marker>
                   </defs>
 
@@ -314,32 +316,6 @@ export function DatabaseSqlView() {
                         fk.tablaOrigen === tablaSeleccionada ||
                         fk.tablaDestino === tablaSeleccionada;
 
-                      // Auto-referencia (FK a la misma tabla)
-                      if (fk.tablaOrigen === fk.tablaDestino) {
-                        const sx = src.x + CARD_W;
-                        const sy = src.y + 26;
-                        const ex = src.x + CARD_W - 24;
-                        const ey = src.y;
-                        const d = `M ${sx} ${sy} C ${sx + 38} ${sy}, ${ex} ${ey - 38}, ${ex} ${ey}`;
-                        return (
-                          <path
-                            key={`${fk.tablaOrigen}-${fk.columnaOrigen}-${idx}`}
-                            d={d}
-                            fill="none"
-                            stroke={
-                              vinculada ? "var(--info)" : "var(--border)"
-                            }
-                            strokeWidth={vinculada ? 2.2 : 1.4}
-                            markerEnd={
-                              vinculada
-                                ? "url(#fk-arrow-active)"
-                                : "url(#fk-arrow)"
-                            }
-                          />
-                        );
-                      }
-
-                      // Puntos de anclaje en los bordes más cercanos
                       const dx = dst.cx - src.cx;
                       const dy = dst.cy - src.cy;
                       let x1 = src.cx;
@@ -363,52 +339,25 @@ export function DatabaseSqlView() {
                           : `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
 
                       return (
-                        <g key={`${fk.tablaOrigen}-${fk.columnaOrigen}-${idx}`}>
-                          <path
-                            d={d}
-                            fill="none"
-                            stroke={
-                              vinculada ? "var(--info)" : "var(--border)"
-                            }
-                            strokeWidth={vinculada ? 2.4 : 1.4}
-                            strokeDasharray={vinculada ? undefined : "4 3"}
-                            markerEnd={
-                              vinculada
-                                ? "url(#fk-arrow-active)"
-                                : "url(#fk-arrow)"
-                            }
-                          />
-                          {vinculada && (
-                            <g transform={`translate(${mx}, ${my})`}>
-                              <rect
-                                x={-58}
-                                y={-10}
-                                width={116}
-                                height={20}
-                                rx={4}
-                                fill="var(--card)"
-                                stroke="var(--info)"
-                                strokeWidth={1}
-                              />
-                              <text
-                                x={0}
-                                y={3}
-                                textAnchor="middle"
-                                fontSize={9}
-                                fontFamily="monospace"
-                                fill="var(--foreground)"
-                              >
-                                {fk.columnaOrigen} → {fk.columnaDestino}
-                              </text>
-                            </g>
-                          )}
-                        </g>
+                        <path
+                          key={`${fk.tablaOrigen}-${fk.columnaOrigen}-${idx}`}
+                          d={d}
+                          fill="none"
+                          stroke={vinculada ? "var(--info)" : "var(--border)"}
+                          strokeWidth={vinculada ? 2.2 : 1.2}
+                          strokeDasharray={vinculada ? undefined : "3 3"}
+                          markerEnd={
+                            vinculada
+                              ? "url(#fk-arrow-active)"
+                              : "url(#fk-arrow)"
+                          }
+                        />
                       );
                     }
                   )}
                 </svg>
 
-                {/* Tarjetas de Tablas */}
+                {/* Tarjetas Compactas de Tablas */}
                 {estructura.tablas.map((t: NodoTablaEstructuraDTO) => {
                   const pos = layoutEr.posiciones[t.nombreTabla];
                   if (!pos) return null;
@@ -427,43 +376,43 @@ export function DatabaseSqlView() {
                         width: `${CARD_W}px`,
                         height: `${CARD_H}px`,
                       }}
-                      className={`absolute z-10 flex flex-col justify-between rounded-lg border p-3 text-left transition-all ${
+                      className={`absolute z-10 flex flex-col justify-between rounded-md border px-2 py-1.5 text-left transition-all ${
                         seleccionada
-                          ? "border-primary bg-primary-light shadow-md ring-2 ring-primary/40"
+                          ? "border-primary bg-primary-light shadow-sm ring-1 ring-primary/50"
                           : relacionada
-                            ? "border-info bg-info-light/60 shadow-xs"
+                            ? "border-info bg-info-light/60"
                             : "border-border bg-card hover:border-primary/50"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1.5">
-                        <span className="flex items-center gap-1.5 truncate font-mono text-xs font-bold text-foreground">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="flex items-center gap-1 truncate font-mono text-[11px] font-bold text-foreground">
                           <Table2
-                            className={`h-3.5 w-3.5 shrink-0 ${
+                            className={`h-3 w-3 shrink-0 ${
                               seleccionada ? "text-primary" : "text-info"
                             }`}
                           />
-                          {t.nombreTabla}
+                          <span className="truncate">{t.nombreTabla}</span>
                         </span>
-                        <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">
-                          {t.totalColumnas} cols
+                        <span className="shrink-0 rounded bg-secondary px-1 py-0.2 font-mono text-[9px]">
+                          {t.totalColumnas}c
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-1.5 truncate rounded bg-background/80 px-2 py-1 font-mono text-[11px]">
-                        <KeyRound className="h-3 w-3 shrink-0 text-warning" />
+                      <div className="flex items-center gap-1 truncate rounded bg-background/80 px-1.5 py-0.5 font-mono text-[10px]">
+                        <KeyRound className="h-2.5 w-2.5 shrink-0 text-warning" />
                         <span className="truncate">
                           {t.pkColumna || "sin PK"}
                         </span>
                       </div>
 
-                      <div className="flex items-center justify-between text-[10px] text-foreground-secondary">
-                        <span>Índices: {t.totalIndices}</span>
+                      <div className="flex items-center justify-between text-[9px] text-foreground-secondary">
+                        <span>Idx: {t.totalIndices}</span>
                         <span>
                           {seleccionada
-                            ? "Inspeccionando"
+                            ? "Activa"
                             : relacionada
-                              ? "Vinculada por FK"
-                              : "Ver columnas"}
+                              ? "FK"
+                              : "Ver"}
                         </span>
                       </div>
                     </button>
@@ -471,28 +420,33 @@ export function DatabaseSqlView() {
                 })}
               </div>
             ) : (
-              <div className="p-8 text-center text-xs text-foreground-secondary">
-                No se pudo cargar la estructura relacional del SGBD.
+              <div className="flex items-center justify-center gap-2 p-8 text-xs text-foreground-secondary">
+                {cargandoEstructura && (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                )}
+                {cargandoEstructura
+                  ? "Leyendo esquema pg_catalog..."
+                  : "No se pudo cargar la estructura relacional del SGBD."}
               </div>
             )}
           </div>
 
           {/* Lista compacta de Claves Foráneas */}
           {estructura && estructura.relacionesFk.length > 0 && (
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px]">
               <span className="inline-flex items-center gap-1 font-semibold text-foreground-secondary">
-                <Link2 className="h-3.5 w-3.5" />
-                Claves Foráneas:
+                <Link2 className="h-3 w-3" />
+                FKs:
               </span>
               {estructura.relacionesFk.map((fk, idx) => (
                 <button
                   key={idx}
                   type="button"
                   onClick={() => setTablaSeleccionada(fk.tablaOrigen)}
-                  className={`rounded border px-2 py-0.5 font-mono transition-colors ${
+                  className={`rounded border px-1.5 py-0.5 font-mono transition-colors ${
                     fk.tablaOrigen === tablaSeleccionada ||
                     fk.tablaDestino === tablaSeleccionada
-                      ? "border-info bg-info-light text-foreground font-semibold"
+                      ? "border-info bg-info-light font-semibold text-foreground"
                       : "border-border bg-background text-foreground-secondary hover:text-foreground"
                   }`}
                 >
@@ -504,26 +458,30 @@ export function DatabaseSqlView() {
           )}
         </div>
 
-        {/* Inspector de Columnas de la Tabla Seleccionada (4 cols) */}
-        <div className="flex flex-col rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-4">
-          <div className="mb-3 flex items-center justify-between border-b border-border pb-2.5">
-            <div>
-              <div className="text-[11px] font-semibold text-foreground-secondary uppercase">
-                Inspector de Estructura
+        {/* Inspector Delgado de Columnas con scroll temático (4 cols) */}
+        <div className="flex flex-col rounded-xl border border-border bg-card p-3.5 text-card-foreground shadow-xs xl:col-span-4">
+          <div className="mb-2 flex items-center justify-between border-b border-border pb-2">
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold text-foreground-secondary uppercase">
+                Atributos de Tabla
               </div>
-              <h3 className="font-mono text-base font-bold text-primary">
+              <h3 className="truncate font-mono text-sm font-bold text-primary">
                 {tablaSeleccionada || "Seleccione una tabla"}
               </h3>
             </div>
-            <span className="rounded bg-secondary px-2 py-0.5 font-mono text-xs">
-              {columnas.length} columnas
+            <span className="inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 font-mono text-[11px]">
+              {cargandoColumnas && (
+                <Loader2 className="h-3 w-3 animate-spin text-primary" />
+              )}
+              {columnas.length} cols
             </span>
           </div>
 
-          <div className="flex-1 space-y-2 overflow-auto">
-            {cargandoColumnas ? (
-              <div className="py-8 text-center text-xs text-foreground-secondary">
-                Leyendo catálogo de columnas...
+          <div className="max-h-[305px] flex-1 divide-y divide-border overflow-y-auto pr-1">
+            {cargandoColumnas && columnas.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-xs text-foreground-secondary">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                Leyendo columnas...
               </div>
             ) : columnas.length === 0 ? (
               <div className="py-8 text-center text-xs text-foreground-secondary">
@@ -533,45 +491,47 @@ export function DatabaseSqlView() {
               columnas.map((col) => (
                 <div
                   key={col.nombreColumna}
-                  className="rounded-lg border border-border bg-background p-2.5 text-xs"
+                  className="flex items-center justify-between gap-2 py-1.5 text-[11px] hover:bg-secondary/30"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono font-bold text-foreground">
-                      {col.nombreColumna}
-                    </span>
-                    <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-foreground-secondary">
-                      {col.tipoSql}
-                      {col.longitudMaxima > 0 ? `(${col.longitudMaxima})` : ""}
-                    </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate font-mono font-semibold text-foreground">
+                        {col.nombreColumna}
+                      </span>
+                      {col.esPrimaryKey && (
+                        <span className="rounded bg-warning-light px-1 font-mono text-[9px] font-bold text-warning">
+                          PK
+                        </span>
+                      )}
+                      {col.esForeignKey && (
+                        <span
+                          className="rounded bg-info-light px-1 font-mono text-[9px] font-bold text-info"
+                          title={`FK → ${col.fkTabla}.${col.fkColumna}`}
+                        >
+                          FK→{col.fkTabla}
+                        </span>
+                      )}
+                      {col.esIdentity && (
+                        <span className="rounded bg-primary-light px-1 font-mono text-[9px] font-bold text-primary">
+                          AUTO
+                        </span>
+                      )}
+                      {col.esNotNull && !col.esPrimaryKey && (
+                        <span className="font-mono text-[9px] text-foreground-secondary">
+                          NN
+                        </span>
+                      )}
+                      {col.esUnique && !col.esPrimaryKey && (
+                        <span className="font-mono text-[9px] text-foreground-secondary">
+                          UQ
+                        </span>
+                      )}
+                    </div>
                   </div>
-
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {col.esPrimaryKey && (
-                      <span className="rounded bg-warning-light px-1.5 py-0.5 font-mono text-[10px] font-bold text-warning">
-                        PK
-                      </span>
-                    )}
-                    {col.esForeignKey && (
-                      <span className="rounded bg-info-light px-1.5 py-0.5 font-mono text-[10px] font-bold text-info">
-                        FK → {col.fkTabla}.{col.fkColumna}
-                      </span>
-                    )}
-                    {col.esIdentity && (
-                      <span className="rounded bg-primary-light px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary">
-                        IDENTITY (AUTO)
-                      </span>
-                    )}
-                    {col.esNotNull && (
-                      <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground-secondary">
-                        NOT NULL
-                      </span>
-                    )}
-                    {col.esUnique && (
-                      <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground-secondary">
-                        UNIQUE
-                      </span>
-                    )}
-                  </div>
+                  <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground-secondary">
+                    {col.tipoSql}
+                    {col.longitudMaxima > 0 ? `(${col.longitudMaxima})` : ""}
+                  </span>
                 </div>
               ))
             )}
@@ -587,11 +547,11 @@ export function DatabaseSqlView() {
               <Terminal className="h-5 w-5 text-primary" />
               <div>
                 <h2 className="text-base font-bold">
-                  Terminal SQL Interactiva PostgreSQL (Motor Embebido ESP32)
+                  Terminal SQL Interactiva PostgreSQL (Motor Binario ESP32)
                 </h2>
                 <p className="text-xs text-foreground-secondary">
-                  Ejecute sentencias DDL/DML/DQL directamente sobre la base de
-                  datos en MicroSD · Atajo: <code>Ctrl + Enter</code>
+                  Ejecute sentencias DDL/DML/DQL sobre la MicroSD · Atajo:{" "}
+                  <code>Ctrl + Enter</code>
                 </p>
               </div>
             </div>
@@ -611,7 +571,6 @@ export function DatabaseSqlView() {
             </button>
           </div>
 
-          {/* Plantillas SQL Rápidas */}
           <div className="mb-3 flex flex-wrap items-center gap-1.5">
             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-foreground-secondary">
               <Sparkles className="h-3.5 w-3.5 text-warning" />
@@ -629,9 +588,8 @@ export function DatabaseSqlView() {
             ))}
           </div>
 
-          {/* Editor SQL */}
           <textarea
-            rows={4}
+            rows={3}
             maxLength={383}
             value={sqlInput}
             onChange={(e) => setSqlInput(e.target.value)}
@@ -658,14 +616,13 @@ export function DatabaseSqlView() {
             <span className="font-mono">{sqlInput.length} / 383 chars</span>
           </div>
 
-          {/* Consola de Salida estilo psql */}
           {resultadoSql && (
             <div className="mt-4 overflow-hidden rounded-lg border border-border">
               <div
                 className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs ${
                   resultadoSql.exito
-                    ? "bg-alert-success-bg text-alert-success-icon border-b border-alert-success-border"
-                    : "bg-alert-err-bg text-alert-err-icon border-b border-alert-err-border"
+                    ? "border-b border-alert-success-border bg-alert-success-bg text-alert-success-icon"
+                    : "border-b border-alert-err-border bg-alert-err-bg text-alert-err-icon"
                 }`}
               >
                 <div className="flex flex-wrap items-center gap-2 font-semibold">
@@ -694,7 +651,7 @@ export function DatabaseSqlView() {
                 </div>
               </div>
 
-              <pre className="max-h-80 overflow-auto bg-zinc-950 p-3.5 font-mono text-xs leading-relaxed text-zinc-100 whitespace-pre">
+              <pre className="max-h-72 overflow-auto bg-zinc-950 p-3.5 font-mono text-xs leading-relaxed text-zinc-100 whitespace-pre">
                 {resultadoSql.salidaPsql || "(Sin salida textual)"}
               </pre>
             </div>

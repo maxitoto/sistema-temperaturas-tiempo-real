@@ -8,27 +8,29 @@ import {
   PrioridadRPC,
 } from "./FirmwareRPCClient";
 
+import { limpiarFloat32 } from "./SchemaBuilder";
+
 // Mapa de política de caché (ms) para consultas que NO cambian a cada instante.
 // Cualquier procedimiento de escritura (no listado aquí) corre con prioridad ALTA e invalida la caché.
 const POLITICA_LECTURA_POR_NOMBRE: Record<string, { cacheTtlMs: number }> = {
-  // En vivo / tiempo real: deduplicables en vuelo, sin caché (o caché muy corta)
+  // En vivo / tiempo real
   obtenerEstadoAlarmasActivas:          { cacheTtlMs: 0 },
   obtenerEstadoTareasRTOS:              { cacheTtlMs: 0 },
   obtenerInfoCompletaSistemaESP:        { cacheTtlMs: 0 },
   obtenerEstadoHardwareDirecto:         { cacheTtlMs: 0 },
   verificarIntegridadAuditoriaAuth:     { cacheTtlMs: 0 },
 
-  // Semi-estáticos / telemetría lenta
-  obtenerInfoRedPublica:                { cacheTtlMs: 4000 },
-  obtenerEspacioMicroSD:                { cacheTtlMs: 20000 },
-  leerHelpLogBios:                      { cacheTtlMs: 5000 },
-  obtenerEstadisticasAuditoriaSensores: { cacheTtlMs: 10000 },
-  listarAuditoriaSensorPorMac:          { cacheTtlMs: 5000 },
-  listarSensosPaginados:                { cacheTtlMs: 5000 },
-  listarAuditoriaSistema:               { cacheTtlMs: 5000 },
-  listarAuditoriaAuth:                  { cacheTtlMs: 5000 },
+  // Telemetría semi-estática y listados paginados
+  obtenerInfoRedPublica:                { cacheTtlMs: 5000 },
+  obtenerEspacioMicroSD:                { cacheTtlMs: 30000 },
+  leerHelpLogBios:                      { cacheTtlMs: 10000 },
+  obtenerEstadisticasAuditoriaSensores: { cacheTtlMs: 20000 },
+  listarAuditoriaSensorPorMac:          { cacheTtlMs: 15000 },
+  listarSensosPaginados:                { cacheTtlMs: 15000 },
+  listarAuditoriaSistema:               { cacheTtlMs: 15000 },
+  listarAuditoriaAuth:                  { cacheTtlMs: 15000 },
 
-  // Configuración y esquema (solo cambian ante una mutación, que limpia caché)
+  // Configuración y esquema
   obtenerCalibracionAmbiente:           { cacheTtlMs: 60000 },
   obtenerConfiguracionSistema:          { cacheTtlMs: 60000 },
   obtenerConfiguracionSmtp:             { cacheTtlMs: 60000 },
@@ -531,10 +533,10 @@ function decodificarCalibracionAmbiente(buf: Uint8Array): CalibracionAmbienteDTO
   const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   return {
     idCalibracion: v.getInt32(0, true),
-    altura: v.getFloat32(4, true),
-    presionAtmosferica: v.getFloat32(8, true),
-    tempCongelacionRef: v.getFloat32(12, true),
-    tempEbullicionRef: v.getFloat32(16, true),
+    altura: limpiarFloat32(v.getFloat32(4, true)),
+    presionAtmosferica: limpiarFloat32(v.getFloat32(8, true)),
+    tempCongelacionRef: limpiarFloat32(v.getFloat32(12, true)),
+    tempEbullicionRef: limpiarFloat32(v.getFloat32(16, true)),
     activa: buf[20] !== 0,
     fechaCreacion: Number(v.getBigInt64(24, true)),
     fechaModificacion: Number(v.getBigInt64(32, true)),
@@ -630,8 +632,8 @@ function decodificarSensoRow(
   return {
     idSenso: v.getInt32(base + 0, true),
     idSensor: v.getInt32(base + 4, true),
-    temperaturaCruda: v.getFloat32(base + 8, true),
-    temperaturaCorregida: v.getFloat32(base + 12, true),
+    temperaturaCruda: limpiarFloat32(v.getFloat32(base + 8, true)),
+    temperaturaCorregida: limpiarFloat32(v.getFloat32(base + 12, true)),
     estadoSensor: buf[base + 16] as EstadoSensor,
     fechaCreacion: Number(v.getBigInt64(base + 24, true)),
   };
@@ -707,9 +709,9 @@ export class ProcedimientosRemotosFirmware {
         slot: buf[base + 0],
         idSensor: v.getInt32(base + 4, true),
         mac: leerTextoFijo(buf, base + 8, 17),
-        temperaturaCorregida: v.getFloat32(base + 28, true),
-        umbralSuperior: v.getFloat32(base + 32, true),
-        umbralInferior: v.getFloat32(base + 36, true),
+        temperaturaCorregida: limpiarFloat32(v.getFloat32(base + 28, true)),
+        umbralSuperior: limpiarFloat32(v.getFloat32(base + 32, true)),
+        umbralInferior: limpiarFloat32(v.getFloat32(base + 36, true)),
         estado: buf[base + 40] as EstadoSensor,
       });
     }
@@ -852,6 +854,42 @@ export class ProcedimientosRemotosFirmware {
 
     const buf = await this.invocar("listarSensosPaginados", payload);
     return deserializarPgList(buf, 8, 32, decodificarSensoRow);
+  };
+
+  listarPicosSensos = async (
+    idSensor: number,
+    orden: "ALTOS" | "BAJOS",
+    limite = 15,
+    maxMuestras = 320
+  ): Promise<SensoRowDTO[]> => {
+    const tope = Math.max(32, Math.min(maxMuestras, 640));
+    const muestra: SensoRowDTO[] = [];
+
+    for (let offset = 0; offset < tope; offset += 32) {
+      const lote = await this.listarSensosPaginados({
+        idSensor,
+        limiteRegistros: 32,
+        offsetRegistros: offset,
+      });
+      if (lote.length === 0) break;
+      muestra.push(...lote);
+      if (lote.length < 32) break;
+    }
+
+    const validas = muestra.filter(
+      (r) =>
+        r.estadoSensor === EstadoSensor.OK ||
+        r.estadoSensor === EstadoSensor.ALARMA_SUPERIOR ||
+        r.estadoSensor === EstadoSensor.ALARMA_INFERIOR
+    );
+
+    validas.sort((a, b) =>
+      orden === "ALTOS"
+        ? b.temperaturaCorregida - a.temperaturaCorregida
+        : a.temperaturaCorregida - b.temperaturaCorregida
+    );
+
+    return validas.slice(0, Math.max(1, Math.min(limite, 64)));
   };
 
   crearSensoManual = async (dto: CrearSensoManualDTO): Promise<SensoRowDTO> => {
@@ -1270,6 +1308,7 @@ export const procedimientosRemotosFirmware = {
   obtenerEstadisticasAuditoriaSensores:
     instancia.obtenerEstadisticasAuditoriaSensores,
   listarSensosPaginados: instancia.listarSensosPaginados,
+  listarPicosSensos: instancia.listarPicosSensos,
   crearSensoManual: instancia.crearSensoManual,
   eliminarSensoPorId: instancia.eliminarSensoPorId,
   purgarSensosAnterioresA: instancia.purgarSensosAnterioresA,

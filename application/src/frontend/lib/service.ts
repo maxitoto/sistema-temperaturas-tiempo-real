@@ -44,6 +44,9 @@ export async function safeRpc<T>(
 ): Promise<T | null> {
   try {
     const res = await fn();
+    if (!opciones.silent && !opciones.silencioso) {
+      window.dispatchEvent(new CustomEvent("rpc:actividad-usuario"));
+    }
     if (opciones.mensajeExito) {
       toast.success(opciones.mensajeExito);
     }

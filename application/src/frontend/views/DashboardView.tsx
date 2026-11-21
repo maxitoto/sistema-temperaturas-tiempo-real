@@ -5,6 +5,7 @@ import {
   Wifi,
   Thermometer,
   RefreshCw,
+  ArrowUpRight,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -17,6 +18,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import { client, safeRpc } from "../lib/service";
+import { useAuth } from "../contexts/AuthContext";
 import {
   formatearBytes,
   formatearDuracionSegundos,
@@ -29,7 +31,9 @@ import {
   InfoRedPublicaDTO,
   LecturaSensorCliente,
   ResumenSensorCliente,
+  RolUsuario,
 } from "#types/rpc.types";
+import type { DestinoNavegacion } from "../pages/App";
 
 interface ChartPoint {
   hora: string;
@@ -47,7 +51,14 @@ const PALETA_SENSORES = [
   "#f97316",
 ];
 
-export function DashboardView() {
+export function DashboardView({
+  onNavegar,
+}: {
+  onNavegar?: (destino: DestinoNavegacion) => void;
+}) {
+  const { rol } = useAuth();
+  const esAdmin = rol === RolUsuario.ADMIN;
+
   const [diag, setDiag] = useState<DiagnosticoSistemaCliente | null>(null);
   const [sd, setSd] = useState<EspacioMicroSdDTO | null>(null);
   const [red, setRed] = useState<InfoRedPublicaDTO | null>(null);
@@ -60,6 +71,7 @@ export function DashboardView() {
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [macs, setMacs] = useState<string[]>([]);
   const [suscripto, setSuscripto] = useState(false);
+  const [refrescando, setRefrescando] = useState(false);
 
   const coloresRef = useRef<Record<string, string>>({});
 
@@ -75,7 +87,8 @@ export function DashboardView() {
 
     lote.forEach((l) => {
       if (!coloresRef.current[l.macHex]) {
-        const idx = Object.keys(coloresRef.current).length % PALETA_SENSORES.length;
+        const idx =
+          Object.keys(coloresRef.current).length % PALETA_SENSORES.length;
         coloresRef.current[l.macHex] = PALETA_SENSORES[idx];
       }
     });
@@ -89,13 +102,23 @@ export function DashboardView() {
     setChartData((prev) => [...prev.slice(-59), punto]);
   }, []);
 
-  const cargarResumen = useCallback(async () => {
+  const cargarResumen = useCallback(async (forzarSinCache = false) => {
+    if (forzarSinCache) {
+      setRefrescando(true);
+      await safeRpc(() => client.invalidarCache(), "invalidarCache", {
+        silent: true,
+      });
+    }
     const [d, s, r, st, lista] = await Promise.all([
-      safeRpc(() => client.ejecutarDiagnosticoSistema(), "diag", { silent: true }),
+      safeRpc(() => client.ejecutarDiagnosticoSistema(), "diag", {
+        silent: true,
+      }),
       safeRpc(() => client.obtenerEspacioMicroSD(), "sd", { silent: true }),
       safeRpc(() => client.obtenerInfoRedPublica(), "red", { silent: true }),
-      safeRpc(() => client.obtenerEstadisticasSensores(), "stats", { silent: true }),
-      safeRpc(() => client.listarSensores(32, 0, false), "listarSensores", {
+      safeRpc(() => client.obtenerEstadisticasSensores(), "stats", {
+        silent: true,
+      }),
+      safeRpc(() => client.listarSensores(12, 0, false), "listarSensores", {
         silent: true,
       }),
     ]);
@@ -110,11 +133,12 @@ export function DashboardView() {
       });
       setCatalogoSensores(mapa);
     }
+    if (forzarSinCache) setRefrescando(false);
   }, []);
 
   useEffect(() => {
-    cargarResumen();
-    const id = window.setInterval(cargarResumen, 5000);
+    void cargarResumen(false);
+    const id = window.setInterval(() => void cargarResumen(false), 5000);
     return () => window.clearInterval(id);
   }, [cargarResumen]);
 
@@ -168,6 +192,12 @@ export function DashboardView() {
               ? `Uptime: ${formatearDuracionSegundos(diag.uptimeSegundos)}`
               : "Consultando núcleo..."
           }
+          onClick={
+            esAdmin && onNavegar
+              ? () => onNavegar({ vista: "bios" })
+              : undefined
+          }
+          actionLabel={esAdmin ? "Abrir BIOS / FreeRTOS" : undefined}
         />
 
         <MetricCard
@@ -180,6 +210,10 @@ export function DashboardView() {
               : "Consultando FAT32..."
           }
           progress={sd ? porcentajeSd : undefined}
+          onClick={
+            onNavegar ? () => onNavegar({ vista: "database" }) : undefined
+          }
+          actionLabel="Ver Base de Datos"
         />
 
         <MetricCard
@@ -197,6 +231,16 @@ export function DashboardView() {
               ? `AP ${red.ipAp || "—"} · RSSI ${red.rssiDbm} dBm · ${red.clientesAutenticados} cli`
               : "Consultando WiFi..."
           }
+          onClick={
+            onNavegar
+              ? () =>
+                  onNavegar({
+                    vista: "configuracion",
+                    configTab: esAdmin ? "WIFI" : "SISTEMA",
+                  })
+              : undefined
+          }
+          actionLabel={esAdmin ? "Configurar Red WiFi" : "Ver Configuración"}
         />
 
         <MetricCard
@@ -208,6 +252,10 @@ export function DashboardView() {
               ? `Total: ${stats.totalSensores} · Inactivos: ${stats.sensoresInactivos}`
               : "Consultando catálogo..."
           }
+          onClick={
+            onNavegar ? () => onNavegar({ vista: "sensores" }) : undefined
+          }
+          actionLabel="Administrar Sensores"
         />
       </div>
 
@@ -215,7 +263,9 @@ export function DashboardView() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold">Monitoreo Térmico en Tiempo Real</h2>
+              <h2 className="text-lg font-semibold">
+                Monitoreo Térmico en Tiempo Real
+              </h2>
               <span
                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
                   suscripto
@@ -232,7 +282,8 @@ export function DashboardView() {
               </span>
             </div>
             <p className="text-xs text-foreground-secondary">
-              Lecturas en vivo del bus 1-Wire (DS18B20) · Ventana deslizante de últimas 60 muestras
+              Lecturas en vivo del bus 1-Wire (DS18B20) · Haga clic en un sensor
+              para abrir su ficha y calibración
             </p>
           </div>
 
@@ -248,23 +299,34 @@ export function DashboardView() {
             <button
               type="button"
               className="btn btn-outline text-xs py-1.5 px-3"
-              onClick={cargarResumen}
+              disabled={refrescando}
+              onClick={() => void cargarResumen(true)}
             >
-              <RefreshCw className="h-3.5 w-3.5" />
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${refrescando ? "animate-spin" : ""}`}
+              />
               Refrescar estado
             </button>
           </div>
         </div>
 
-        {/* Tarjetas individuales por sensor DS18B20 conectado */}
+        {/* Tarjetas individuales clickeables por sensor DS18B20 conectado */}
         <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {lecturas.map((l) => {
             const colorSensor = coloresRef.current[l.macHex] ?? "#10b981";
             const meta = catalogoSensores[l.macHex.toUpperCase()];
             return (
-              <div
+              <button
                 key={l.macHex}
-                className="rounded-lg border border-border bg-background p-3.5 transition-colors hover:border-primary/50"
+                type="button"
+                onClick={() =>
+                  onNavegar?.({
+                    vista: "sensores",
+                    sensorMac: l.macHex.toUpperCase(),
+                  })
+                }
+                title={`Abrir detalle y calibración de ${meta?.nombre || l.macHex}`}
+                className="group rounded-lg border border-border bg-background p-3.5 text-left transition-all hover:border-primary hover:shadow-sm"
               >
                 <div className="flex items-center justify-between text-xs text-foreground-secondary">
                   <span className="flex items-center gap-1.5 font-mono font-medium text-foreground">
@@ -274,8 +336,9 @@ export function DashboardView() {
                     />
                     {l.macHex}
                   </span>
-                  <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px]">
+                  <span className="inline-flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px]">
                     ID #{l.idSensor}
+                    <ArrowUpRight className="h-3 w-3 opacity-50 transition-opacity group-hover:text-primary group-hover:opacity-100" />
                   </span>
                 </div>
 
@@ -295,7 +358,7 @@ export function DashboardView() {
                 <div className="mt-1.5 text-[11px] text-foreground-secondary">
                   Muestra: {formatearEpochSegundos(l.timestampMs)}
                 </div>
-              </div>
+              </button>
             );
           })}
 
@@ -310,13 +373,16 @@ export function DashboardView() {
         <div className="h-80 w-full rounded-lg border border-border bg-background p-3">
           {chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="opacity-15" />
-                <XAxis
-                  dataKey="hora"
-                  tick={{ fontSize: 11 }}
-                  minTickGap={24}
+              <LineChart
+                data={chartData}
+                margin={{ top: 8, right: 16, left: 0, bottom: 4 }}
+              >
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="currentColor"
+                  className="opacity-15"
                 />
+                <XAxis dataKey="hora" tick={{ fontSize: 11 }} minTickGap={24} />
                 <YAxis
                   domain={["auto", "auto"]}
                   tick={{ fontSize: 11 }}
@@ -331,7 +397,10 @@ export function DashboardView() {
                     borderRadius: "0.5rem",
                     fontSize: "12px",
                   }}
-                  formatter={(value) => [`${Number(value ?? 0).toFixed(2)} °C`, "Temp."]}
+                  formatter={(value) => [
+                    `${Number(value ?? 0).toFixed(2)} °C`,
+                    "Temp.",
+                  ]}
                 />
                 <Legend wrapperStyle={{ fontSize: "12px" }} />
                 {macs.map((mac) => (
@@ -365,21 +434,42 @@ function MetricCard({
   value,
   sub,
   progress,
+  onClick,
+  actionLabel,
 }: {
   icon: React.ReactNode;
   title: string;
   value: string;
   sub?: string;
   progress?: number;
+  onClick?: () => void;
+  actionLabel?: string;
 }) {
+  const Tag = onClick ? "button" : "div";
   return (
-    <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
+    <Tag
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      title={actionLabel}
+      className={`group rounded-xl border border-border bg-card p-4 text-left text-card-foreground shadow-xs transition-all ${
+        onClick
+          ? "cursor-pointer hover:border-primary/60 hover:shadow-sm"
+          : ""
+      }`}
+    >
       <div className="mb-2 flex items-center justify-between text-sm font-medium text-foreground-secondary">
-        <span>{title}</span>
+        <span className="inline-flex items-center gap-1.5">
+          {title}
+          {onClick && (
+            <ArrowUpRight className="h-3.5 w-3.5 opacity-40 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary group-hover:opacity-100" />
+          )}
+        </span>
         <span className="text-primary">{icon}</span>
       </div>
       <div className="text-xl font-bold tracking-tight">{value}</div>
-      {sub && <div className="mt-1 text-xs text-foreground-secondary">{sub}</div>}
+      {sub && (
+        <div className="mt-1 text-xs text-foreground-secondary">{sub}</div>
+      )}
       {progress !== undefined && (
         <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-secondary">
           <div
@@ -388,6 +478,6 @@ function MetricCard({
           />
         </div>
       )}
-    </div>
+    </Tag>
   );
 }

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Settings,
+  Globe,
   Wifi,
   Mail,
   Clock,
@@ -9,12 +10,15 @@ import {
   Trash2,
   Edit2,
   RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { client, safeRpc } from "../lib/service";
-import { formatearEpochSegundos } from "../lib/format";
+import { formatearEpochSegundos, redondearDecimal } from "../lib/format";
 import { LABEL_ESTADO_ENVIO, LABEL_TIPO_RECEPCION } from "../lib/labels";
+import { NumericInput } from "../components/ui/NumericInput";
 import {
+  CalibracionAmbienteDTO,
   ConfiguracionSistemaDTO,
   ConfiguracionSmtpDTO,
   ConfiguracionWiFiCliente,
@@ -24,13 +28,27 @@ import {
   TipoRecepcionCorreo,
 } from "#types/rpc.types";
 
-export function ConfiguracionView() {
+export type TabConfiguracion =
+  | "SISTEMA"
+  | "AMBIENTE"
+  | "WIFI"
+  | "CORREOS"
+  | "NTP";
+
+export function ConfiguracionView({
+  tabInicial = "SISTEMA",
+}: {
+  tabInicial?: TabConfiguracion;
+}) {
   const { rol } = useAuth();
   const esAdmin = rol === RolUsuario.ADMIN;
 
-  const [tab, setTab] = useState<"SISTEMA" | "WIFI" | "CORREOS" | "NTP">(
-    "SISTEMA"
-  );
+  const [tab, setTab] = useState<TabConfiguracion>(tabInicial);
+  const [cargando, setCargando] = useState(false);
+
+  useEffect(() => {
+    setTab(tabInicial === "WIFI" && !esAdmin ? "SISTEMA" : tabInicial);
+  }, [tabInicial, esAdmin]);
 
   // --- Pestaña 1: Sistema y Retención ---
   const [cfgSistema, setCfgSistema] = useState<ConfiguracionSistemaDTO | null>(
@@ -46,7 +64,17 @@ export function ConfiguracionView() {
     activa: true,
   });
 
-  // --- Pestaña 2: WiFi STA + SoftAP (Solo ADMIN) ---
+  // --- Pestaña 2: Calibración Ambiental Global ---
+  const [ambiente, setAmbiente] = useState<CalibracionAmbienteDTO | null>(null);
+  const [formAmbiente, setFormAmbiente] = useState({
+    altura: 115,
+    presionAtmosferica: 1013.25,
+    tempCongelacionRef: 0,
+    tempEbullicionRef: 100,
+    activa: true,
+  });
+
+  // --- Pestaña 3: WiFi STA + SoftAP (Solo ADMIN) ---
   const [wifiInfo, setWifiInfo] = useState<ConfiguracionWiFiCliente | null>(
     null
   );
@@ -57,7 +85,7 @@ export function ConfiguracionView() {
     claveAp: "",
   });
 
-  // --- Pestaña 3: SMTP y Destinatarios de Correo ---
+  // --- Pestaña 4: SMTP y Destinatarios de Correo ---
   const [correos, setCorreos] = useState<CorreoItemDTO[]>([]);
   const [formCorreo, setFormCorreo] = useState({
     idCorreo: 0,
@@ -79,7 +107,7 @@ export function ConfiguracionView() {
     activa: true,
   });
 
-  // --- Pestaña 4: Servidores NTP ---
+  // --- Pestaña 5: Servidores NTP ---
   const [servidoresNtp, setServidoresNtp] = useState<ServidorNtpItemDTO[]>([]);
   const [formNtp, setFormNtp] = useState({
     idServer: 0,
@@ -89,10 +117,12 @@ export function ConfiguracionView() {
   });
 
   const cargarSistema = useCallback(async () => {
+    setCargando(true);
     const cfg = await safeRpc(
       () => client.obtenerConfiguracionSistema(),
       "obtenerConfiguracionSistema"
     );
+    setCargando(false);
     if (cfg) {
       setCfgSistema(cfg);
       setFormSistema({
@@ -107,12 +137,33 @@ export function ConfiguracionView() {
     }
   }, []);
 
+  const cargarAmbiente = useCallback(async () => {
+    setCargando(true);
+    const amb = await safeRpc(
+      () => client.obtenerCalibracionAmbiente(),
+      "obtenerCalibracionAmbiente"
+    );
+    setCargando(false);
+    if (amb) {
+      setAmbiente(amb);
+      setFormAmbiente({
+        altura: amb.altura,
+        presionAtmosferica: amb.presionAtmosferica,
+        tempCongelacionRef: amb.tempCongelacionRef,
+        tempEbullicionRef: amb.tempEbullicionRef,
+        activa: amb.activa,
+      });
+    }
+  }, []);
+
   const cargarWifi = useCallback(async () => {
     if (!esAdmin) return;
+    setCargando(true);
     const w = await safeRpc(
       () => client.obtenerConfiguracionWiFi(),
       "obtenerConfiguracionWiFi"
     );
+    setCargando(false);
     if (w) {
       setWifiInfo(w);
       setFormWifi((prev) => ({
@@ -124,6 +175,7 @@ export function ConfiguracionView() {
   }, [esAdmin]);
 
   const cargarCorreosYSmtp = useCallback(async () => {
+    setCargando(true);
     const lista = await safeRpc(() => client.listarCorreos(), "listarCorreos");
     if (lista) setCorreos(lista);
 
@@ -147,22 +199,33 @@ export function ConfiguracionView() {
         });
       }
     }
+    setCargando(false);
   }, [esAdmin]);
 
   const cargarNtp = useCallback(async () => {
+    setCargando(true);
     const lista = await safeRpc(
       () => client.listarServidoresNtp(),
       "listarServidoresNtp"
     );
+    setCargando(false);
     if (lista) setServidoresNtp(lista);
   }, []);
 
   useEffect(() => {
     if (tab === "SISTEMA") void cargarSistema();
+    if (tab === "AMBIENTE") void cargarAmbiente();
     if (tab === "WIFI") void cargarWifi();
     if (tab === "CORREOS") void cargarCorreosYSmtp();
     if (tab === "NTP") void cargarNtp();
-  }, [tab, cargarSistema, cargarWifi, cargarCorreosYSmtp, cargarNtp]);
+  }, [
+    tab,
+    cargarSistema,
+    cargarAmbiente,
+    cargarWifi,
+    cargarCorreosYSmtp,
+    cargarNtp,
+  ]);
 
   // Handlers de Guardado (ADMIN)
   const guardarSistema = async (e: React.FormEvent) => {
@@ -170,12 +233,14 @@ export function ConfiguracionView() {
     const res = await safeRpc(
       () =>
         client.actualizarConfiguracionSistema({
-          zonaHorariaMin: Number(formSistema.zonaHorariaMin),
-          retencionSensoDias: Number(formSistema.retencionSensoDias),
-          retencionEventosDias: Number(formSistema.retencionEventosDias),
-          retencionAuditoriaDias: Number(formSistema.retencionAuditoriaDias),
-          sdLibreMinimoKb: Number(formSistema.sdLibreMinimoKb),
-          correoCooldownS: Number(formSistema.correoCooldownS),
+          zonaHorariaMin: Math.round(formSistema.zonaHorariaMin),
+          retencionSensoDias: Math.round(formSistema.retencionSensoDias),
+          retencionEventosDias: Math.round(formSistema.retencionEventosDias),
+          retencionAuditoriaDias: Math.round(
+            formSistema.retencionAuditoriaDias
+          ),
+          sdLibreMinimoKb: Math.round(formSistema.sdLibreMinimoKb),
+          correoCooldownS: Math.round(formSistema.correoCooldownS),
           activa: formSistema.activa,
         }),
       "actualizarConfiguracionSistema",
@@ -184,10 +249,39 @@ export function ConfiguracionView() {
     if (res) setCfgSistema(res);
   };
 
+  const guardarAmbiente = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = await safeRpc(
+      () =>
+        client.actualizarCalibracionAmbiente({
+          altura: formAmbiente.altura,
+          presionAtmosferica: formAmbiente.presionAtmosferica,
+          tempCongelacionRef: formAmbiente.tempCongelacionRef,
+          tempEbullicionRef: formAmbiente.tempEbullicionRef,
+          activa: formAmbiente.activa,
+        }),
+      "actualizarCalibracionAmbiente",
+      { mensajeExito: "Calibración ambiental global actualizada en el ESP32." }
+    );
+    if (res) setAmbiente(res);
+  };
+
+  // Estimación física estándar de ebullición del agua a partir de presión atmosférica (hPa)
+  const estimarEbullicionPorPresion = () => {
+    const p = Math.max(300, Math.min(1100, formAmbiente.presionAtmosferica));
+    const tEbull = redondearDecimal(
+      100 + 28.0 * Math.log(p / 1013.25),
+      2
+    );
+    setFormAmbiente((prev) => ({ ...prev, tempEbullicionRef: tEbull }));
+  };
+
   const guardarWifi = async (e: React.FormEvent) => {
     e.preventDefault();
     if (formWifi.claveSta.length > 0 && formWifi.claveSta.length < 8) {
-      window.alert("La clave WiFi STA debe tener al menos 8 caracteres (WPA2).");
+      window.alert(
+        "La clave WiFi STA debe tener al menos 8 caracteres (WPA2)."
+      );
       return;
     }
     if (formWifi.claveAp.length < 8) {
@@ -216,7 +310,7 @@ export function ConfiguracionView() {
       () =>
         client.actualizarConfiguracionSmtp({
           hostSmtp: formSmtp.hostSmtp.trim(),
-          puerto: Number(formSmtp.puerto),
+          puerto: Math.round(formSmtp.puerto),
           usarTls: formSmtp.usarTls,
           usuario: formSmtp.usuario.trim(),
           passwordCifrado: formSmtp.passwordCifrado,
@@ -281,7 +375,7 @@ export function ConfiguracionView() {
         client.guardarServidorNtp({
           idServer: formNtp.idServer,
           server: formNtp.server.trim(),
-          prioridad: Number(formNtp.prioridad),
+          prioridad: Math.round(formNtp.prioridad),
           activa: formNtp.activa,
         }),
       "guardarServidorNtp",
@@ -316,9 +410,14 @@ export function ConfiguracionView() {
             <Settings className="h-5 w-5" />
           </div>
           <div>
-            <h1 className="text-lg font-bold">
-              Configuración del Sistema, Red y Notificaciones
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-bold">
+                Configuración del Sistema, Ambiente, Red y Notificaciones
+              </h1>
+              {cargando && (
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              )}
+            </div>
             <p className="text-xs text-foreground-secondary">
               {esAdmin
                 ? "Modo Administrador: lectura y escritura habilitadas"
@@ -338,7 +437,19 @@ export function ConfiguracionView() {
             }`}
           >
             <Settings className="h-3.5 w-3.5" />
-            Sistema & Retención
+            Sistema
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("AMBIENTE")}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-semibold ${
+              tab === "AMBIENTE"
+                ? "bg-card text-foreground shadow-xs"
+                : "text-foreground-secondary hover:text-foreground"
+            }`}
+          >
+            <Globe className="h-3.5 w-3.5" />
+            Calibración Ambiental
           </button>
           {esAdmin && (
             <button
@@ -381,9 +492,7 @@ export function ConfiguracionView() {
         </div>
       </div>
 
-      {/* ================================================================= */}
-      {/* PESTAÑA 1: SISTEMA Y RETENCIÓN                                    */}
-      {/* ================================================================= */}
+      {/* PESTAÑA 1: SISTEMA Y RETENCIÓN */}
       {tab === "SISTEMA" && (
         <form
           onSubmit={guardarSistema}
@@ -401,21 +510,20 @@ export function ConfiguracionView() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+          <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
             <div>
               <label className="mb-1 block font-medium">
                 Zona Horaria (minutos UTC, ej. -180 = UTC-3)
               </label>
-              <input
-                type="number"
-                disabled={!esAdmin}
+              <NumericInput
                 value={formSistema.zonaHorariaMin}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    zonaHorariaMin: Number(e.target.value),
-                  })
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, zonaHorariaMin: v }))
                 }
+                decimals={0}
+                min={-720}
+                max={840}
+                disabled={!esAdmin}
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -424,17 +532,15 @@ export function ConfiguracionView() {
               <label className="mb-1 block font-medium">
                 Retención Tabla Senso (días)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                value={formSistema.retencionSensoDias}
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, retencionSensoDias: v }))
+                }
+                decimals={0}
+                allowNegative={false}
                 min={1}
                 disabled={!esAdmin}
-                value={formSistema.retencionSensoDias}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    retencionSensoDias: Number(e.target.value),
-                  })
-                }
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -443,17 +549,15 @@ export function ConfiguracionView() {
               <label className="mb-1 block font-medium">
                 Retención Eventos Sensores (días)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                value={formSistema.retencionEventosDias}
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, retencionEventosDias: v }))
+                }
+                decimals={0}
+                allowNegative={false}
                 min={1}
                 disabled={!esAdmin}
-                value={formSistema.retencionEventosDias}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    retencionEventosDias: Number(e.target.value),
-                  })
-                }
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -462,17 +566,15 @@ export function ConfiguracionView() {
               <label className="mb-1 block font-medium">
                 Retención Auditoría Auth/Sistema (días)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                value={formSistema.retencionAuditoriaDias}
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, retencionAuditoriaDias: v }))
+                }
+                decimals={0}
+                allowNegative={false}
                 min={1}
                 disabled={!esAdmin}
-                value={formSistema.retencionAuditoriaDias}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    retencionAuditoriaDias: Number(e.target.value),
-                  })
-                }
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -481,17 +583,15 @@ export function ConfiguracionView() {
               <label className="mb-1 block font-medium">
                 Espacio Libre Mínimo MicroSD (KB)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                value={formSistema.sdLibreMinimoKb}
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, sdLibreMinimoKb: v }))
+                }
+                decimals={0}
+                allowNegative={false}
                 min={128}
                 disabled={!esAdmin}
-                value={formSistema.sdLibreMinimoKb}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    sdLibreMinimoKb: Number(e.target.value),
-                  })
-                }
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -500,17 +600,15 @@ export function ConfiguracionView() {
               <label className="mb-1 block font-medium">
                 Cooldown Envío de Correos (segundos)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                value={formSistema.correoCooldownS}
+                onChange={(v) =>
+                  setFormSistema((p) => ({ ...p, correoCooldownS: v }))
+                }
+                decimals={0}
+                allowNegative={false}
                 min={0}
                 disabled={!esAdmin}
-                value={formSistema.correoCooldownS}
-                onChange={(e) =>
-                  setFormSistema({
-                    ...formSistema,
-                    correoCooldownS: Number(e.target.value),
-                  })
-                }
                 className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
               />
             </div>
@@ -540,9 +638,140 @@ export function ConfiguracionView() {
         </form>
       )}
 
-      {/* ================================================================= */}
-      {/* PESTAÑA 2: WIFI STA + SOFTAP (Solo ADMIN)                         */}
-      {/* ================================================================= */}
+      {/* PESTAÑA 2: CALIBRACIÓN AMBIENTAL GLOBAL (movida desde SensoresView) */}
+      {tab === "AMBIENTE" && (
+        <form
+          onSubmit={guardarAmbiente}
+          className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="flex items-center gap-2 text-sm font-bold">
+                <Globe className="h-4 w-4 text-info" />
+                Calibración Ambiental Global del Gestor de Sensores
+              </h2>
+              <p className="text-xs text-foreground-secondary">
+                Parámetros físicos de referencia utilizados por todos los
+                sensores DS18B20 al calcular la recta de calibración de 2 puntos
+                (hielo / ebullición).
+              </p>
+            </div>
+            {ambiente && (
+              <span className="font-mono text-[11px] text-foreground-secondary">
+                Última mod.:{" "}
+                {formatearEpochSegundos(ambiente.fechaModificacion)}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label className="mb-1 block font-medium">
+                Altura s.n.m. (m)
+              </label>
+              <NumericInput
+                value={formAmbiente.altura}
+                onChange={(v) => setFormAmbiente((p) => ({ ...p, altura: v }))}
+                decimals={2}
+                min={-500}
+                max={9000}
+                disabled={!esAdmin}
+                className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block font-medium">
+                Presión Atmosférica (hPa)
+              </label>
+              <NumericInput
+                value={formAmbiente.presionAtmosferica}
+                onChange={(v) =>
+                  setFormAmbiente((p) => ({ ...p, presionAtmosferica: v }))
+                }
+                decimals={2}
+                allowNegative={false}
+                min={300}
+                max={1100}
+                disabled={!esAdmin}
+                className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block font-medium">
+                Ref. Congelación (°C)
+              </label>
+              <NumericInput
+                value={formAmbiente.tempCongelacionRef}
+                onChange={(v) =>
+                  setFormAmbiente((p) => ({ ...p, tempCongelacionRef: v }))
+                }
+                decimals={2}
+                min={-10}
+                max={10}
+                disabled={!esAdmin}
+                className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block font-medium">
+                Ref. Ebullición (°C)
+              </label>
+              <NumericInput
+                value={formAmbiente.tempEbullicionRef}
+                onChange={(v) =>
+                  setFormAmbiente((p) => ({ ...p, tempEbullicionRef: v }))
+                }
+                decimals={2}
+                min={70}
+                max={110}
+                disabled={!esAdmin}
+                className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                disabled={!esAdmin}
+                checked={formAmbiente.activa}
+                onChange={(e) =>
+                  setFormAmbiente({
+                    ...formAmbiente,
+                    activa: e.target.checked,
+                  })
+                }
+              />
+              Compensación barométrica global activa
+            </label>
+
+            {esAdmin && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={estimarEbullicionPorPresion}
+                  className="btn btn-outline px-3 py-1.5 text-xs"
+                >
+                  Estimar ebullición según presión ({formAmbiente.presionAtmosferica} hPa)
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-solid btn-info px-4 py-1.5 text-xs font-bold"
+                >
+                  <Save className="h-4 w-4" />
+                  Guardar Parámetros Ambientales
+                </button>
+              </div>
+            )}
+          </div>
+        </form>
+      )}
+
+      {/* PESTAÑA 3: WIFI STA + SOFTAP (Solo ADMIN) */}
       {tab === "WIFI" && esAdmin && (
         <div className="space-y-4">
           {wifiInfo && (
@@ -600,7 +829,7 @@ export function ConfiguracionView() {
             <h2 className="text-sm font-bold">
               Credenciales Inalámbricas WPA2 (Estación + SoftAP)
             </h2>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs">
+            <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
               <div>
                 <label className="mb-1 block font-medium">
                   SSID Red Local (STA)
@@ -674,12 +903,9 @@ export function ConfiguracionView() {
         </div>
       )}
 
-      {/* ================================================================= */}
-      {/* PESTAÑA 3: SMTP Y DESTINATARIOS DE CORREO                         */}
-      {/* ================================================================= */}
+      {/* PESTAÑA 4: SMTP Y DESTINATARIOS DE CORREO */}
       {tab === "CORREOS" && (
         <div className="space-y-4">
-          {/* Servidor SMTP (Solo ADMIN) */}
           {esAdmin && (
             <form
               onSubmit={guardarSmtp}
@@ -696,7 +922,7 @@ export function ConfiguracionView() {
                 )}
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+              <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
                 <div>
                   <label className="mb-1 block">Host SMTP</label>
                   <input
@@ -713,18 +939,14 @@ export function ConfiguracionView() {
                 </div>
                 <div>
                   <label className="mb-1 block">Puerto</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    value={formSmtp.puerto}
+                    onChange={(v) => setFormSmtp((p) => ({ ...p, puerto: v }))}
+                    decimals={0}
+                    allowNegative={false}
                     min={1}
                     max={65535}
                     required
-                    value={formSmtp.puerto}
-                    onChange={(e) =>
-                      setFormSmtp({
-                        ...formSmtp,
-                        puerto: Number(e.target.value),
-                      })
-                    }
                     className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono"
                   />
                 </div>
@@ -741,7 +963,9 @@ export function ConfiguracionView() {
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block">Contraseña / App Password</label>
+                  <label className="mb-1 block">
+                    Contraseña / App Password
+                  </label>
                   <input
                     type="password"
                     maxLength={159}
@@ -820,7 +1044,6 @@ export function ConfiguracionView() {
             </form>
           )}
 
-          {/* Lista y CRUD de Destinatarios */}
           <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-bold">
@@ -829,7 +1052,12 @@ export function ConfiguracionView() {
               <button
                 type="button"
                 className="btn btn-outline px-2.5 py-1 text-xs"
-                onClick={() => void cargarCorreosYSmtp()}
+                onClick={async () => {
+                  await safeRpc(() => client.invalidarCache(), "cache", {
+                    silent: true,
+                  });
+                  void cargarCorreosYSmtp();
+                }}
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </button>
@@ -861,7 +1089,10 @@ export function ConfiguracionView() {
                     required
                     value={formCorreo.apellido}
                     onChange={(e) =>
-                      setFormCorreo({ ...formCorreo, apellido: e.target.value })
+                      setFormCorreo({
+                        ...formCorreo,
+                        apellido: e.target.value,
+                      })
                     }
                     className="w-32 rounded border border-border bg-card px-2 py-1"
                   />
@@ -1041,9 +1272,7 @@ export function ConfiguracionView() {
         </div>
       )}
 
-      {/* ================================================================= */}
-      {/* PESTAÑA 4: SERVIDORES NTP                                         */}
-      {/* ================================================================= */}
+      {/* PESTAÑA 5: SERVIDORES NTP */}
       {tab === "NTP" && (
         <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
           <div className="mb-3 flex items-center justify-between">
@@ -1053,7 +1282,12 @@ export function ConfiguracionView() {
             <button
               type="button"
               className="btn btn-outline px-2.5 py-1 text-xs"
-              onClick={() => void cargarNtp()}
+              onClick={async () => {
+                await safeRpc(() => client.invalidarCache(), "cache", {
+                  silent: true,
+                });
+                void cargarNtp();
+              }}
             >
               <RefreshCw className="h-3.5 w-3.5" />
             </button>
@@ -1080,18 +1314,14 @@ export function ConfiguracionView() {
               </div>
               <div>
                 <label className="mb-1 block">Prioridad (1..10)</label>
-                <input
-                  type="number"
+                <NumericInput
+                  value={formNtp.prioridad}
+                  onChange={(v) => setFormNtp((p) => ({ ...p, prioridad: v }))}
+                  decimals={0}
+                  allowNegative={false}
                   min={1}
                   max={10}
                   required
-                  value={formNtp.prioridad}
-                  onChange={(e) =>
-                    setFormNtp({
-                      ...formNtp,
-                      prioridad: Number(e.target.value),
-                    })
-                  }
                   className="w-24 rounded border border-border bg-card px-2.5 py-1 font-mono"
                 />
               </div>

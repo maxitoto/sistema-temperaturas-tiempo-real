@@ -24,5 +24,9 @@ export const RPConexion = {
         clienteFirmware.obtenerLogsVisor(),
 
     limpiarLogsVisor: () =>
-        clienteFirmware.limpiarLogsVisor()
+        clienteFirmware.limpiarLogsVisor(),
+
+    invalidarCache: () =>
+        clienteFirmware.invalidarCache()
+    
 };

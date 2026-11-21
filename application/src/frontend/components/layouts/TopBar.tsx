@@ -10,6 +10,7 @@ import {
   User,
   Users,
   Radio,
+  HelpCircle,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -17,7 +18,7 @@ import { client, safeRpc } from "../../lib/service";
 import { InfoRedPublicaDTO, RolUsuario } from "#types/rpc.types";
 import { ConsoleDrawer } from "./ConsoleDrawer";
 
-export function TopBar() {
+export function TopBar({ onAbrirAyuda }: { onAbrirAyuda?: () => void }) {
   const {
     usuario,
     rol,
@@ -119,6 +120,15 @@ export function TopBar() {
             {String(mm).padStart(2, "0")}:{String(ss).padStart(2, "0")}
           </div>
 
+          {onAbrirAyuda && (
+            <button
+              className="btn btn-icon btn-info"
+              onClick={onAbrirAyuda}
+              title="Abrir guía interactiva de esta ventana"
+            >
+              <HelpCircle className="h-4 w-4" />
+            </button>
+          )}
           <button
             className="btn btn-icon btn-secondary"
             onClick={toggleTheme}

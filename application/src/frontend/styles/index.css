@@ -304,4 +304,28 @@ p {
         --btn-border: var(--info);
         --btn-light: var(--info-light);
     }
+    
+    /* Scrollbars temáticos adaptados a modo claro / oscuro */
+    * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    }
+
+    *::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+    }
+
+    *::-webkit-scrollbar-track {
+    background: transparent;
+    }
+
+    *::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, var(--foreground-secondary) 35%, transparent);
+    border-radius: 9999px;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--primary) 70%, transparent);
+    }
 }
