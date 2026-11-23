@@ -34,9 +34,10 @@ namespace RTOS::Tasks {
         inline static MiddlewareSesion* refSesion = nullptr;
 
         inline static bool logoMostrado = false;
-        inline static bool     logoIniciado = false;
+        inline static bool logoIniciado = false;
         inline static uint32_t inicioLogoMs = 0;
         inline static bool enModoDetalle = false;
+        inline static bool mostrandoMensajeTemporal = false;
 
         inline static uint8_t indiceSensorDetalle = 0;
 
@@ -197,6 +198,7 @@ namespace RTOS::Tasks {
          *   23.56  -> 23.6
          *   -5.24  -> -5.2
          *   100.0  -> 100.0
+         *   -100.0 -> -100.0
          */
 
         static void formatearTempDecima(
@@ -261,74 +263,60 @@ namespace RTOS::Tasks {
         // 5. GRILLA DE SEIS SENSORES
         // =====================================================
 
-        static void formatearCeldaSensor(
-            const SnapshotSensor& snap,
-            char* salida
-        ) {
+        
+static void formatearCeldaSensor(
+    const SnapshotSensor& snap,
+    char* salida
+) {
+    if (!salida) return;
 
-            if (!salida) {
-                return;
-            }
+    if (!estadoTieneLecturaValida(snap.estado)) {
 
-            int temperatura = 0;
+        snprintf(
+            salida,
+            12,
+            "%2.2s:ERROR",
+            snap.mac2
+        );
 
-            if (isfinite(snap.tempCorregida)) {
+        return;
+    }
 
-                float t = snap.tempCorregida;
+    char tempBuf[8] = {};
 
-                if (t > 999.0f) t = 999.0f;
-                if (t < -99.0f) t = -99.0f;
+    formatearTempDecima(
+        snap.tempCorregida,
+        tempBuf,
+        sizeof(tempBuf)
+    );
 
-                temperatura = static_cast<int>(
-                    t >= 0.0f ? t + 0.5f : t - 0.5f
-                );
-            }
+    // Máximo 5 caracteres de temperatura:
+    // F8:-55.0c°
 
-            const char* estado = "ERR";
+    if (strlen(tempBuf) <= 5) {
 
-            switch (snap.estado) {
+        snprintf(
+            salida,
+            12,
+            "%2.2s:%.5sc\xF8",
+            snap.mac2,
+            tempBuf
+        );
 
-                case EstadoSensor::OK:
-                    estado = "OK";
-                    break;
+    } else {
 
-                case EstadoSensor::ALARMA_SUPERIOR:
-                    estado = "HI";
-                    break;
+        // Temperaturas de 6 caracteres:
+        // F8:-128.9°
 
-                case EstadoSensor::ALARMA_INFERIOR:
-                    estado = "LO";
-                    break;
-
-                default:
-                    estado = "ERR";
-                    break;
-            }
-
-            if (snap.estado == EstadoSensor::OK ||
-                snap.estado == EstadoSensor::ALARMA_SUPERIOR ||
-                snap.estado == EstadoSensor::ALARMA_INFERIOR) {
-
-                snprintf(
-                    salida,
-                    12,
-                    "%3s:%2dc\xF8%s",
-                    snap.mac3,
-                    temperatura,
-                    estado
-                );
-
-            } else {
-
-                snprintf(
-                    salida,
-                    12,
-                    "%3s:---ERR",
-                    snap.mac3
-                );
-            }
-        }
-
+        snprintf(
+            salida,
+            12,
+            "%2.2s:%.6s\xF8",
+            snap.mac2,
+            tempBuf
+        );
+    }
+}
 
         static void dibujarGrillaSeisSensores() {
 
@@ -354,7 +342,7 @@ namespace RTOS::Tasks {
                     snprintf(
                         textoCelda,
                         sizeof(textoCelda),
-                        "S%u: LIBRE",
+                        "S%u:LIBRE",
                         static_cast<unsigned>(slot + 1)
                     );
                 }
@@ -371,112 +359,125 @@ namespace RTOS::Tasks {
         // 6. DETALLE DE SENSOR
         // =====================================================
 
-        static void dibujarDetalleSensor(
-            const SnapshotSensor& sensor,
-            uint8_t posicionActual,
-            uint8_t totalConectados
-        ) {
+        
+static void dibujarDetalleSensor(
+    const SnapshotSensor& sensor,
+    uint8_t posicionActual,
+    uint8_t totalConectados
+) {
 
-            /*
-             * La OLED tiene 128 píxeles de ancho.
-             * Con fuente tamaño 1:
-             *
-             * 128 / 6 = 21 caracteres completos.
-             *
-             * Cada fila tiene capacidad para 21 caracteres
-             * visibles, más el terminador '\0'.
-             */
+    // Buffers dimensionados para el peor caso.
+    char fila1[32] = {};
+    char fila2[22] = {};
+    char fila3[22] = {};
+    char fila4[48] = {};
 
-            char fila1[22] = {};
-            char fila2[22] = {};
-            char fila3[22] = {};
-            char fila4[22] = {};
+    char tempCorregida[8] = {};
+    char tempCruda[8]     = {};
+    char tempSuperior[8]  = {};
+    char tempInferior[8]  = {};
 
-            char tempCorregida[8] = {};
-            char tempCruda[8] = {};
-            char tempSuperior[8] = {};
-            char tempInferior[8] = {};
+    formatearTempDecima(
+        sensor.tempCorregida,
+        tempCorregida,
+        sizeof(tempCorregida)
+    );
 
+    formatearTempDecima(
+        sensor.tempCruda,
+        tempCruda,
+        sizeof(tempCruda)
+    );
 
-            // FORMATEAR TEMPERATURAS
+    formatearTempDecima(
+        sensor.umbral_sup,
+        tempSuperior,
+        sizeof(tempSuperior)
+    );
 
-            formatearTempDecima(
-                sensor.tempCorregida,
-                tempCorregida,
-                sizeof(tempCorregida)
-            );
-
-            formatearTempDecima(
-                sensor.tempCruda,
-                tempCruda,
-                sizeof(tempCruda)
-            );
-
-            formatearTempDecima(
-                sensor.umbral_sup,
-                tempSuperior,
-                sizeof(tempSuperior)
-            );
-
-            formatearTempDecima(
-                sensor.umbral_inf,
-                tempInferior,
-                sizeof(tempInferior)
-            );
+    formatearTempDecima(
+        sensor.umbral_inf,
+        tempInferior,
+        sizeof(tempInferior)
+    );
 
 
-            // FILA 1: IDENTIFICACION
+    // ---------------------------------------------
+    // FILA 1: IDENTIFICADOR Y MAC
+    // Ejemplo: S2: AA:BB:CC:DD:EE:FF
+    // ---------------------------------------------
 
-            snprintf(
-                fila1,
-                sizeof(fila1),
-                "S%u:%s",
-                static_cast<unsigned>(sensor.slot + 1),
-                sensor.mac
-            );
-
-
-            // FILA 2: TEMPERATURAS
-
-            snprintf(
-                fila2,
-                sizeof(fila2),
-                "C:%s R:%s",
-                tempCorregida,
-                tempCruda
-            );
+    snprintf(
+        fila1,
+        sizeof(fila1),
+        "S%u: %.17s",
+        static_cast<unsigned>(sensor.slot + 1),
+        sensor.mac
+    );
 
 
-            // FILA 3: UMBRALES
+    // ---------------------------------------------
+    // FILA 2: CALIBRADA Y REAL
+    // Ejemplo: Ca:-128.9C Re:-128.9C
+    //
+    // %.6s limita explícitamente cada temperatura.
+    // ---------------------------------------------
 
-            snprintf(
-                fila3,
-                sizeof(fila3),
-                "H:%s L:%s",
-                tempSuperior,
-                tempInferior
-            );
-
-
-            // FILA 4: ESTADO Y POSICION
-
-            snprintf(
-                fila4,
-                sizeof(fila4),
-                "%s [%u/%u]",
-                GestorSensores::nombreEstadoSensor(sensor.estado),
-                static_cast<unsigned>(posicionActual + 1),
-                static_cast<unsigned>(totalConectados)
-            );
+    snprintf(
+        fila2,
+        sizeof(fila2),
+        "Ca:%.6sC\xF8 Re:%.6sc\xF8",
+        tempCorregida,
+        tempCruda
+    );
 
 
-            // DIBUJAR UTILIZANDO LA LIBRERIA PROPIA
+    // ---------------------------------------------
+    // FILA 3: UMBRALES
+    // Ejemplo: Ui:-55.0C Us:126.0C
+    // ---------------------------------------------
 
-            oled.fila1(fila1);
-            oled.fila2(fila2);
-            oled.fila3(fila3);
-            oled.fila4(fila4);
-        }
+    snprintf(
+        fila3,
+        sizeof(fila3),
+        "Ui:%.6sC\xF8 Us:%.6sc\xF8",
+        tempInferior,
+        tempSuperior
+    );
+
+
+    // ---------------------------------------------
+    // FILA 4: PAGINACION Y ESTADO
+    // Ejemplo: [1/3] Estado OK
+    // ---------------------------------------------
+
+    const char* estado =
+        GestorSensores::nombreEstadoSensor(sensor.estado);
+
+    if (!estado) {
+        estado = "ERROR";
+    }
+
+    snprintf(
+        fila4,
+        sizeof(fila4),
+        "[%u/%u] Estado %.12s",
+        static_cast<unsigned>(posicionActual + 1),
+        static_cast<unsigned>(totalConectados),
+        estado
+    );
+
+
+    // ---------------------------------------------
+    // VOLCAR FILAS A OLED
+    // ---------------------------------------------
+
+    oled.fila1(fila1);
+    oled.fila2(fila2);
+    oled.fila3(fila3);
+    oled.fila4(fila4);
+}
+
 
 
         // =====================================================
@@ -508,18 +509,23 @@ namespace RTOS::Tasks {
             // ---------------------------------------------
 
             if (!logoMostrado) {
+
                 if (!logoIniciado) {
+
                     if (!oled.iniciar()) {
                         return;
                     }
+
                     oled.fullScreen(
                         LOGO_UNTDF.data,
                         LOGO_UNTDF.ancho,
                         LOGO_UNTDF.alto,
                         true
                     );
+
                     logoIniciado = true;
                     inicioLogoMs = millis();
+
                     return;
                 }
 
@@ -528,8 +534,36 @@ namespace RTOS::Tasks {
                 }
 
                 oled.limpiarTodo();
-                logoMostrado  = true;
+
+                logoMostrado = true;
                 cambioVistaMs = millis();
+            }
+
+
+            if (pizarraOled.tieneMensajeTemporalActivo()) {
+
+                if (!mostrandoMensajeTemporal) {
+
+                    mostrandoMensajeTemporal = true;
+
+                    oled.limpiarAreaContenido();
+
+                    pizarraOled.volcarAlHardwareI2C(true);
+
+                } else {
+
+                    pizarraOled.volcarAlHardwareI2C(false);
+                }
+
+                return;
+            }
+
+
+            if (mostrandoMensajeTemporal) {
+
+                mostrandoMensajeTemporal = false;
+
+                volverAGrilla(millis());
             }
 
 
@@ -643,7 +677,14 @@ namespace RTOS::Tasks {
 
             refSesion = &sesionL2;
 
-            return tarea.iniciarEnNucleo("TaskOled", &ejecutarCiclo, 250, 3584, 1, 0);
+            return tarea.iniciarEnNucleo(
+                "TaskOled",
+                &ejecutarCiclo,
+                250,
+                3584,
+                1,
+                0
+            );
         }
     };
 

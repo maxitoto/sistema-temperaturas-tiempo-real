@@ -15,8 +15,16 @@ import {
   TrendingUp,
   TrendingDown,
   ListOrdered,
-  Loader2,
+Loader2,
+  Download,
 } from "lucide-react";
+import { toast } from "react-toastify";
+import {
+  descargarCsv,
+  formatearFechaLocalCsv,
+  formatearIsoUtcDesdeEpoch,
+  sufijoFechaArchivo,
+} from "../lib/exportCsv";
 import {
   ResponsiveContainer,
   LineChart,
@@ -75,6 +83,7 @@ export function SensoresView({
   const [cargandoDetalle, setCargandoDetalle] = useState(false);
   const [cargandoHistorial, setCargandoHistorial] = useState(false);
   const [cargandoTabla, setCargandoTabla] = useState(false);
+  const [exportandoCsv, setExportandoCsv] = useState(false);
   const [guardandoAccion, setGuardandoAccion] = useState<string | null>(null);
 
   const detalleReqRef = useRef(0);
@@ -461,6 +470,122 @@ export function SensoresView({
     }
   };
 
+  const exportarCurvaCsv = () => {
+    if (serieHistorica.length === 0) {
+      toast.info("No hay lecturas cargadas en la curva histórica para exportar.");
+      return;
+    }
+
+    const mac = perfil?.mac || macSeleccionada || "sensor";
+    const nombre = perfil?.nombre || "";
+    const ubicacion = perfil?.ubicacion || "";
+
+    descargarCsv(
+      `curva_${mac}_${sufijoFechaArchivo()}.csv`,
+      [
+        "id_sensor",
+        "mac",
+        "nombre_sensor",
+        "ubicacion",
+        "timestamp_unix",
+        "fecha_utc_iso",
+        "fecha_hora_local",
+        "temperatura_corregida_c",
+      ],
+      serieHistorica.map((item) => [
+        item.idSensor,
+        item.macHex,
+        nombre,
+        ubicacion,
+        item.timestampMs,
+        formatearIsoUtcDesdeEpoch(item.timestampMs),
+        formatearFechaLocalCsv(item.timestampMs),
+        item.temperaturaCorregida.toFixed(2),
+      ])
+    );
+
+    toast.success(`CSV de curva exportado (${serieHistorica.length} registros).`);
+  };
+
+  const exportarTablaSensoCsv = async () => {
+    setExportandoCsv(true);
+    try {
+      let registros: SensoRowDTO[] = [];
+
+      if (modoTablaSenso !== "RECIENTES") {
+        registros = filasSenso;
+      } else {
+        // Recolecta hasta 640 lecturas en micro-lotes de 32 sin presionar RAM del ESP32
+        const tope = 640;
+        for (let off = 0; off < tope; off += 32) {
+          const lote = await safeRpc(
+            () =>
+              client.listarSensosPaginados({
+                idSensor: filtroIdSensorPag,
+                limiteRegistros: 32,
+                offsetRegistros: off,
+              }),
+            "exportarSensosLote",
+            { silent: true }
+          );
+          if (!lote || lote.length === 0) break;
+          registros.push(...lote);
+          if (lote.length < 32) break;
+        }
+      }
+
+      if (registros.length === 0) {
+        toast.info("No hay registros de Senso para exportar con el filtro actual.");
+        return;
+      }
+
+      const mapaPorId = new Map<number, ResumenSensorCliente>();
+      sensores.forEach((s) => mapaPorId.set(s.idSensor, s));
+
+      const etiquetaSensor =
+        filtroIdSensorPag > 0 ? `sensor_${filtroIdSensorPag}` : "todos";
+      const etiquetaModo =
+        modoTablaSenso === "RECIENTES"
+          ? "historial"
+          : modoTablaSenso.toLowerCase();
+
+      descargarCsv(
+        `senso_${etiquetaSensor}_${etiquetaModo}_${sufijoFechaArchivo()}.csv`,
+        [
+          "id_senso",
+          "id_sensor",
+          "mac",
+          "nombre_sensor",
+          "temperatura_cruda_c",
+          "temperatura_corregida_c",
+          "estado_ds18b20",
+          "timestamp_unix",
+          "fecha_utc_iso",
+          "fecha_hora_local",
+        ],
+        registros.map((r) => {
+          const meta = mapaPorId.get(r.idSensor);
+          return [
+            r.idSenso,
+            r.idSensor,
+            meta?.mac ?? "",
+            meta?.nombre ?? "",
+            r.temperaturaCruda.toFixed(2),
+            r.temperaturaCorregida.toFixed(2),
+            LABEL_ESTADO_SENSOR[r.estadoSensor] ?? `Estado ${r.estadoSensor}`,
+            r.fechaCreacion,
+            formatearIsoUtcDesdeEpoch(r.fechaCreacion),
+            formatearFechaLocalCsv(r.fechaCreacion),
+          ];
+        })
+      );
+
+      toast.success(`CSV de Senso exportado (${registros.length} registros).`);
+    } finally {
+      setExportandoCsv(false);
+    }
+  };
+
   const chartHistorico = serieHistorica.map((item) => ({
     hora: formatearEpochSegundos(item.timestampMs),
     temp: Number(item.temperaturaCorregida.toFixed(2)),
@@ -779,6 +904,16 @@ export function SensoresView({
                     <Search className="h-3.5 w-3.5" />
                   )}
                   Consultar
+                </button>
+                <button
+                  type="button"
+                  disabled={serieHistorica.length === 0 || cargandoHistorial}
+                  onClick={exportarCurvaCsv}
+                  className="btn btn-outline px-2.5 py-1 text-xs"
+                  title="Descargar los puntos visibles de la curva en formato CSV"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  CSV
                 </button>
               </form>
             </div>
@@ -1167,6 +1302,24 @@ export function SensoresView({
               <RefreshCw
                 className={`h-3.5 w-3.5 ${cargandoTabla ? "animate-spin" : ""}`}
               />
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline px-2.5 py-1"
+              disabled={exportandoCsv || cargandoTabla}
+              onClick={() => void exportarTablaSensoCsv()}
+              title={
+                modoTablaSenso === "RECIENTES"
+                  ? "Exportar hasta 640 registros del filtro actual a CSV"
+                  : "Exportar ranking de picos actual a CSV"
+              }
+            >
+              {exportandoCsv ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              CSV
             </button>
 
             {modoTablaSenso === "RECIENTES" && (

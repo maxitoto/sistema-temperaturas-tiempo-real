@@ -104,7 +104,7 @@ void Buzz::evaluarPrioridadAlarmaLatente() {
         }
     }
 
-    if (hayCualquierAlarma) {
+    if (hayCualquierAlarma || Led::getInstance().enPruebaActiva()) {
         Led::getInstance().encenderLed();
     } else {
         Led::getInstance().apagarLed();

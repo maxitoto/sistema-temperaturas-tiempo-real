@@ -210,6 +210,14 @@ export interface ReporteHelpLogBiosDTO {
   ultimosRegistrosLog: string;
 }
 
+export interface ResApagadoSeguroDTO {
+  apagadoIniciado: boolean;
+  alarmaSilenciada: boolean;
+  ledApagado: boolean;
+  tareaDeCierreLanzada: boolean;
+  motivo: string;
+}
+
 // --- Dominio 2: Sensores, Censos, Usuarios, Configuración y Auditorías ---
 
 export interface LecturaSensorCliente {
@@ -530,6 +538,7 @@ export interface ServiceClientAPI {
     claveAp: string
   ): Promise<ConfiguracionWiFiCliente>;
   reiniciarHardware(): Promise<void>;
+  solicitarApagadoSeguro(): Promise<ResApagadoSeguroDTO>;
 
   // Dominio 2: Sensores y Censos
   suscribirSensoresTiempoReal(): Promise<LecturaSensorCliente[]>;

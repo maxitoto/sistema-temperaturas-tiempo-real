@@ -315,12 +315,14 @@ namespace RTOS {
     class PizarraOled {
     private:
         SpinlockCritico lockRam;
-        char cabecera[12] = "";
-        char linea1[22]   = "";
-        char linea2[22]   = "";
-        char linea3[22]   = "";
-        char linea4[22]   = "";
-        bool sucio        = false;
+        char     cabecera[12]          = "";
+        char     linea1[22]            = "";
+        char     linea2[22]            = "";
+        char     linea3[22]            = "";
+        char     linea4[22]            = "";
+        bool     sucio                 = false;
+        bool     mensajeTemporalActivo = false;
+        uint32_t finMensajeTemporalMs  = 0;
 
         char prevCabecera[12] = "";
         char prev1[22]        = "";
@@ -356,11 +358,47 @@ namespace RTOS {
             sucio = true;
         }
 
-        void volcarAlHardwareI2C() {
+        void publicarMensajeTemporal(
+            const char* cab,
+            const char* f1,
+            const char* f2,
+            const char* f3,
+            const char* f4,
+            uint32_t duracionMs
+        ) {
+            if (duracionMs < 500)   duracionMs = 500;
+            if (duracionMs > 15000) duracionMs = 15000;
+            GuardiaCritico g(lockRam);
+            copiarSeguro(cabecera, cab, sizeof(cabecera));
+            copiarSeguro(linea1,   f1,  sizeof(linea1));
+            copiarSeguro(linea2,   f2,  sizeof(linea2));
+            copiarSeguro(linea3,   f3,  sizeof(linea3));
+            copiarSeguro(linea4,   f4,  sizeof(linea4));
+            finMensajeTemporalMs  = millis() + duracionMs;
+            mensajeTemporalActivo = true;
+            sucio                 = true;
+        }
+
+        bool tieneMensajeTemporalActivo() {
+            GuardiaCritico g(lockRam);
+            if (!mensajeTemporalActivo) return false;
+            if (static_cast<int32_t>(millis() - finMensajeTemporalMs) >= 0) {
+                mensajeTemporalActivo = false;
+                return false;
+            }
+            return true;
+        }
+
+        void cancelarMensajeTemporal() {
+            GuardiaCritico g(lockRam);
+            mensajeTemporalActivo = false;
+        }
+
+        void volcarAlHardwareI2C(bool forzarRedibujo = false) {
             char c[12], l1[22], l2[22], l3[22], l4[22];
             {
                 GuardiaCritico g(lockRam);
-                if (!sucio) return;
+                if (!sucio && !forzarRedibujo) return;
                 memcpy(c,  cabecera, sizeof(c));
                 memcpy(l1, linea1,   sizeof(l1));
                 memcpy(l2, linea2,   sizeof(l2));
@@ -369,14 +407,22 @@ namespace RTOS {
                 sucio = false;
             }
 
-            if (strcmp(c, prevCabecera) != 0) {
+            if (forzarRedibujo) {
+                prevCabecera[0] = '\0';
+                prev1[0] = '\0';
+                prev2[0] = '\0';
+                prev3[0] = '\0';
+                prev4[0] = '\0';
+            }
+
+            if (forzarRedibujo || strcmp(c, prevCabecera) != 0) {
                 oled.cabeceraIzq(c);
                 strcpy(prevCabecera, c);
             }
-            if (strcmp(l1, prev1) != 0) { oled.fila1(l1); strcpy(prev1, l1); }
-            if (strcmp(l2, prev2) != 0) { oled.fila2(l2); strcpy(prev2, l2); }
-            if (strcmp(l3, prev3) != 0) { oled.fila3(l3); strcpy(prev3, l3); }
-            if (strcmp(l4, prev4) != 0) { oled.fila4(l4); strcpy(prev4, l4); }
+            if (forzarRedibujo || strcmp(l1, prev1) != 0) { oled.fila1(l1); strcpy(prev1, l1); }
+            if (forzarRedibujo || strcmp(l2, prev2) != 0) { oled.fila2(l2); strcpy(prev2, l2); }
+            if (forzarRedibujo || strcmp(l3, prev3) != 0) { oled.fila3(l3); strcpy(prev3, l3); }
+            if (forzarRedibujo || strcmp(l4, prev4) != 0) { oled.fila4(l4); strcpy(prev4, l4); }
         }
     };
 

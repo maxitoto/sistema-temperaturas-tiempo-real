@@ -250,6 +250,14 @@ export interface ReporteHelpLogBiosDTO {
   ultimosRegistrosLog: string;
 }
 
+export interface ResApagadoSeguroDTO {
+  apagadoIniciado: boolean;
+  alarmaSilenciada: boolean;
+  ledApagado: boolean;
+  tareaDeCierreLanzada: boolean;
+  motivo: string;
+}
+
 export interface CalibracionAmbienteDTO {
   idCalibracion: number;
   altura: number;
@@ -787,6 +795,17 @@ export class ProcedimientosRemotosFirmware {
     return decodificarEstadoHardware(buf);
   };
 
+  solicitarApagadoSeguro = async (): Promise<ResApagadoSeguroDTO> => {
+    const buf = await this.invocar("solicitarApagadoSeguro");
+    return {
+      apagadoIniciado: buf[0] !== 0,
+      alarmaSilenciada: buf[1] !== 0,
+      ledApagado: buf[2] !== 0,
+      tareaDeCierreLanzada: buf[3] !== 0,
+      motivo: leerTextoFijo(buf, 4, 48),
+    };
+  };
+
   leerHelpLogBios = async (): Promise<ReporteHelpLogBiosDTO> => {
     const buf = await this.invocar("leerHelpLogBios");
     const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -1300,6 +1319,7 @@ export const procedimientosRemotosFirmware = {
   obtenerEstadoHardwareDirecto: instancia.obtenerEstadoHardwareDirecto,
   controlarHardwareDirecto: instancia.controlarHardwareDirecto,
   leerHelpLogBios: instancia.leerHelpLogBios,
+  solicitarApagadoSeguro: instancia.solicitarApagadoSeguro,
 
   // Dominio 2: CRUD Completo de Tablas
   obtenerCalibracionAmbiente: instancia.obtenerCalibracionAmbiente,

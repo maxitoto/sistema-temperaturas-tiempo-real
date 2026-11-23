@@ -12,6 +12,7 @@ import {
   RotateCcw,
   CheckCircle2,
   XCircle,
+  Power
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -25,6 +26,7 @@ import {
 import { client, safeRpc } from "../lib/service";
 import { formatearBytes, formatearDuracionSegundos } from "../lib/format";
 import { LABEL_ESTADO_BUS } from "../lib/labels";
+import { NumericInput } from "../components/ui/NumericInput";
 import {
   AccionHardwareDirecto,
   EstadoHardwareDirectoDTO,
@@ -44,11 +46,13 @@ export function BiosHardwareView() {
   const [autoRtos, setAutoRtos] = useState(true);
   const [ejecutandoHw, setEjecutandoHw] = useState(false);
 
-  // Controles de pruebas de Buzzer y OLED
+  // Controles de pruebas temporizadas: LED, Buzzer y OLED
+  const [duracionLedMs, setDuracionLedMs] = useState(2000);
   const [frecuenciaHz, setFrecuenciaHz] = useState(1200);
-  const [duracionMs, setDuracionMs] = useState(250);
+  const [duracionBuzzMs, setDuracionBuzzMs] = useState(250);
   const [lineaOled1, setLineaOled1] = useState("UNTDF LAB ESP32");
   const [lineaOled2, setLineaOled2] = useState("TEST PANTALLA OK");
+  const [duracionOledMs, setDuracionOledMs] = useState(4000);
 
   const cargarTodo = useCallback(async () => {
     const [esp, rtos, log, hw] = await Promise.all([
@@ -96,15 +100,19 @@ export function BiosHardwareView() {
 
   const enviarComandoHw = async (
     accion: AccionHardwareDirecto,
-    mensajeOk: string
+    mensajeOk: string,
+    duracionPersonalizadaMs?: number
   ) => {
     setEjecutandoHw(true);
+    const duracionEnviar = Math.round(
+      duracionPersonalizadaMs ?? duracionBuzzMs
+    );
     const nuevoEstado = await safeRpc(
       () =>
         client.controlarHardwareDirecto({
           accion,
-          frecuenciaHz: Number(frecuenciaHz),
-          duracionMs: Number(duracionMs),
+          frecuenciaHz: Math.round(frecuenciaHz),
+          duracionMs: duracionEnviar,
           lineaOled1: lineaOled1.slice(0, 21),
           lineaOled2: lineaOled2.slice(0, 21),
         }),
@@ -112,7 +120,19 @@ export function BiosHardwareView() {
       { mensajeExito: mensajeOk }
     );
     setEjecutandoHw(false);
-    if (nuevoEstado) setHwDirecto(nuevoEstado);
+    if (nuevoEstado) {
+      setHwDirecto(nuevoEstado);
+      if (accion === AccionHardwareDirecto.LED_ENCENDER) {
+        window.setTimeout(async () => {
+          const refresco = await safeRpc(
+            () => client.obtenerEstadoHardwareDirecto(),
+            "obtenerEstadoHardwareDirecto",
+            { silent: true }
+          );
+          if (refresco) setHwDirecto(refresco);
+        }, duracionEnviar + 250);
+      }
+    }
   };
 
   const handleReiniciarEsp32 = async () => {
@@ -126,6 +146,27 @@ export function BiosHardwareView() {
     await safeRpc(() => client.reiniciarHardware(), "reiniciarHardware", {
       mensajeExito: "Orden de reinicio enviada al ESP32.",
     });
+  };
+
+  const handleApagadoSeguro = async () => {
+    if (
+      !window.confirm(
+        "¿Confirma el APAGADO SEGURO del ESP32? Se silenciará la alarma, se desmontará la MicroSD (FAT32 seguro) y el equipo entrará en deep sleep hasta presionar Reset físico."
+      )
+    ) {
+      return;
+    }
+    const res = await safeRpc(
+      () => client.solicitarApagadoSeguro(),
+      "solicitarApagadoSeguro",
+      {
+        mensajeExito:
+          "Apagado seguro iniciado. Espere ~2 s a que se apague la OLED antes de retirar energía o MicroSD.",
+      }
+    );
+    if (res) {
+      setAutoRtos(false);
+    }
   };
 
   const heapChartData = infoEsp
@@ -163,7 +204,7 @@ export function BiosHardwareView() {
             </h1>
             <p className="text-xs text-foreground-secondary">
               Telemetría nativa Xtensa ESP32, watchdog de tareas RTOS, Caja Negra
-              RTC y pruebas de periféricos
+              RTC y pruebas temporizadas de periféricos
             </p>
           </div>
         </div>
@@ -179,7 +220,10 @@ export function BiosHardwareView() {
       </div>
 
       {/* Panel 1: Telemetría Nativa del Chip ESP32 + Gráfico Heap */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+      <div
+        data-tour="bios-esp"
+        className="grid grid-cols-1 gap-4 xl:grid-cols-12"
+      >
         <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-7">
           <h2 className="mb-3 flex items-center gap-2 text-sm font-bold">
             <Cpu className="h-4 w-4 text-primary" />
@@ -187,7 +231,7 @@ export function BiosHardwareView() {
           </h2>
 
           {infoEsp ? (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
+            <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
               <div className="rounded-lg border border-border bg-background p-2.5">
                 <div className="text-foreground-secondary">Chip / Revisión</div>
                 <div className="mt-0.5 font-mono font-bold">
@@ -285,7 +329,10 @@ export function BiosHardwareView() {
       </div>
 
       {/* Panel 2: Orquestador de Tareas FreeRTOS en Vivo */}
-      <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
+      <div
+        data-tour="bios-rtos"
+        className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+      >
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
@@ -416,10 +463,13 @@ export function BiosHardwareView() {
         </div>
       </div>
 
-      {/* Panel 3 y Panel 4 en Grid: Caja Negra BIOS + Banco de Control Hardware */}
+      {/* Panel 3 y Panel 4: Caja Negra BIOS + Banco de Control Hardware */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         {/* Panel 3: Caja Negra /db/help.log */}
-        <div className="flex flex-col rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-5">
+        <div
+          data-tour="bios-log"
+          className="flex flex-col rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-5"
+        >
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-bold">
               <FileWarning className="h-4 w-4 text-warning" />
@@ -437,25 +487,39 @@ export function BiosHardwareView() {
           </pre>
         </div>
 
-        {/* Panel 4: Banco de Pruebas y Control Directo de Periféricos */}
-        <div className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-7">
+        {/* Panel 4: Banco de Pruebas Temporizadas de Periféricos */}
+        <div
+          data-tour="bios-hw"
+          className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs xl:col-span-7"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-bold">
               Banco de Pruebas y Control Directo de Periféricos
             </h2>
-            <button
-              type="button"
-              onClick={() => void handleReiniciarEsp32()}
-              className="btn btn-solid btn-error px-3 py-1.5 text-xs font-bold"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Reiniciar ESP32
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleReiniciarEsp32()}
+                className="btn btn-outline btn-error px-3 py-1.5 text-xs font-bold"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reiniciar ESP32
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleApagadoSeguro()}
+                className="btn btn-solid btn-error px-3 py-1.5 text-xs font-bold"
+                title="Desmonta la MicroSD de forma segura y entra en deep sleep"
+              >
+                <Power className="h-3.5 w-3.5" />
+                Apagado Seguro
+              </button>
+            </div>
           </div>
 
           {/* Tarjetas de estado en vivo de drivers */}
           {hwDirecto && (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5 text-xs">
+            <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
               <DriverBadge
                 label="MicroSD"
                 ok={hwDirecto.sdInicializada}
@@ -496,35 +560,8 @@ export function BiosHardwareView() {
             </div>
           )}
 
-          {/* Acciones Rápidas LED, Buzzer Silence y Bus 1-Wire */}
+          {/* Acciones Rápidas: Silenciar Alarma y Bus 1-Wire */}
           <div className="flex flex-wrap gap-2 text-xs">
-            <button
-              type="button"
-              disabled={ejecutandoHw}
-              onClick={() =>
-                void enviarComandoHw(
-                  AccionHardwareDirecto.LED_ENCENDER,
-                  "LED físico encendido."
-                )
-              }
-              className="btn btn-solid btn-warning px-3 py-1.5 text-xs font-semibold"
-            >
-              <Lightbulb className="h-3.5 w-3.5" />
-              Encender LED
-            </button>
-            <button
-              type="button"
-              disabled={ejecutandoHw}
-              onClick={() =>
-                void enviarComandoHw(
-                  AccionHardwareDirecto.LED_APAGAR,
-                  "LED físico apagado."
-                )
-              }
-              className="btn btn-outline px-3 py-1.5 text-xs"
-            >
-              Apagar LED
-            </button>
             <button
               type="button"
               disabled={ejecutandoHw}
@@ -555,58 +592,100 @@ export function BiosHardwareView() {
             </button>
           </div>
 
-          {/* Prueba de Tono PWM en Buzzer */}
-          <div className="rounded-lg border border-border bg-background p-3 text-xs">
-            <div className="mb-2 font-semibold">
-              Prueba Acústica PWM en Buzzer
+          {/* Prueba Temporizada de LED + Prueba Acústica PWM en Buzzer */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {/* LED Temporizado */}
+            <div className="rounded-lg border border-border bg-background p-3 text-xs">
+              <div className="mb-2 font-semibold">
+                Prueba Visual Temporizada de LED
+              </div>
+              <div className="flex flex-wrap items-end gap-2.5">
+                <div>
+                  <label className="mb-1 block">Duración (100–15000 ms)</label>
+                  <NumericInput
+                    value={duracionLedMs}
+                    onChange={setDuracionLedMs}
+                    decimals={0}
+                    allowNegative={false}
+                    min={100}
+                    max={15000}
+                    className="w-28 rounded border border-border bg-card px-2.5 py-1 font-mono"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={ejecutandoHw}
+                  onClick={() =>
+                    void enviarComandoHw(
+                      AccionHardwareDirecto.LED_ENCENDER,
+                      `LED encendido en prueba durante ${duracionLedMs} ms.`,
+                      duracionLedMs
+                    )
+                  }
+                  className="btn btn-solid btn-warning px-3 py-1.5 text-xs font-semibold"
+                >
+                  <Lightbulb className="h-3.5 w-3.5" />
+                  Probar LED
+                </button>
+              </div>
             </div>
-            <div className="flex flex-wrap items-end gap-3">
-              <div>
-                <label className="mb-1 block">Frecuencia (100–5000 Hz)</label>
-                <input
-                  type="number"
-                  min={100}
-                  max={5000}
-                  value={frecuenciaHz}
-                  onChange={(e) => setFrecuenciaHz(Number(e.target.value))}
-                  className="w-28 rounded border border-border bg-card px-2.5 py-1 font-mono"
-                />
+
+            {/* Buzzer PWM Temporizado */}
+            <div className="rounded-lg border border-border bg-background p-3 text-xs">
+              <div className="mb-2 font-semibold">
+                Prueba Acústica PWM en Buzzer
               </div>
-              <div>
-                <label className="mb-1 block">Duración (50–2000 ms)</label>
-                <input
-                  type="number"
-                  min={50}
-                  max={2000}
-                  value={duracionMs}
-                  onChange={(e) => setDuracionMs(Number(e.target.value))}
-                  className="w-28 rounded border border-border bg-card px-2.5 py-1 font-mono"
-                />
+              <div className="flex flex-wrap items-end gap-2.5">
+                <div>
+                  <label className="mb-1 block">Frecuencia (Hz)</label>
+                  <NumericInput
+                    value={frecuenciaHz}
+                    onChange={setFrecuenciaHz}
+                    decimals={0}
+                    allowNegative={false}
+                    min={100}
+                    max={5000}
+                    className="w-24 rounded border border-border bg-card px-2.5 py-1 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block">Duración (ms)</label>
+                  <NumericInput
+                    value={duracionBuzzMs}
+                    onChange={setDuracionBuzzMs}
+                    decimals={0}
+                    allowNegative={false}
+                    min={50}
+                    max={5000}
+                    className="w-24 rounded border border-border bg-card px-2.5 py-1 font-mono"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={ejecutandoHw}
+                  onClick={() =>
+                    void enviarComandoHw(
+                      AccionHardwareDirecto.BUZZ_TONO_PRUEBA,
+                      `Tono de prueba emitido (${frecuenciaHz} Hz · ${duracionBuzzMs} ms).`,
+                      duracionBuzzMs
+                    )
+                  }
+                  className="btn btn-solid btn-primary px-3 py-1.5 text-xs font-semibold"
+                >
+                  <Volume2 className="h-3.5 w-3.5" />
+                  Probar Tono
+                </button>
               </div>
-              <button
-                type="button"
-                disabled={ejecutandoHw}
-                onClick={() =>
-                  void enviarComandoHw(
-                    AccionHardwareDirecto.BUZZ_TONO_PRUEBA,
-                    `Tono de prueba emitido (${frecuenciaHz} Hz · ${duracionMs} ms).`
-                  )
-                }
-                className="btn btn-solid btn-primary px-3 py-1.5 text-xs font-semibold"
-              >
-                <Volume2 className="h-3.5 w-3.5" />
-                Probar Tono en Buzzer
-              </button>
             </div>
           </div>
 
-          {/* Publicar Mensaje en Pantalla OLED I2C */}
+          {/* Publicar Mensaje Temporizado en Pantalla OLED I2C */}
           <div className="rounded-lg border border-border bg-background p-3 text-xs">
             <div className="mb-2 font-semibold">
-              Pantalla OLED Física I2C (2 líneas × 21 caracteres)
+              Pantalla OLED Física I2C (2 líneas × 21 chars · retorno automático)
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+              <div className="sm:col-span-5">
                 <label className="mb-1 block">Línea 1 (máx. 21)</label>
                 <input
                   type="text"
@@ -616,7 +695,7 @@ export function BiosHardwareView() {
                   className="w-full rounded border border-border bg-card px-2.5 py-1 font-mono"
                 />
               </div>
-              <div>
+              <div className="sm:col-span-5">
                 <label className="mb-1 block">Línea 2 (máx. 21)</label>
                 <input
                   type="text"
@@ -626,34 +705,38 @@ export function BiosHardwareView() {
                   className="w-full rounded border border-border bg-card px-2.5 py-1 font-mono"
                 />
               </div>
+              <div className="sm:col-span-2">
+                <label className="mb-1 block">Duración (ms)</label>
+                <NumericInput
+                  value={duracionOledMs}
+                  onChange={setDuracionOledMs}
+                  decimals={0}
+                  allowNegative={false}
+                  min={500}
+                  max={15000}
+                  className="w-full rounded border border-border bg-card px-2 py-1 font-mono"
+                />
+              </div>
             </div>
-            <div className="mt-2.5 flex flex-wrap gap-2">
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] text-foreground-secondary">
+                Al finalizar el tiempo, la OLED vuelve sola a la grilla de
+                sensores.
+              </span>
               <button
                 type="button"
                 disabled={ejecutandoHw}
                 onClick={() =>
                   void enviarComandoHw(
                     AccionHardwareDirecto.OLED_PUBLICAR_MENSAJE,
-                    "Mensaje publicado en pantalla OLED."
+                    `Mensaje publicado en OLED durante ${duracionOledMs} ms.`,
+                    duracionOledMs
                   )
                 }
                 className="btn btn-solid btn-success px-3 py-1.5 text-xs font-semibold"
               >
                 <Monitor className="h-3.5 w-3.5" />
                 Publicar en OLED
-              </button>
-              <button
-                type="button"
-                disabled={ejecutandoHw}
-                onClick={() =>
-                  void enviarComandoHw(
-                    AccionHardwareDirecto.OLED_LIMPIAR,
-                    "Pantalla OLED limpiada."
-                  )
-                }
-                className="btn btn-outline px-3 py-1.5 text-xs"
-              >
-                Limpiar OLED
               </button>
             </div>
           </div>

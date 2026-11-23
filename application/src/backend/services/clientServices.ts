@@ -11,5 +11,5 @@ export const clientServices = {
     ...RPUsuario,
     ...RPSensor,
     ...RPSistema,
-    ...procedimientosRemotosFirmware
+    ...procedimientosRemotosFirmware,
 };

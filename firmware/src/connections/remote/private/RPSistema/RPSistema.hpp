@@ -370,9 +370,11 @@ namespace RPSistema {
         "controlarHardwareDirecto",
         [](const ComandoHardwareDirectoDTO& cmd) -> EstadoHardwareDirectoDTO {
             switch (cmd.accion) {
-                case AccionHardwareDirecto::LED_ENCENDER:
-                    led.encenderLed();
+                case AccionHardwareDirecto::LED_ENCENDER: {
+                    uint16_t dMs = (cmd.duracionMs >= 100 && cmd.duracionMs <= 15000) ? cmd.duracionMs : 2000;
+                    led.encenderPruebaMs(dMs);
                     break;
+                }
                 case AccionHardwareDirecto::LED_APAGAR:
                     led.apagarLed();
                     break;
@@ -381,16 +383,24 @@ namespace RPSistema {
                     break;
                 case AccionHardwareDirecto::BUZZ_TONO_PRUEBA: {
                     uint16_t hz  = (cmd.frecuenciaHz >= 100 && cmd.frecuenciaHz <= 5000) ? cmd.frecuenciaHz : 1200;
-                    uint16_t dMs = (cmd.duracionMs >= 50 && cmd.duracionMs <= 2000) ? cmd.duracionMs : 200;
-                    buzz.sonarBuzz( static_cast<int>(hz), static_cast<float>(dMs) / 1000.0f);
+                    uint16_t dMs = (cmd.duracionMs >= 50 && cmd.duracionMs <= 5000) ? cmd.duracionMs : 200;
+                    buzz.sonarBuzz(static_cast<int>(hz), static_cast<float>(dMs) / 1000.0f);
                     break;
                 }
-                case AccionHardwareDirecto::OLED_PUBLICAR_MENSAJE:
-                    RTOS::pizarraOled.publicarPantalla("ADMIN-MSG", cmd.lineaOled1.c_str(), cmd.lineaOled2.c_str(), "", "");
-                    RTOS::pizarraOled.volcarAlHardwareI2C();
+                case AccionHardwareDirecto::OLED_PUBLICAR_MENSAJE: {
+                    uint16_t dMs = (cmd.duracionMs >= 500 && cmd.duracionMs <= 15000) ? cmd.duracionMs : 4000;
+                    RTOS::pizarraOled.publicarMensajeTemporal(
+                        "ADMIN-MSG",
+                        cmd.lineaOled1.c_str(),
+                        cmd.lineaOled2.c_str(),
+                        "",
+                        "",
+                        dMs
+                    );
                     break;
+                }
                 case AccionHardwareDirecto::OLED_LIMPIAR:
-                    oled.limpiarAreaContenido();
+                    RTOS::pizarraOled.cancelarMensajeTemporal();
                     break;
                 case AccionHardwareDirecto::SENSORES_REESCANEAR:
                     gestorSensores.escanearYAsignarSensores();
@@ -540,8 +550,8 @@ inline auto solicitarApagadoSeguro = llamadoSemantico.exactamenteUnaVez<void, Re
         out.alarmaSilenciada = true;
         out.ledApagado       = true;
 
-        // 2. Mostrar en OLED que el sistema se está apagando
-        RTOS::pizarraOled.publicarPantalla("SISTEMA", "Apagando", "Espere...", "", "");
+        // 2. Mostrar en OLED que el sistema se está apagando (lo dibuja TaskOled en Core 0)
+        RTOS::pizarraOled.publicarMensajeTemporal("SISTEMA", "Apagando...", "Espere cierre SD", "", "", 15000);
         RTOS::pizarraOled.volcarAlHardwareI2C();
 
         // 3. Auditoría (se escribirá a SD antes del cierre si hay margen)
