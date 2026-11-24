@@ -45,33 +45,33 @@ namespace DbCommon::Standard {
         UNLOGGED
     };
 
+    inline constexpr const char* PGBIN_MAGIC_STR      = "PGBIN01";
+    inline constexpr uint16_t    PGBIN_FORMAT_VERSION = 1;
+
     // Cabecera física fija de 32 bytes al inicio de cada archivo /db/<Tabla>.pgb
     struct PgBinHeader {
         char     magic[8];       // 0..7   ("PGBIN01\0")
-        int64_t  nextIdentityId; // 8..15  Próximo valor SERIAL / IDENTITY (arranca en 1)
-        uint32_t totalSlots;     // 16..19 Total de slots escritos (activos + borrados)
-        uint32_t activeRows;     // 20..23 Total de filas activas (flags & 0x01)
-        uint16_t version;        // 24..25 Versión de formato binario (1)
-        uint16_t recordSize;     // 26..27 Tamaño fijo de cada slot en bytes (múltiplo de 4)
-        uint32_t reserved;       // 28..31 Reservado (0)
-
-        static constexpr const char* MAGIC_STR = "PGBIN01";
-        static constexpr uint16_t FORMAT_VERSION = 1;
+        int64_t  nextIdentityId; // 8..15
+        uint32_t totalSlots;     // 16..19
+        uint32_t activeRows;     // 20..23
+        uint16_t version;        // 24..25
+        uint16_t recordSize;     // 26..27
+        uint32_t reserved;       // 28..31
 
         void inicializar(uint16_t tamanoRegistro, int64_t inicioIdentity = 1) {
             memset(this, 0, sizeof(PgBinHeader));
-            memcpy(magic, MAGIC_STR, 8);
+            memcpy(magic, PGBIN_MAGIC_STR, 8);
             nextIdentityId = inicioIdentity;
             totalSlots     = 0;
             activeRows     = 0;
-            version        = FORMAT_VERSION;
+            version        = PGBIN_FORMAT_VERSION;
             recordSize     = tamanoRegistro;
             reserved       = 0;
         }
 
         bool esValida(uint16_t recordSizeEsperado = 0) const {
-            if (memcmp(magic, MAGIC_STR, 7) != 0) return false;
-            if (version != FORMAT_VERSION || recordSize < 8) return false;
+            if (memcmp(magic, PGBIN_MAGIC_STR, 7) != 0) return false;
+            if (version != PGBIN_FORMAT_VERSION || recordSize < 8) return false;
             if (recordSizeEsperado != 0 && recordSize != recordSizeEsperado) return false;
             return true;
         }

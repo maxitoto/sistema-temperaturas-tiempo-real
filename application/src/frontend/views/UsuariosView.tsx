@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Users,
   UserCheck,
@@ -11,11 +11,15 @@ import {
   Lock,
   CheckCircle2,
   XCircle,
+  FileSpreadsheet,
 } from "lucide-react";
+import { toast } from "react-toastify";
 import { useAuth } from "../contexts/AuthContext";
 import { client, safeRpc } from "../lib/service";
 import { formatearEpochSegundos } from "../lib/format";
 import { LABEL_ROL } from "../lib/labels";
+import { sufijoFechaArchivo } from "../lib/exportCsv";
+import { exportarTablaExcel } from "../lib/exportExcel";
 import {
   EstadisticasUsuariosCliente,
   PerfilUsuarioCliente,
@@ -23,6 +27,8 @@ import {
   RolUsuario,
 } from "#types/rpc.types";
 import { DataTable, DataTableFilter } from "../components/ui/DataTable";
+
+const PAGE_USUARIOS = 20;
 
 export function UsuariosView() {
   const { usuario: usuarioActual, rol } = useAuth();
@@ -35,10 +41,14 @@ export function UsuariosView() {
   const [claveConfirm, setClaveConfirm] = useState("");
   const [cambiandoClave, setCambiandoClave] = useState(false);
 
-  // --- Gestión de Usuarios (Solo ADMIN) ---
+  // --- Gestión de Usuarios (Solo ADMIN) con Scroll Infinito ---
   const [stats, setStats] = useState<EstadisticasUsuariosCliente | null>(null);
   const [usuarios, setUsuarios] = useState<ResumenUsuarioCliente[]>([]);
+  const [hayMasUsuarios, setHayMasUsuarios] = useState(false);
+  const [cargandoMasUsuarios, setCargandoMasUsuarios] = useState(false);
   const [soloActivos, setSoloActivos] = useState(false);
+  const usuariosLenRef = useRef(0);
+  usuariosLenRef.current = usuarios.length;
 
   // Alta nuevo usuario
   const [nuevoUsuario, setNuevoUsuario] = useState("");
@@ -63,30 +73,88 @@ export function UsuariosView() {
     if (perf) setMiPerfil(perf);
   }, [usuarioActual]);
 
-  const cargarAdminUsuarios = useCallback(async () => {
-    if (!esAdmin) return;
-    const [st, lista] = await Promise.all([
-      safeRpc(
-        () => client.obtenerEstadisticasUsuarios(),
-        "obtenerEstadisticasUsuarios",
-        { silent: true }
-      ),
-      safeRpc(
-        () => client.listarUsuarios(32, 0, soloActivos),
-        "listarUsuarios"
-      ),
-    ]);
-    if (st) setStats(st);
-    if (lista) setUsuarios(lista);
-  }, [esAdmin, soloActivos]);
+  const cargarAdminUsuarios = useCallback(
+    async (reiniciar = true) => {
+      if (!esAdmin) return;
+      const offset = reiniciar ? 0 : usuariosLenRef.current;
+      if (!reiniciar) setCargandoMasUsuarios(true);
+
+      const [st, lista] = await Promise.all([
+        reiniciar
+          ? safeRpc(
+              () => client.obtenerEstadisticasUsuarios(),
+              "obtenerEstadisticasUsuarios",
+              { silent: true }
+            )
+          : Promise.resolve(null),
+        safeRpc(
+          () => client.listarUsuarios(PAGE_USUARIOS, offset, soloActivos),
+          "listarUsuarios"
+        ),
+      ]);
+      setCargandoMasUsuarios(false);
+      if (st) setStats(st);
+      if (lista) {
+        setHayMasUsuarios(lista.length === PAGE_USUARIOS);
+        if (reiniciar) {
+          setUsuarios(lista);
+        } else {
+          setUsuarios((prev) => {
+            const ids = new Set(prev.map((u) => u.idUsuario));
+            return [...prev, ...lista.filter((u) => !ids.has(u.idUsuario))];
+          });
+        }
+      }
+    },
+    [esAdmin, soloActivos]
+  );
 
   useEffect(() => {
     void cargarMiPerfil();
   }, [cargarMiPerfil]);
 
   useEffect(() => {
-    void cargarAdminUsuarios();
+    void cargarAdminUsuarios(true);
   }, [cargarAdminUsuarios]);
+
+  const exportarUsuariosExcel = async () => {
+    if (usuarios.length === 0) {
+      toast.info("No hay usuarios cargados para exportar.");
+      return;
+    }
+    await exportarTablaExcel({
+      nombreArchivo: `usuarios_rbac_${sufijoFechaArchivo()}.xlsx`,
+      nombreHoja: "Usuarios",
+      titulo: "Listado de Cuentas y Roles RBAC",
+      subtitulo: `${usuarios.length} cuentas exportadas`,
+      resumen: stats
+        ? [
+            { etiqueta: "Total Usuarios", valor: stats.totalUsuarios, numFmt: "0" },
+            { etiqueta: "Activos", valor: stats.usuariosActivos, numFmt: "0" },
+            { etiqueta: "Bloqueados", valor: stats.usuariosBloqueados, numFmt: "0" },
+          ]
+        : undefined,
+      columnas: [
+        { header: "ID", width: 10, numFmt: "0" },
+        { header: "Usuario", width: 20 },
+        { header: "Rol RBAC", width: 16 },
+        { header: "Estado", width: 14 },
+        { header: "Bloqueado", width: 14 },
+        { header: "Intentos Fallidos", width: 18, numFmt: "0" },
+        { header: "Última Actualización", width: 22 },
+      ],
+      filas: usuarios.map((u) => [
+        u.idUsuario,
+        u.usuario,
+        LABEL_ROL[u.rol] ?? `Rol ${u.rol}`,
+        u.activa ? "ACTIVO" : "INACTIVO",
+        u.bloqueado ? "BLOQUEADO" : "OK",
+        u.intentosFallidos,
+        formatearEpochSegundos(u.actualizadoEpoch),
+      ]),
+    });
+    toast.success(`Excel de usuarios exportado (${usuarios.length} filas).`);
+  };
 
   const handleCambiarMiClave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -130,7 +198,7 @@ export function UsuariosView() {
       setNuevoUsuario("");
       setNuevaClaveUsuario("");
       setNuevoRolUsuario(RolUsuario.NO_ADMIN);
-      void cargarAdminUsuarios();
+      void cargarAdminUsuarios(true);
     }
   };
 
@@ -145,7 +213,7 @@ export function UsuariosView() {
       { mensajeExito: `Permisos de "${user.usuario}" actualizados.` }
     );
     if (act) {
-      void cargarAdminUsuarios();
+      void cargarAdminUsuarios(true);
       if (user.usuario === usuarioActual) void cargarMiPerfil();
     }
   };
@@ -156,7 +224,7 @@ export function UsuariosView() {
       "desbloquearUsuario",
       { mensajeExito: `Cuenta "${nombreUsuario}" desbloqueada.` }
     );
-    if (res) void cargarAdminUsuarios();
+    if (res) void cargarAdminUsuarios(true);
   };
 
   const handleResetAdmin = async (e: React.FormEvent) => {
@@ -194,7 +262,7 @@ export function UsuariosView() {
       "eliminarUsuario",
       { mensajeExito: `Usuario "${nombreUsuario}" eliminado.` }
     );
-    void cargarAdminUsuarios();
+    void cargarAdminUsuarios(true);
   };
 
   return (
@@ -220,7 +288,7 @@ export function UsuariosView() {
           className="btn btn-outline px-3 py-1.5 text-xs"
           onClick={() => {
             void cargarMiPerfil();
-            if (esAdmin) void cargarAdminUsuarios();
+            if (esAdmin) void cargarAdminUsuarios(true);
           }}
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -259,7 +327,9 @@ export function UsuariosView() {
                 </div>
               </div>
               <div className="rounded-lg border border-border bg-background p-2.5">
-                <div className="text-foreground-secondary">Auditoría Temporal</div>
+                <div className="text-foreground-secondary">
+                  Auditoría Temporal
+                </div>
                 <div className="mt-0.5 font-mono text-[11px]">
                   Creado: {miPerfil.creadoEl || "—"}
                   <br />
@@ -282,7 +352,7 @@ export function UsuariosView() {
             <KeyRound className="h-4 w-4 text-warning" />
             Cambiar Mi Contraseña
           </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
+          <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
             <div>
               <label className="mb-1 block">Clave Actual</label>
               <input
@@ -360,7 +430,7 @@ export function UsuariosView() {
               </div>
               <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
                 <div className="text-xs text-foreground-secondary">
-                  Límite Intentos Fallidos
+                  Máx. Intentos Fallidos
                 </div>
                 <div className="mt-1 text-xl font-bold text-warning">
                   {stats.maxIntentosFallidos}
@@ -374,7 +444,7 @@ export function UsuariosView() {
             onSubmit={handleCrearUsuario}
             className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-4 text-xs text-card-foreground shadow-xs"
           >
-            <div className="flex items-center gap-2 self-center font-bold text-sm mr-2">
+            <div className="mr-2 flex items-center gap-2 self-center text-sm font-bold">
               <UserPlus className="h-4 w-4 text-primary" />
               Alta de Usuario:
             </div>
@@ -472,25 +542,46 @@ export function UsuariosView() {
             </form>
           )}
 
-          {/* Tabla de Usuarios */}
+          {/* Tabla de Usuarios con Scroll Infinito y Exportar Excel */}
           <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-bold">
                 Cuentas Registradas ({usuarios.length})
               </h2>
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
-                <input
-                  type="checkbox"
-                  checked={soloActivos}
-                  onChange={(e) => setSoloActivos(e.target.checked)}
-                />
-                Mostrar solo activos
-              </label>
+              <div className="flex items-center gap-3 text-xs">
+                <label className="flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={soloActivos}
+                    onChange={(e) => setSoloActivos(e.target.checked)}
+                  />
+                  Mostrar solo activos
+                </label>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-success px-2.5 py-1"
+                  disabled={usuarios.length === 0}
+                  onClick={() => void exportarUsuariosExcel()}
+                  title="Exportar tabla de usuarios a Excel (.xlsx)"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  Excel
+                </button>
+              </div>
             </div>
 
             <DataTable
               data={usuarios}
               rowKey={(u) => u.idUsuario}
+              infiniteScroll
+              maxBodyHeightClass="max-h-[420px]"
+              hasMore={hayMasUsuarios}
+              loadingMore={cargandoMasUsuarios}
+              onLoadMore={() => void cargarAdminUsuarios(false)}
+              dateFilter={{
+                label: "Actualizado",
+                getEpochSeg: (u) => u.actualizadoEpoch,
+              }}
               searchPlaceholder="Buscar nombre de usuario..."
               searchValue={(u) => `#${u.idUsuario} ${u.usuario}`}
               filters={

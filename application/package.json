@@ -19,6 +19,7 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "dev": "0.1.5",
+    "exceljs": "^4.4.0",
     "lucide-react": "1.17.0",
     "nodemailer": "9.0.1",
     "radix-ui": "1.5.0",

@@ -11,14 +11,18 @@ import {
   Edit2,
   RefreshCw,
   Loader2,
-  Send, 
-  CheckCircle2, 
-  XCircle
+  Send,
+  CheckCircle2,
+  XCircle,
+  FileSpreadsheet,
 } from "lucide-react";
+import { toast } from "react-toastify";
 import { useAuth } from "../contexts/AuthContext";
 import { client, safeRpc } from "../lib/service";
-import { formatearEpochSegundos, redondearDecimal } from "../lib/format";
+import { formatearEpochSegundos } from "../lib/format";
 import { LABEL_ESTADO_ENVIO, LABEL_TIPO_RECEPCION } from "../lib/labels";
+import { sufijoFechaArchivo } from "../lib/exportCsv";
+import { exportarTablaExcel } from "../lib/exportExcel";
 import { NumericInput } from "../components/ui/NumericInput";
 import {
   CalibracionAmbienteDTO,
@@ -29,7 +33,7 @@ import {
   RolUsuario,
   ServidorNtpItemDTO,
   TipoRecepcionCorreo,
-  ResultadoEnvioSmtpDTO
+  ResultadoEnvioSmtpDTO,
 } from "#types/rpc.types";
 import { FormulaTooltip } from "../components/ui/FormulaTooltip";
 import {
@@ -280,7 +284,6 @@ export function ConfiguracionView({
     if (res) setAmbiente(res);
   };
 
-  // Estimación física estándar de ebullición del agua a partir de presión atmosférica (hPa)
   const aplicarEstimacionDesdeAltura = () => {
     const pEst = estimarPresionDesdeAltura(formAmbiente.altura);
     const tEbull = estimarEbullicionDesdePresion(pEst);
@@ -292,7 +295,9 @@ export function ConfiguracionView({
   };
 
   const aplicarEstimacionDesdePresion = () => {
-    const tEbull = estimarEbullicionDesdePresion(formAmbiente.presionAtmosferica);
+    const tEbull = estimarEbullicionDesdePresion(
+      formAmbiente.presionAtmosferica
+    );
     setFormAmbiente((prev) => ({ ...prev, tempEbullicionRef: tEbull }));
   };
 
@@ -447,6 +452,67 @@ export function ConfiguracionView({
       { mensajeExito: "Servidor NTP eliminado." }
     );
     void cargarNtp();
+  };
+
+  const exportarCorreosExcel = async () => {
+    if (correos.length === 0) {
+      toast.info("No hay destinatarios cargados para exportar.");
+      return;
+    }
+    await exportarTablaExcel({
+      nombreArchivo: `destinatarios_correos_${sufijoFechaArchivo()}.xlsx`,
+      nombreHoja: "Correos",
+      titulo: "Destinatarios de Alertas por Correo (SMTP)",
+      subtitulo: `${correos.length} destinatarios registrados`,
+      columnas: [
+        { header: "ID", width: 10, numFmt: "0" },
+        { header: "Nombre", width: 18 },
+        { header: "Apellido", width: 18 },
+        { header: "Correo Electrónico", width: 32 },
+        { header: "Filtro de Recepción", width: 24 },
+        { header: "Último Envío", width: 16 },
+        { header: "Estado", width: 12 },
+      ],
+      filas: correos.map((c) => [
+        c.idCorreo,
+        c.nombre,
+        c.apellido,
+        c.correoElectronico,
+        LABEL_TIPO_RECEPCION[c.tipoRecepcionMensajes] ??
+          String(c.tipoRecepcionMensajes),
+        LABEL_ESTADO_ENVIO[c.ultimoEstadoEnvio] ?? String(c.ultimoEstadoEnvio),
+        c.activa ? "ACTIVO" : "INACTIVO",
+      ]),
+    });
+    toast.success(`Excel de correos exportado (${correos.length} filas).`);
+  };
+
+  const exportarNtpExcel = async () => {
+    if (servidoresNtp.length === 0) {
+      toast.info("No hay servidores NTP cargados para exportar.");
+      return;
+    }
+    await exportarTablaExcel({
+      nombreArchivo: `servidores_ntp_${sufijoFechaArchivo()}.xlsx`,
+      nombreHoja: "Servidores NTP",
+      titulo: "Servidores de Sincronización Horaria NTP",
+      subtitulo: `${servidoresNtp.length} servidores configurados`,
+      columnas: [
+        { header: "ID", width: 10, numFmt: "0" },
+        { header: "Servidor NTP", width: 30 },
+        { header: "Prioridad", width: 14, numFmt: "0" },
+        { header: "Estado", width: 12 },
+      ],
+      filas: servidoresNtp.map((n) => [
+        n.idServer,
+        n.server,
+        n.prioridad,
+        n.activa ? "ACTIVO" : "INACTIVO",
+      ]),
+    });
+    toast.success(
+      `Excel de servidores NTP exportado (${servidoresNtp.length} filas).`
+    );
   };
 
   return (
@@ -686,12 +752,18 @@ export function ConfiguracionView({
         </form>
       )}
 
-      {/* PESTAÑA 2: CALIBRACIÓN AMBIENTAL GLOBAL (movida desde SensoresView) */}
+      {/* PESTAÑA 2: CALIBRACIÓN AMBIENTAL GLOBAL */}
       {tab === "AMBIENTE" && (
         <form
           onSubmit={guardarAmbiente}
           className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
         >
+          {ambiente && (
+            <div className="text-right font-mono text-[11px] text-foreground-secondary">
+              Última mod.: {formatearEpochSegundos(ambiente.fechaModificacion)}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <label className="mb-1 flex items-center gap-1.5 font-medium">
@@ -807,14 +879,16 @@ export function ConfiguracionView({
                   onClick={aplicarEstimacionDesdeAltura}
                   className="btn btn-outline px-3 py-1.5 text-xs"
                 >
-                  Calcular Presión y Ebullición desde Altura ({formAmbiente.altura} m)
+                  Calcular Presión y Ebullición desde Altura (
+                  {formAmbiente.altura} m)
                 </button>
                 <button
                   type="button"
                   onClick={aplicarEstimacionDesdePresion}
                   className="btn btn-outline px-3 py-1.5 text-xs"
                 >
-                  Estimar Ebullición desde Presión ({formAmbiente.presionAtmosferica} hPa)
+                  Estimar Ebullición desde Presión (
+                  {formAmbiente.presionAtmosferica} hPa)
                 </button>
                 <button
                   type="submit"
@@ -968,10 +1042,10 @@ export function ConfiguracionView({
             <form
               onSubmit={guardarSmtp}
               className="space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
-            > 
+            >
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-bold">
-                  Servidor Saliente SMTP (Alertas por Correo)
+                  Servidor Saliente SMTP (Envío Autónomo desde ESP32)
                 </h2>
                 {smtpCfg && (
                   <span className="font-mono text-[10px] text-foreground-secondary">
@@ -1077,7 +1151,7 @@ export function ConfiguracionView({
                         setFormSmtp({ ...formSmtp, usarTls: e.target.checked })
                       }
                     />
-                    STARTTLS / TLS
+                    TLS (465)
                   </label>
                   <label className="flex items-center gap-1.5">
                     <input
@@ -1099,104 +1173,117 @@ export function ConfiguracionView({
                 <Save className="h-3.5 w-3.5" />
                 Guardar Servidor SMTP
               </button>
-              <div className="border-t border-border pt-3 space-y-2.5">
-                  <div className="text-[11px] text-foreground-secondary">
-                    Para <strong>Gmail</strong>: use host{" "}
-                    <code>smtp.gmail.com</code>, puerto <code>465</code>,{" "}
-                    <strong>TLS activado</strong> y una{" "}
-                    <strong>Contraseña de Aplicación</strong> de Google (16
-                    caracteres; los espacios se eliminan automáticamente).
-                  </div>
 
-                  <div className="flex flex-wrap items-end gap-2 text-xs">
-                    <div>
-                      <label className="mb-1 block">
-                        Destino de prueba (opcional)
-                      </label>
-                      <input
-                        type="email"
-                        maxLength={47}
-                        value={destinoPruebaSmtp}
-                        onChange={(e) => setDestinoPruebaSmtp(e.target.value)}
-                        placeholder="Vacío = 1° destinatario activo"
-                        className="w-60 rounded border border-border bg-background px-2.5 py-1.5 font-mono"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      disabled={probandoSmtp}
-                      onClick={() => void probarEnvioSmtp()}
-                      className="btn btn-solid btn-info px-3 py-1.5 text-xs font-semibold"
-                    >
-                      {probandoSmtp ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Send className="h-3.5 w-3.5" />
-                      )}
-                      Enviar Correo de Prueba
-                    </button>
-                    <button
-                      type="button"
-                      disabled={probandoSmtp}
-                      onClick={() => void despacharPendientesAhora()}
-                      className="btn btn-solid btn-success px-3 py-1.5 text-xs font-semibold"
-                      title="Envía ahora los avisos PENDIENTE de AuditoriaSensores y AuditoriaSistema sin esperar cooldown"
-                    >
-                      {probandoSmtp ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Mail className="h-3.5 w-3.5" />
-                      )}
-                      Despachar Avisos Pendientes Ahora
-                    </button>
-                  </div>
-
-                  {resultadoPruebaSmtp && (
-                    <div
-                      className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${
-                        resultadoPruebaSmtp.exito
-                          ? "border-alert-success-border bg-alert-success-bg text-alert-success-icon"
-                          : "border-alert-err-border bg-alert-err-bg text-alert-err-icon"
-                      }`}
-                    >
-                      {resultadoPruebaSmtp.exito ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0" />
-                      ) : (
-                        <XCircle className="h-4 w-4 shrink-0" />
-                      )}
-                      <span className="font-mono">
-                        [{resultadoPruebaSmtp.codigoSmtp || "NET"}]
-                      </span>
-                      <span>{resultadoPruebaSmtp.detalle}</span>
-                      {resultadoPruebaSmtp.eventosActualizados > 0 && (
-                        <span className="rounded bg-background/80 px-2 py-0.5 font-mono text-[11px] text-foreground">
-                          {resultadoPruebaSmtp.eventosActualizados} aviso(s) →
-                          ENVIADO
-                        </span>
-                      )}
-                    </div>
-                  )}
+              <div className="space-y-2.5 border-t border-border pt-3">
+                <div className="text-[11px] text-foreground-secondary">
+                  El ESP32 despacha alertas HTML automáticamente al detectar
+                  incidentes (y reintenta fallidos al volver WiFi). Para{" "}
+                  <strong>Gmail</strong>: host <code>smtp.gmail.com</code>,
+                  puerto <code>465</code>, <strong>TLS</strong> y{" "}
+                  <strong>App Password</strong> de 16 caracteres.
                 </div>
+
+                <div className="flex flex-wrap items-end gap-2 text-xs">
+                  <div>
+                    <label className="mb-1 block">
+                      Destino de prueba (opcional)
+                    </label>
+                    <input
+                      type="email"
+                      maxLength={47}
+                      value={destinoPruebaSmtp}
+                      onChange={(e) => setDestinoPruebaSmtp(e.target.value)}
+                      placeholder="Vacío = 1° destinatario activo"
+                      className="w-60 rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={probandoSmtp}
+                    onClick={() => void probarEnvioSmtp()}
+                    className="btn btn-solid btn-info px-3 py-1.5 text-xs font-semibold"
+                  >
+                    {probandoSmtp ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Send className="h-3.5 w-3.5" />
+                    )}
+                    Probar Conexión SMTP
+                  </button>
+                  <button
+                    type="button"
+                    disabled={probandoSmtp}
+                    onClick={() => void despacharPendientesAhora()}
+                    className="btn btn-outline px-3 py-1.5 text-xs"
+                    title="Diagnóstico: fuerza un ciclo inmediato sin esperar cooldown"
+                  >
+                    {probandoSmtp ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Mail className="h-3.5 w-3.5" />
+                    )}
+                    Forzar Ciclo Ahora (Diagnóstico)
+                  </button>
+                </div>
+
+                {resultadoPruebaSmtp && (
+                  <div
+                    className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${
+                      resultadoPruebaSmtp.exito
+                        ? "border-alert-success-border bg-alert-success-bg text-alert-success-icon"
+                        : "border-alert-err-border bg-alert-err-bg text-alert-err-icon"
+                    }`}
+                  >
+                    {resultadoPruebaSmtp.exito ? (
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    ) : (
+                      <XCircle className="h-4 w-4 shrink-0" />
+                    )}
+                    <span className="font-mono">
+                      [{resultadoPruebaSmtp.codigoSmtp || "NET"}]
+                    </span>
+                    <span>{resultadoPruebaSmtp.detalle}</span>
+                    {resultadoPruebaSmtp.eventosActualizados > 0 && (
+                      <span className="rounded bg-background/80 px-2 py-0.5 font-mono text-[11px] text-foreground">
+                        {resultadoPruebaSmtp.eventosActualizados} aviso(s)
+                        actualizados
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
             </form>
           )}
 
           <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-bold">
                 Destinatarios de Alertas ({correos.length})
               </h2>
-              <button
-                type="button"
-                className="btn btn-outline px-2.5 py-1 text-xs"
-                onClick={async () => {
-                  await safeRpc(() => client.invalidarCache(), "cache", {
-                    silent: true,
-                  });
-                  void cargarCorreosYSmtp();
-                }}
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-              </button>
+              <div className="flex items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  className="btn btn-outline btn-success px-2.5 py-1"
+                  disabled={correos.length === 0}
+                  onClick={() => void exportarCorreosExcel()}
+                  title="Exportar destinatarios a Excel (.xlsx)"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  Excel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline px-2.5 py-1"
+                  onClick={async () => {
+                    await safeRpc(() => client.invalidarCache(), "cache", {
+                      silent: true,
+                    });
+                    void cargarCorreosYSmtp();
+                  }}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
             {esAdmin && (
@@ -1316,138 +1403,140 @@ export function ConfiguracionView({
             )}
 
             <DataTable
-                data={correos}
-                rowKey={(c) => c.idCorreo}
-                searchPlaceholder="Buscar nombre o email..."
-                searchValue={(c) =>
-                  `${c.nombre} ${c.apellido} ${c.correoElectronico}`
-                }
-                filters={[
-                  {
-                    key: "filtro",
-                    label: "Filtro",
-                    getValue: (c) => c.tipoRecepcionMensajes,
-                    options: Object.entries(LABEL_TIPO_RECEPCION).map(
-                      ([value, label]) => ({ value, label })
-                    ),
-                  },
-                  {
-                    key: "envio",
-                    label: "Último Envío",
-                    getValue: (c) => c.ultimoEstadoEnvio,
-                    options: Object.entries(LABEL_ESTADO_ENVIO).map(
-                      ([value, label]) => ({ value, label })
-                    ),
-                  },
-                  {
-                    key: "activo",
-                    label: "Estado",
-                    getValue: (c) => (c.activa ? "1" : "0"),
-                    options: [
-                      { value: "1", label: "ACTIVO" },
-                      { value: "0", label: "INACTIVO" },
-                    ],
-                  },
-                ]}
-                columns={[
-                  {
-                    key: "id",
-                    header: "ID",
-                    sortValue: (c) => c.idCorreo,
-                    cellClassName: "font-mono",
-                    cell: (c) => `#${c.idCorreo}`,
-                  },
-                  {
-                    key: "destinatario",
-                    header: "Destinatario",
-                    sortValue: (c) => `${c.nombre} ${c.apellido}`,
-                    cellClassName: "font-medium",
-                    cell: (c) => `${c.nombre} ${c.apellido}`,
-                  },
-                  {
-                    key: "email",
-                    header: "Email",
-                    sortValue: (c) => c.correoElectronico,
-                    cellClassName: "font-mono",
-                    cell: (c) => c.correoElectronico,
-                  },
-                  {
-                    key: "filtro",
-                    header: "Filtro",
-                    sortValue: (c) => c.tipoRecepcionMensajes,
-                    cellClassName: "text-[11px]",
-                    cell: (c) =>
-                      LABEL_TIPO_RECEPCION[c.tipoRecepcionMensajes] ??
-                      c.tipoRecepcionMensajes,
-                  },
-                  {
-                    key: "envio",
-                    header: "Último Envío",
-                    sortValue: (c) => c.ultimoEstadoEnvio,
-                    cellClassName: "text-[11px]",
-                    cell: (c) =>
-                      LABEL_ESTADO_ENVIO[c.ultimoEstadoEnvio] ??
-                      c.ultimoEstadoEnvio,
-                  },
-                  {
-                    key: "estado",
-                    header: "Estado",
-                    sortValue: (c) => c.activa,
-                    cell: (c) => (
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                          c.activa
-                            ? "bg-alert-success-bg text-alert-success-icon"
-                            : "bg-alert-inactive-bg text-alert-inactive-icon"
-                        }`}
-                      >
-                        {c.activa ? "ACTIVO" : "INACTIVO"}
-                      </span>
-                    ),
-                  },
-                  ...(esAdmin
-                    ? ([
-                        {
-                          key: "acciones",
-                          header: "Acciones",
-                          headerClassName: "text-right",
-                          cellClassName: "text-right",
-                          cell: (c) => (
-                            <div className="inline-flex items-center gap-1">
-                              <button
-                                className="btn btn-icon btn-info"
-                                onClick={() =>
-                                  setFormCorreo({
-                                    idCorreo: c.idCorreo,
-                                    nombre: c.nombre,
-                                    apellido: c.apellido,
-                                    correoElectronico: c.correoElectronico,
-                                    tipoRecepcionMensajes:
-                                      c.tipoRecepcionMensajes,
-                                    activa: c.activa,
-                                  })
-                                }
-                                title="Editar"
-                              >
-                                <Edit2 className="h-3.5 w-3.5" />
-                              </button>
-                              <button
-                                className="btn btn-icon btn-error"
-                                onClick={() =>
-                                  void eliminarDestinatario(c.idCorreo)
-                                }
-                                title="Eliminar"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ),
-                        },
-                      ] as DataTableColumn<CorreoItemDTO>[])
-                    : []),
-                ]}
-                emptyMessage="No hay destinatarios configurados."
-              />
+              data={correos}
+              rowKey={(c) => c.idCorreo}
+              infiniteScroll
+              maxBodyHeightClass="max-h-[360px]"
+              searchPlaceholder="Buscar nombre o email..."
+              searchValue={(c) =>
+                `${c.nombre} ${c.apellido} ${c.correoElectronico}`
+              }
+              filters={[
+                {
+                  key: "filtro",
+                  label: "Filtro",
+                  getValue: (c) => c.tipoRecepcionMensajes,
+                  options: Object.entries(LABEL_TIPO_RECEPCION).map(
+                    ([value, label]) => ({ value, label })
+                  ),
+                },
+                {
+                  key: "envio",
+                  label: "Último Envío",
+                  getValue: (c) => c.ultimoEstadoEnvio,
+                  options: Object.entries(LABEL_ESTADO_ENVIO).map(
+                    ([value, label]) => ({ value, label })
+                  ),
+                },
+                {
+                  key: "activo",
+                  label: "Estado",
+                  getValue: (c) => (c.activa ? "1" : "0"),
+                  options: [
+                    { value: "1", label: "ACTIVO" },
+                    { value: "0", label: "INACTIVO" },
+                  ],
+                },
+              ]}
+              columns={[
+                {
+                  key: "id",
+                  header: "ID",
+                  sortValue: (c) => c.idCorreo,
+                  cellClassName: "font-mono",
+                  cell: (c) => `#${c.idCorreo}`,
+                },
+                {
+                  key: "destinatario",
+                  header: "Destinatario",
+                  sortValue: (c) => `${c.nombre} ${c.apellido}`,
+                  cellClassName: "font-medium",
+                  cell: (c) => `${c.nombre} ${c.apellido}`,
+                },
+                {
+                  key: "email",
+                  header: "Email",
+                  sortValue: (c) => c.correoElectronico,
+                  cellClassName: "font-mono",
+                  cell: (c) => c.correoElectronico,
+                },
+                {
+                  key: "filtro",
+                  header: "Filtro",
+                  sortValue: (c) => c.tipoRecepcionMensajes,
+                  cellClassName: "text-[11px]",
+                  cell: (c) =>
+                    LABEL_TIPO_RECEPCION[c.tipoRecepcionMensajes] ??
+                    c.tipoRecepcionMensajes,
+                },
+                {
+                  key: "envio",
+                  header: "Último Envío",
+                  sortValue: (c) => c.ultimoEstadoEnvio,
+                  cellClassName: "text-[11px]",
+                  cell: (c) =>
+                    LABEL_ESTADO_ENVIO[c.ultimoEstadoEnvio] ??
+                    c.ultimoEstadoEnvio,
+                },
+                {
+                  key: "estado",
+                  header: "Estado",
+                  sortValue: (c) => c.activa,
+                  cell: (c) => (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        c.activa
+                          ? "bg-alert-success-bg text-alert-success-icon"
+                          : "bg-alert-inactive-bg text-alert-inactive-icon"
+                      }`}
+                    >
+                      {c.activa ? "ACTIVO" : "INACTIVO"}
+                    </span>
+                  ),
+                },
+                ...(esAdmin
+                  ? ([
+                      {
+                        key: "acciones",
+                        header: "Acciones",
+                        headerClassName: "text-right",
+                        cellClassName: "text-right",
+                        cell: (c) => (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              className="btn btn-icon btn-info"
+                              onClick={() =>
+                                setFormCorreo({
+                                  idCorreo: c.idCorreo,
+                                  nombre: c.nombre,
+                                  apellido: c.apellido,
+                                  correoElectronico: c.correoElectronico,
+                                  tipoRecepcionMensajes:
+                                    c.tipoRecepcionMensajes,
+                                  activa: c.activa,
+                                })
+                              }
+                              title="Editar"
+                            >
+                              <Edit2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              className="btn btn-icon btn-error"
+                              onClick={() =>
+                                void eliminarDestinatario(c.idCorreo)
+                              }
+                              title="Eliminar"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ),
+                      },
+                    ] as DataTableColumn<CorreoItemDTO>[])
+                  : []),
+              ]}
+              emptyMessage="No hay destinatarios configurados."
+            />
           </div>
         </div>
       )}
@@ -1455,22 +1544,34 @@ export function ConfiguracionView({
       {/* PESTAÑA 5: SERVIDORES NTP */}
       {tab === "NTP" && (
         <div className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-bold">
               Servidores de Sincronización Horaria NTP ({servidoresNtp.length})
             </h2>
-            <button
-              type="button"
-              className="btn btn-outline px-2.5 py-1 text-xs"
-              onClick={async () => {
-                await safeRpc(() => client.invalidarCache(), "cache", {
-                  silent: true,
-                });
-                void cargarNtp();
-              }}
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                className="btn btn-outline btn-success px-2.5 py-1"
+                disabled={servidoresNtp.length === 0}
+                onClick={() => void exportarNtpExcel()}
+                title="Exportar servidores NTP a Excel (.xlsx)"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                Excel
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline px-2.5 py-1"
+                onClick={async () => {
+                  await safeRpc(() => client.invalidarCache(), "cache", {
+                    silent: true,
+                  });
+                  void cargarNtp();
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
 
           {esAdmin && (
@@ -1544,95 +1645,97 @@ export function ConfiguracionView({
           )}
 
           <DataTable
-              data={servidoresNtp}
-              rowKey={(ntp) => ntp.idServer}
-              filters={[
-                {
-                  key: "activo",
-                  label: "Estado",
-                  getValue: (n) => (n.activa ? "1" : "0"),
-                  options: [
-                    { value: "1", label: "ACTIVO" },
-                    { value: "0", label: "INACTIVO" },
-                  ],
-                },
-              ]}
-              columns={[
-                {
-                  key: "id",
-                  header: "ID",
-                  sortValue: (n) => n.idServer,
-                  cellClassName: "font-mono",
-                  cell: (n) => `#${n.idServer}`,
-                },
-                {
-                  key: "server",
-                  header: "Servidor NTP",
-                  sortValue: (n) => n.server,
-                  cellClassName: "font-mono font-bold",
-                  cell: (n) => n.server,
-                },
-                {
-                  key: "prioridad",
-                  header: "Prioridad",
-                  sortValue: (n) => n.prioridad,
-                  cellClassName: "font-mono",
-                  cell: (n) => n.prioridad,
-                },
-                {
-                  key: "estado",
-                  header: "Estado",
-                  sortValue: (n) => n.activa,
-                  cell: (n) => (
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                        n.activa
-                          ? "bg-alert-success-bg text-alert-success-icon"
-                          : "bg-alert-inactive-bg text-alert-inactive-icon"
-                      }`}
-                    >
-                      {n.activa ? "ACTIVO" : "INACTIVO"}
-                    </span>
-                  ),
-                },
-                ...(esAdmin
-                  ? ([
-                      {
-                        key: "acciones",
-                        header: "Acciones",
-                        headerClassName: "text-right",
-                        cellClassName: "text-right",
-                        cell: (n) => (
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              className="btn btn-icon btn-info"
-                              onClick={() =>
-                                setFormNtp({
-                                  idServer: n.idServer,
-                                  server: n.server,
-                                  prioridad: n.prioridad,
-                                  activa: n.activa,
-                                })
-                              }
-                              title="Editar"
-                            >
-                              <Edit2 className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              className="btn btn-icon btn-error"
-                              onClick={() => void eliminarNtp(n.idServer)}
-                              title="Eliminar"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ),
-                      },
-                    ] as DataTableColumn<ServidorNtpItemDTO>[])
-                  : []),
-              ]}
-              emptyMessage="Sin servidores NTP configurados."
-            />
+            data={servidoresNtp}
+            rowKey={(ntp) => ntp.idServer}
+            infiniteScroll
+            maxBodyHeightClass="max-h-[360px]"
+            filters={[
+              {
+                key: "activo",
+                label: "Estado",
+                getValue: (n) => (n.activa ? "1" : "0"),
+                options: [
+                  { value: "1", label: "ACTIVO" },
+                  { value: "0", label: "INACTIVO" },
+                ],
+              },
+            ]}
+            columns={[
+              {
+                key: "id",
+                header: "ID",
+                sortValue: (n) => n.idServer,
+                cellClassName: "font-mono",
+                cell: (n) => `#${n.idServer}`,
+              },
+              {
+                key: "server",
+                header: "Servidor NTP",
+                sortValue: (n) => n.server,
+                cellClassName: "font-mono font-bold",
+                cell: (n) => n.server,
+              },
+              {
+                key: "prioridad",
+                header: "Prioridad",
+                sortValue: (n) => n.prioridad,
+                cellClassName: "font-mono",
+                cell: (n) => n.prioridad,
+              },
+              {
+                key: "estado",
+                header: "Estado",
+                sortValue: (n) => n.activa,
+                cell: (n) => (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      n.activa
+                        ? "bg-alert-success-bg text-alert-success-icon"
+                        : "bg-alert-inactive-bg text-alert-inactive-icon"
+                    }`}
+                  >
+                    {n.activa ? "ACTIVO" : "INACTIVO"}
+                  </span>
+                ),
+              },
+              ...(esAdmin
+                ? ([
+                    {
+                      key: "acciones",
+                      header: "Acciones",
+                      headerClassName: "text-right",
+                      cellClassName: "text-right",
+                      cell: (n) => (
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            className="btn btn-icon btn-info"
+                            onClick={() =>
+                              setFormNtp({
+                                idServer: n.idServer,
+                                server: n.server,
+                                prioridad: n.prioridad,
+                                activa: n.activa,
+                              })
+                            }
+                            title="Editar"
+                          >
+                            <Edit2 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            className="btn btn-icon btn-error"
+                            onClick={() => void eliminarNtp(n.idServer)}
+                            title="Eliminar"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ),
+                    },
+                  ] as DataTableColumn<ServidorNtpItemDTO>[])
+                : []),
+            ]}
+            emptyMessage="Sin servidores NTP configurados."
+          />
         </div>
       )}
     </div>

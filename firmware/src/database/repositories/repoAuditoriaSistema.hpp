@@ -127,6 +127,31 @@ namespace DbRuntime::Repositories {
             return out;
         }
 
+        static std::vector<AuditoriaSistemaDTO> listarNotificables(
+            uint16_t limite,
+            CriticidadEvento critMinima,
+            bool incluirFallidos
+        ) {
+            asegurarEsquemaTabla(TABLA);
+            if (limite == 0 || limite > 16) limite = 16;
+
+            std::vector<AuditoriaSistemaDTO> out;
+            out.reserve(limite);
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+                const auto est = r.getEnum<EstadoEnvioCorreo>("estado_reporte");
+                const bool elegibleEstado = (est == EstadoEnvioCorreo::PENDIENTE) ||
+                                            (incluirFallidos && est == EstadoEnvioCorreo::FALLIDO);
+                if (!elegibleEstado) return true;
+
+                const auto crit = r.getEnum<CriticidadEvento>("criticidad");
+                if (static_cast<uint8_t>(crit) < static_cast<uint8_t>(critMinima)) return true;
+
+                out.push_back(mapear(r));
+                return out.size() < limite;
+            });
+            return out;
+        }
+
         static AuditoriaSistemaDTO actualizarEstadoReporte(int32_t idAuditoriaSistema, EstadoEnvioCorreo nuevoEstado) {
             asegurarEsquemaTabla(TABLA);
             PgRowBuffer updated;

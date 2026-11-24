@@ -154,7 +154,8 @@ namespace SmtpNet {
             size_t cantDestinatarios,
             const char* asunto,
             const char* cuerpo,
-            bool* aceptadoPorIndice
+            bool* aceptadoPorIndice,
+            bool esHtml = false
         ) {
             ResultadoSmtp res{};
             char resp[128]{};
@@ -257,25 +258,45 @@ namespace SmtpNet {
                 primeroTo = false;
             }
             cli.print("\r\nSubject: ");
-            cli.print(asunto ? asunto : "[UNTDF ESP32] Notificacion");
-            cli.print("\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n");
+            {
+                const char* subjRaw = (asunto && asunto[0] != '\0') ? asunto : "[UNTDF ESP32] Notificacion";
+                char subjB64[180]{};
+                if (codificarBase64(subjRaw, false, subjB64, sizeof(subjB64))) {
+                    cli.print("=?UTF-8?B?");
+                    cli.print(subjB64);
+                    cli.print("?=");
+                } else {
+                    cli.print(subjRaw);
+                }
+            }
+            cli.print(esHtml
+                ? "\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n"
+                : "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n");
 
-            // Dot-stuffing básico según RFC 5321
+            // Envío por líneas con dot-stuffing RFC 5321 (mucho más rápido sobre TLS que byte a byte)
             if (cuerpo) {
                 const char* p = cuerpo;
-                bool inicioLinea = true;
                 while (*p) {
-                    if (inicioLinea && *p == '.') {
+                    const char* fin = p;
+                    while (*fin && *fin != '\n' && *fin != '\r') {
+                        ++fin;
+                    }
+                    if (*p == '.') {
                         cli.write('.');
                     }
-                    if (*p == '\n') {
-                        cli.print("\r\n");
-                        inicioLinea = true;
-                    } else if (*p != '\r') {
-                        cli.write(static_cast<uint8_t>(*p));
-                        inicioLinea = false;
+                    const size_t lenLinea = static_cast<size_t>(fin - p);
+                    if (lenLinea > 0) {
+                        cli.write(reinterpret_cast<const uint8_t*>(p), lenLinea);
                     }
-                    ++p;
+                    if (*fin == '\r' && *(fin + 1) == '\n') {
+                        cli.print("\r\n");
+                        p = fin + 2;
+                    } else if (*fin == '\n' || *fin == '\r') {
+                        cli.print("\r\n");
+                        p = fin + 1;
+                    } else {
+                        p = fin;
+                    }
                 }
             }
 
@@ -305,7 +326,8 @@ namespace SmtpNet {
             size_t cantDestinatarios,
             const char* asunto,
             const char* cuerpo,
-            bool* aceptadoPorIndice = nullptr
+            bool* aceptadoPorIndice = nullptr,
+            bool esHtml = false
         ) {
             ResultadoSmtp res{};
 
@@ -373,7 +395,7 @@ namespace SmtpNet {
                     return res;
                 }
 
-                res = ejecutarSesionSmtp(ssl, cfg, destinatarios, cantDestinatarios, asunto, cuerpo, aceptadoPorIndice);
+                res = ejecutarSesionSmtp(ssl, cfg, destinatarios, cantDestinatarios, asunto, cuerpo, aceptadoPorIndice, esHtml);
                 ssl.stop();
                 tcpBase.stop();
                 return res;
@@ -391,7 +413,7 @@ namespace SmtpNet {
                 return res;
             }
 
-            res = ejecutarSesionSmtp(plain, cfg, destinatarios, cantDestinatarios, asunto, cuerpo, aceptadoPorIndice);
+            res = ejecutarSesionSmtp(plain, cfg, destinatarios, cantDestinatarios, asunto, cuerpo, aceptadoPorIndice, esHtml);
             plain.stop();
             return res;
         }

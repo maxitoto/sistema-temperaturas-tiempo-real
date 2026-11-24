@@ -150,7 +150,11 @@ export function TopBar({ onAbrirAyuda }: { onAbrirAyuda?: () => void }) {
             onClick={() => setConsolaAbierta(true)}
             title="Abrir Consola de Tramas L1"
           >
-            <Terminal className="h-4 w-4" />
+            <Terminal
+              className={`h-4 w-4 ${
+                theme === "dark" ? "text-white" : "text-black"
+              }`}
+            />
           </button>
 
           <button

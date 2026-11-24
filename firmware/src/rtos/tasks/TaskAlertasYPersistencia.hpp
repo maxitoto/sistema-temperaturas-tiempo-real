@@ -30,6 +30,7 @@ namespace RTOS::Tasks {
         inline static TareaSegura tarea;
         inline static uint32_t    ultimoMantenimientoMs  = 0;
         inline static uint32_t    ultimoChequeoCorreoMs  = 0;
+        inline static uint32_t    alertaUrgenteDesdeMs   = 0;
         inline static uint32_t    ultimoEnvioSmtpExitoMs = 0;
         inline static ColaTrabajoRPC*    refColaRpc           = nullptr;
         inline static MiddlewareSesion*  refL2                = nullptr;
@@ -211,6 +212,11 @@ namespace RTOS::Tasks {
                 tipo,
                 criticidad
             );
+
+            if (static_cast<uint8_t>(criticidad) >= static_cast<uint8_t>(CriticidadEvento::MEDIA) &&
+                alertaUrgenteDesdeMs == 0) {
+                alertaUrgenteDesdeMs = millis();
+            }
         }
 
         static void persistirEventoSistemaBus(const RegistroPersistenciaPOD& reg) {
@@ -233,7 +239,8 @@ namespace RTOS::Tasks {
                 a.criticidad        = CriticidadEvento::ALTA;
             }
 
-            a.espacioSdLibreKb = 0;
+            a.espacioSdLibreKb = TarjetaSD::getInstance().estaInicializada()
+                ? TarjetaSD::getInstance().espacioLibreKB() : 0;
             a.heapLibreBytes   = ESP.getFreeHeap();
             a.resetReason      = textoMotivoReset();
             a.versionFirmware  = "1.0.0";
@@ -246,6 +253,10 @@ namespace RTOS::Tasks {
                 : FuenteTiempo::SIN_SINCRONIZAR;
 
             RepoAuditoriaSistema::registrarEvento(a);
+            if (static_cast<uint8_t>(a.criticidad) >= static_cast<uint8_t>(CriticidadEvento::MEDIA) &&
+                alertaUrgenteDesdeMs == 0) {
+                alertaUrgenteDesdeMs = millis();
+            }
         }
 
         static void persistirAuditoriaAuth(const RegistroPersistenciaPOD& reg) {
@@ -282,6 +293,10 @@ namespace RTOS::Tasks {
                 : static_cast<int64_t>(RelojSistema::obtenerTimestampActual());
 
             RepoAuditoriaAuth::registrarEvento(a);
+
+            if (a.criticidad == CriticidadEvento::ALTA && alertaUrgenteDesdeMs == 0) {
+                alertaUrgenteDesdeMs = millis();
+            }
         }
 
         static void procesarColaPersistenciaDB() {
@@ -350,9 +365,14 @@ namespace RTOS::Tasks {
 
         static void procesarEnvioCorreosPendientes() {
             const uint32_t ahoraMs = millis();
-            if (ahoraMs - ultimoChequeoCorreoMs < INTERVALO_CHEQUEO_CORREO_MS) {
+            const bool disparoUrgente = (alertaUrgenteDesdeMs != 0) &&
+                                        ((ahoraMs - alertaUrgenteDesdeMs) >= 3000UL);
+            const bool chequeoPeriodico = (ahoraMs - ultimoChequeoCorreoMs) >= INTERVALO_CHEQUEO_CORREO_MS;
+
+            if (!disparoUrgente && !chequeoPeriodico) {
                 return;
             }
+            alertaUrgenteDesdeMs  = 0;
             ultimoChequeoCorreoMs = ahoraMs;
             try {
                 SmtpNet::DespachadorCorreosSmtp::despacharPendientes(false);

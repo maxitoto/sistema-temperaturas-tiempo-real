@@ -14,12 +14,17 @@ import {
   Download,
   FlaskConical,
   Square,
+  FileSpreadsheet
 } from "lucide-react";
 import { toast } from "react-toastify";
 import {
   detectarExperimentosDesdeAuditoria,
   VentanaExperimento,
 } from "../lib/experimentosSensor";
+import {
+  exportarCurvaTermicaExcel,
+  exportarTablaExcel,
+} from "../lib/exportExcel";
 import {
   descargarCsv,
   formatearFechaLocalCsv,
@@ -101,7 +106,7 @@ export function SensoresView({
   const [cargandoHistorial, setCargandoHistorial] = useState(false);
   const [progresoHistorial, setProgresoHistorial] = useState<number>(0);
   const [cargandoTabla, setCargandoTabla] = useState(false);
-  const [exportandoCsv, setExportandoCsv] = useState(false);
+  
   const [guardandoAccion, setGuardandoAccion] = useState<string | null>(null);
 
   const detalleReqRef = useRef(0);
@@ -110,6 +115,8 @@ export function SensoresView({
 
   // Fijación determinística a la card de la MAC
   const macCardRef = useRef<HTMLDivElement | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement | null>(null);
+  const [exportandoExcel, setExportandoExcel] = useState(false);
   const focusPendienteRef = useRef<boolean>(navToken > 0);
   const ultimoNavTokenRef = useRef<number>(navToken);
   const [focusTrigger, setFocusTrigger] = useState<number>(navToken > 0 ? 1 : 0);
@@ -737,9 +744,69 @@ export function SensoresView({
     toast.success(`CSV de curva exportado (${serieHistorica.length} registros).`);
   };
 
-  const exportarTablaCensoCsv = async () => {
+  const exportarCatalogoExcel = async () => {
+    if (sensores.length === 0) {
+      toast.info("No hay sensores cargados para exportar.");
+      return;
+    }
+    await exportarTablaExcel({
+      nombreArchivo: `catalogo_sensores_${sufijoFechaArchivo()}.xlsx`,
+      nombreHoja: "Sensores",
+      titulo: "Catálogo de Sensores DS18B20",
+      subtitulo: `${sensores.length} sensores registrados`,
+      columnas: [
+        { header: "ID", width: 10, numFmt: "0" },
+        { header: "Dirección MAC", width: 20 },
+        { header: "Nombre", width: 24 },
+        { header: "Ubicación", width: 22 },
+        { header: "TL (°C)", width: 12, numFmt: "0.00" },
+        { header: "TH (°C)", width: 12, numFmt: "0.00" },
+        { header: "Offset (°C)", width: 14, numFmt: "0.00" },
+        { header: "Estado", width: 12 },
+      ],
+      filas: sensores.map((s) => [
+        s.idSensor,
+        s.mac,
+        s.nombre || "Sin nombre",
+        s.ubicacion || "—",
+        Number(s.umbralInf.toFixed(2)),
+        Number(s.umbralSup.toFixed(2)),
+        Number(s.offset.toFixed(2)),
+        s.activa ? "ACTIVO" : "INACTIVO",
+      ]),
+    });
+    toast.success(`Excel de sensores exportado (${sensores.length} filas).`);
+  };
+
+  const exportarCurvaExcel = async () => {
+    if (serieHistorica.length === 0) {
+      toast.info("No hay lecturas cargadas en la curva para exportar.");
+      return;
+    }
+    setExportandoExcel(true);
+    try {
+      await exportarCurvaTermicaExcel({
+        nombreArchivo: `analisis_${perfil?.mac || macSeleccionada}_${sufijoFechaArchivo()}.xlsx`,
+        nombreSensor: perfil?.nombre || "Sensor DS18B20",
+        mac: perfil?.mac || macSeleccionada,
+        ubicacion: perfil?.ubicacion || "",
+        subtitulo: `Modo: ${modoTemporal} · n = ${serieHistorica.length} lecturas`,
+        umbralInf: perfil?.umbralInf,
+        umbralSup: perfil?.umbralSup,
+        serie: serieHistorica,
+        graficoContenedor: chartContainerRef.current,
+      });
+      toast.success(
+        `Excel con fórmulas y gráfico exportado (${serieHistorica.length} puntos).`
+      );
+    } finally {
+      setExportandoExcel(false);
+    }
+  };
+
+  const exportarTablaCensoExcel = async () => {
     if (!perfil) return;
-    setExportandoCsv(true);
+    setExportandoExcel(true);
     try {
       const registros: CensoRowDTO[] = [];
       let off = 0;
@@ -751,7 +818,7 @@ export function SensoresView({
               limiteRegistros: LOTE_RPC_CENSO,
               offsetRegistros: off,
             }),
-          "exportarCensosLote",
+          "exportarCensosExcelLote",
           { silent: true }
         );
         if (!lote || lote.length === 0) break;
@@ -759,43 +826,43 @@ export function SensoresView({
         if (lote.length < LOTE_RPC_CENSO) break;
         off += LOTE_RPC_CENSO;
       }
-
       if (registros.length === 0) {
-        toast.info("No hay registros de Censo para exportar para este sensor.");
+        toast.info("No hay censos para exportar para este sensor.");
         return;
       }
-
-      descargarCsv(
-        `censo_sensor_${perfil.idSensor}_${sufijoFechaArchivo()}.csv`,
-        [
-          "id_censo",
-          "id_sensor",
-          "mac",
-          "nombre_sensor",
-          "temperatura_cruda_c",
-          "temperatura_corregida_c",
-          "estado_ds18b20",
-          "timestamp_unix",
-          "fecha_utc_iso",
-          "fecha_hora_local",
+      await exportarTablaExcel({
+        nombreArchivo: `censos_sensor_${perfil.idSensor}_${sufijoFechaArchivo()}.xlsx`,
+        nombreHoja: "Censos",
+        titulo: `Historial Completo de Censos · ${perfil.nombre || perfil.mac}`,
+        subtitulo: `Sensor #${perfil.idSensor} (${perfil.mac}) · ${registros.length} lecturas`,
+        resumen: statsCenso
+          ? [
+              { etiqueta: "Total Lecturas BD", valor: statsCenso.totalLecturas, numFmt: "0" },
+              { etiqueta: "Media Global (°C)", valor: Number(statsCenso.temperaturaPromedio.toFixed(2)), numFmt: "0.00" },
+              { etiqueta: "Mínima Global (°C)", valor: Number(statsCenso.temperaturaMinima.toFixed(2)), numFmt: "0.00" },
+              { etiqueta: "Máxima Global (°C)", valor: Number(statsCenso.temperaturaMaxima.toFixed(2)), numFmt: "0.00" },
+            ]
+          : undefined,
+        columnas: [
+          { header: "ID Censo", width: 12, numFmt: "0" },
+          { header: "Temp. Cruda (°C)", width: 18, numFmt: "0.00" },
+          { header: "Temp. Corregida (°C)", width: 20, numFmt: "0.00" },
+          { header: "Estado DS18B20", width: 22 },
+          { header: "Fecha / Hora Local", width: 22 },
+          { header: "Timestamp Unix", width: 16, numFmt: "0" },
         ],
-        registros.map((r) => [
+        filas: registros.map((r) => [
           r.idCenso,
-          r.idSensor,
-          perfil.mac,
-          perfil.nombre,
-          r.temperaturaCruda.toFixed(2),
-          r.temperaturaCorregida.toFixed(2),
+          Number(r.temperaturaCruda.toFixed(2)),
+          Number(r.temperaturaCorregida.toFixed(2)),
           LABEL_ESTADO_SENSOR[r.estadoSensor] ?? `Estado ${r.estadoSensor}`,
-          r.fechaCreacion,
-          formatearIsoUtcDesdeEpoch(r.fechaCreacion),
           formatearFechaLocalCsv(r.fechaCreacion),
-        ])
-      );
-
-      toast.success(`CSV completo exportado (${registros.length} registros).`);
+          r.fechaCreacion,
+        ]),
+      });
+      toast.success(`Excel completo exportado (${registros.length} censos).`);
     } finally {
-      setExportandoCsv(false);
+      setExportandoExcel(false);
     }
   };
 
@@ -847,6 +914,16 @@ export function SensoresView({
               />
               Solo activos
             </label>
+            <button
+              type="button"
+              className="btn btn-outline btn-success px-2.5 py-1.5 text-xs"
+              disabled={sensores.length === 0}
+              onClick={() => void exportarCatalogoExcel()}
+              title="Exportar catálogo de sensores a Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" />
+              Excel
+            </button>
             <button
               type="button"
               className="btn btn-outline px-3 py-1.5 text-xs"
@@ -1198,6 +1275,21 @@ export function SensoresView({
 
                 <button
                   type="button"
+                  disabled={serieHistorica.length === 0 || cargandoHistorial || exportandoExcel}
+                  onClick={() => void exportarCurvaExcel()}
+                  className="btn btn-outline btn-success px-2.5 py-1 text-xs"
+                  title="Exportar informe Excel (.xlsx) con fórmulas dinámicas y gráfico incrustado"
+                >
+                  {exportandoExcel ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <FileSpreadsheet className="h-3.5 w-3.5" />
+                  )}
+                  Excel
+                </button>
+
+                <button
+                  type="button"
                   disabled={serieHistorica.length === 0 || cargandoHistorial}
                   onClick={exportarCurvaCsv}
                   className="btn btn-outline px-2.5 py-1 text-xs"
@@ -1209,12 +1301,14 @@ export function SensoresView({
               </form>
             </div>
 
-            <SensorAnalyticsChart
-              serie={serieHistorica}
-              umbralInf={perfil?.umbralInf}
-              umbralSup={perfil?.umbralSup}
-              cargando={cargandoDetalle || (cargandoHistorial && serieHistorica.length === 0)}
-            />
+            <div ref={chartContainerRef}>
+              <SensorAnalyticsChart
+                serie={serieHistorica}
+                umbralInf={perfil?.umbralInf}
+                umbralSup={perfil?.umbralSup}
+                cargando={cargandoDetalle || (cargandoHistorial && serieHistorica.length === 0)}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -1508,17 +1602,17 @@ export function SensoresView({
               </button>
               <button
                 type="button"
-                className="btn btn-outline px-2.5 py-1"
-                disabled={exportandoCsv || cargandoTabla}
-                onClick={() => void exportarTablaCensoCsv()}
-                title="Exportar toda la historia de este sensor a CSV"
+                className="btn btn-outline btn-success px-2.5 py-1"
+                disabled={exportandoExcel || cargandoTabla}
+                onClick={() => void exportarTablaCensoExcel()}
+                title="Exportar toda la historia de este sensor a Excel (.xlsx)"
               >
-                {exportandoCsv ? (
+                {exportandoExcel ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <Download className="h-3.5 w-3.5" />
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
                 )}
-                CSV
+                Excel
               </button>
             </div>
           </div>
@@ -1732,3 +1826,4 @@ export function SensoresView({
     </div>
   );
 }
+
