@@ -260,7 +260,7 @@ export interface EstadisticasSensoresCliente {
   sensoresInactivos: number;
 }
 
-export interface ResumenEstadisticoSensoCliente {
+export interface ResumenEstadisticoCensoCliente {
   totalLecturas: number;
   temperaturaMinima: number;
   temperaturaMaxima: number;
@@ -283,8 +283,8 @@ export type ActualizarCalibracionAmbienteInputDTO = Omit<
   "idCalibracion" | "fechaCreacion" | "fechaModificacion"
 >;
 
-export interface SensoRowDTO {
-  idSenso: number;
+export interface CensoRowDTO {
+  idCenso: number;
   idSensor: number;
   temperaturaCruda: number;
   temperaturaCorregida: number;
@@ -292,13 +292,13 @@ export interface SensoRowDTO {
   fechaCreacion: number; // Unix timestamp en segundos
 }
 
-export interface FiltroPaginadoSensoDTO {
+export interface FiltroPaginadoCensoDTO {
   idSensor: number; // 0 = todos
   limiteRegistros: number;
   offsetRegistros: number;
 }
 
-export interface CrearSensoManualDTO {
+export interface CrearCensoManualDTO {
   idSensor: number;
   temperaturaCruda: number;
   temperaturaCorregida: number;
@@ -336,7 +336,7 @@ export interface EstadisticasUsuariosCliente {
 export interface ConfiguracionSistemaDTO {
   idConfiguracionSistema: number;
   zonaHorariaMin: number;
-  retencionSensoDias: number;
+  retencionCensoDias: number;
   retencionEventosDias: number;
   retencionAuditoriaDias: number;
   sdLibreMinimoKb: number;
@@ -379,6 +379,14 @@ export interface CorreoItemDTO {
   activa: boolean;
 }
 
+export interface ResultadoEnvioSmtpDTO {
+  codigoSmtp: number;
+  exito: boolean;
+  correosEnviados: number;
+  eventosActualizados: number;
+  detalle: string;
+}
+
 export type CrearOActualizarCorreoDTO = Omit<CorreoItemDTO, "ultimoEstadoEnvio">;
 
 export interface ServidorNtpItemDTO {
@@ -391,7 +399,7 @@ export interface ServidorNtpItemDTO {
 export interface AuditoriaSensorRowDTO {
   idAuditoriaSensor: number;
   idSensor: number;
-  idSenso: number;
+  idCenso: number;
   estadoPrevioSensor: EstadoSensor;
   estadoNuevoSensor: EstadoSensor;
   estadoBus: EstadoBus;
@@ -562,15 +570,15 @@ export interface ServiceClientAPI {
     timestampHasta: number,
     maxRegistros?: number
   ): Promise<LecturaSensorCliente[]>;
-  listarSensosPaginados(filtro: FiltroPaginadoSensoDTO): Promise<SensoRowDTO[]>;
-  listarPicosSensos(
+  listarCensosPaginados(filtro: FiltroPaginadoCensoDTO): Promise<CensoRowDTO[]>;
+  listarPicosCensos(
     idSensor: number,
     orden: "ALTOS" | "BAJOS",
     limite?: number,
     maxMuestras?: number
-  ): Promise<SensoRowDTO[]>;
+  ): Promise<CensoRowDTO[]>;
   obtenerEstadisticasSensores(): Promise<EstadisticasSensoresCliente>;
-  obtenerEstadisticasSensoPorMac(mac: string): Promise<ResumenEstadisticoSensoCliente>;
+  obtenerEstadisticasCensoPorMac(mac: string): Promise<ResumenEstadisticoCensoCliente>;
   obtenerCalibracionAmbiente(): Promise<CalibracionAmbienteDTO>;
   actualizarMetadatosSensor(
     mac: string,
@@ -591,9 +599,9 @@ export interface ServiceClientAPI {
   actualizarCalibracionAmbiente(
     dto: ActualizarCalibracionAmbienteInputDTO
   ): Promise<CalibracionAmbienteDTO>;
-  crearSensoManual(dto: CrearSensoManualDTO): Promise<SensoRowDTO>;
-  eliminarSensoPorId(idSenso: number): Promise<void>;
-  purgarSensosAnterioresA(timestampLimiteSeg: number): Promise<number>;
+  crearCensoManual(dto: CrearCensoManualDTO): Promise<CensoRowDTO>;
+  eliminarCensoPorId(idCenso: number): Promise<void>;
+  purgarCensosAnterioresA(timestampLimiteSeg: number): Promise<number>;
 
   // Dominio 2: Usuarios
   obtenerUsuarioPorNombre(usuario: string): Promise<PerfilUsuarioCliente>;
@@ -627,6 +635,8 @@ export interface ServiceClientAPI {
   listarCorreos(): Promise<CorreoItemDTO[]>;
   guardarCorreo(dto: CrearOActualizarCorreoDTO): Promise<CorreoItemDTO>;
   eliminarCorreoPorId(idCorreo: number): Promise<void>;
+  enviarCorreoPruebaSmtp(destinatario?: string): Promise<ResultadoEnvioSmtpDTO>;
+  despacharAlertasCorreoAhora(): Promise<ResultadoEnvioSmtpDTO>;
   listarServidoresNtp(): Promise<ServidorNtpItemDTO[]>;
   guardarServidorNtp(dto: ServidorNtpItemDTO): Promise<ServidorNtpItemDTO>;
   eliminarServidorNtpPorId(idServer: number): Promise<void>;

@@ -84,7 +84,7 @@ export const EstadisticasSensoresDTO = struct({
     sensoresInactivos: T.int()
 });
 
-export const ResumenEstadisticoSensoDTO = struct({
+export const ResumenEstadisticoCensoDTO = struct({
     totalLecturas:       T.int(),
     temperaturaMinima:   T.float(),
     temperaturaMaxima:   T.float(),
@@ -95,7 +95,7 @@ export type LecturaSensorCliente           = InferDTO<typeof LecturaSensorDTO>;
 export type PerfilSensorCliente            = InferDTO<typeof PerfilSensorDTO>;
 export type ResumenSensorCliente           = InferDTO<typeof ResumenSensorDTO>;
 export type EstadisticasSensoresCliente    = InferDTO<typeof EstadisticasSensoresDTO>;
-export type ResumenEstadisticoSensoCliente = InferDTO<typeof ResumenEstadisticoSensoDTO>;
+export type ResumenEstadisticoCensoCliente = InferDTO<typeof ResumenEstadisticoCensoDTO>;
 
 const streamSensoresTiempoReal      = llamadoCliente.talVez("suscribirSensoresTiempoReal", HistorialSensoresDTO);
 const rpcObtenerPorMac              = llamadoCliente.alMenosUnaVez("obtenerCensosPorMac", FiltroPorMacDTO, HistorialSensoresDTO, 15000);
@@ -106,7 +106,7 @@ const rpcActualizarMetadatosSensor  = llamadoCliente.exactamenteUnaVez("actualiz
 const rpcActualizarCalibracion      = llamadoCliente.exactamenteUnaVez("actualizarCalibracionSensor", ActualizarCalibracionSensorDTO, PerfilSensorDTO);
 const rpcEliminarSensorPorMac       = llamadoCliente.exactamenteUnaVez("eliminarSensorPorMac", ConsultaSensorMacDTO, null);
 const rpcObtenerEstadisticasSensores = llamadoCliente.alMenosUnaVez("obtenerEstadisticasSensores", null, EstadisticasSensoresDTO, 30000);
-const rpcObtenerEstadisticasSenso   = llamadoCliente.alMenosUnaVez("obtenerEstadisticasSensoPorMac", ConsultaSensorMacDTO, ResumenEstadisticoSensoDTO, 20000);
+const rpcObtenerEstadisticasCenso   = llamadoCliente.alMenosUnaVez("obtenerEstadisticasCensoPorMac", ConsultaSensorMacDTO, ResumenEstadisticoCensoDTO, 20000);
 
 let ultimoLoteTiempoReal: LecturaSensorCliente[] = [];
 
@@ -225,6 +225,6 @@ export const RPSensor = {
     obtenerEstadisticasSensores: (): Promise<EstadisticasSensoresCliente> =>
         rpcObtenerEstadisticasSensores(),
 
-    obtenerEstadisticasSensoPorMac: (mac: string): Promise<ResumenEstadisticoSensoCliente> =>
-        rpcObtenerEstadisticasSenso({ mac })
+    obtenerEstadisticasCensoPorMac: (mac: string): Promise<ResumenEstadisticoCensoCliente> =>
+        rpcObtenerEstadisticasCenso({ mac })
 };

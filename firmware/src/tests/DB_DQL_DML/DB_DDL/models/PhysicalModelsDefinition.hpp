@@ -198,18 +198,18 @@ namespace DbNotRuntime::PhysicalModels {
         }
     };
 
-    // 10. Modelo físico de la tabla Senso (con FK hacia Sensor).
-    class SensoModel final : public Model {
+    // 10. Modelo físico de la tabla Censo (con FK hacia Sensor).
+    class CensoModel final : public Model {
     public:
         MetaOptions meta() const override {
             MetaOptions m;
-            m.db_table = "Senso";
-            m.indexes  = { Index("idx_senso_sensor_fecha", {"id_sensor", "fecha_creacion"}) };
+            m.db_table = "Censo";
+            m.indexes  = { Index("idx_censo_sensor_fecha", {"id_sensor", "fecha_creacion"}) };
             return m;
         }
         std::vector<Field> fields() const override {
             return {
-                AutoField("id_senso"),
+                AutoField("id_censo"),
                 ForeignKey("id_sensor", "Sensor", "id_sensor", CASCADE),
                 FloatField("temperatura_cruda"),
                 FloatField("temperatura_corregida"),
@@ -220,7 +220,7 @@ namespace DbNotRuntime::PhysicalModels {
         }
     };
 
-    // 11. Modelo físico de la tabla EventoSensor (con FKs hacia Sensor y Senso).
+    // 11. Modelo físico de la tabla EventoSensor (con FKs hacia Sensor y Censo).
     class EventoSensorModel final : public Model {
     public:
         MetaOptions meta() const override { return { "EventoSensor" }; }
@@ -228,7 +228,7 @@ namespace DbNotRuntime::PhysicalModels {
             return {
                 AutoField("id_evento_sensor"),
                 ForeignKey("id_sensor", "Sensor", "id_sensor", CASCADE),
-                ForeignKey("id_senso", "Senso", "id_senso", CASCADE),
+                ForeignKey("id_censo", "Censo", "id_censo", CASCADE),
                 SmallIntegerField("estado_previo_sensor").default_val(0),
                 SmallIntegerField("evento").default_val(0),
                 EnumField("criticidad", "criticidad_evento_enum").default_val("BAJA"),
@@ -280,7 +280,7 @@ namespace DbNotRuntime::PhysicalModels {
             && migrateSingleModel<CorreosModel>()
             && migrateSingleModel<AuditoriaModel>()
             && migrateSingleModel<SensorModel>()
-            && migrateSingleModel<SensoModel>()
+            && migrateSingleModel<CensoModel>()
             && migrateSingleModel<EventoSensorModel>()
             && migrateSingleModel<EventoSistemaModel>();
     }

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useRef } from "react";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import "../styles/index.css";
@@ -32,6 +32,8 @@ function Shell() {
   const { theme } = useTheme();
   const [vista, setVista] = useState<Vista>("dashboard");
   const [sensorMacInicial, setSensorMacInicial] = useState<string>("");
+  const [sensorNavToken, setSensorNavToken] = useState<number>(0);
+  const navSeqRef = useRef<number>(0);
   const [configTabInicial, setConfigTabInicial] =
     useState<TabConfiguracion>("SISTEMA");
   const [tourTrigger, setTourTrigger] = useState(0);
@@ -41,6 +43,10 @@ function Shell() {
       if (destino.vista === "bios" && rol !== RolUsuario.ADMIN) return;
       if (destino.sensorMac !== undefined) {
         setSensorMacInicial(destino.sensorMac);
+        navSeqRef.current += 1;
+        setSensorNavToken(navSeqRef.current);
+      } else if (destino.vista === "sensores") {
+        setSensorNavToken(0);
       }
       if (destino.configTab) {
         setConfigTabInicial(
@@ -69,14 +75,21 @@ function Shell() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <TopBar onAbrirAyuda={() => setTourTrigger((n) => n + 1)} />
-      <AlarmBanner />
+      <AlarmBanner onNavegar={navegarA} />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar vista={vista} onVista={setVista} />
+        <Sidebar
+          vista={vista}
+          onVista={(v) => {
+            if (v === "sensores") setSensorNavToken(0);
+            setVista(v);
+          }}
+        />
         <main className="flex-1 overflow-auto">
           {vista === "dashboard" && <DashboardView onNavegar={navegarA} />}
           {vista === "sensores" && (
             <SensoresView
               macInicial={sensorMacInicial}
+              navToken={sensorNavToken}
               onIrAConfigAmbiente={() =>
                 navegarA({ vista: "configuracion", configTab: "AMBIENTE" })
               }

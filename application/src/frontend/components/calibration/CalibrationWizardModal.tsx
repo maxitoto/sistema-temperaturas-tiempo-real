@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   X,
   Sliders,
   Snowflake,
   Flame,
-  Thermometer,
   CheckCircle2,
   AlertTriangle,
   VolumeX,
@@ -14,9 +13,10 @@ import {
   ArrowLeft,
   Loader2,
   Trash2,
-  Sparkles,
   Check,
   Globe,
+  Play,
+  Pause,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { client, safeRpc } from "../../lib/service";
@@ -24,6 +24,15 @@ import {
   formatearEpochSegundos,
   redondearDecimal,
 } from "../../lib/format";
+import {
+  calcularRectaCalibracion,
+  estimarEbullicionDesdePresion,
+  estimarPresionDesdeAltura,
+  formatearEcuacionRecta,
+  obtenerReferenciasActivas,
+  reconstruirTempCrudaDesdeCorregida,
+} from "../../lib/calibracionModels";
+import { FormulaTooltip } from "../ui/FormulaTooltip";
 import { NumericInput } from "../ui/NumericInput";
 import {
   CalibracionAmbienteDTO,
@@ -33,19 +42,14 @@ import {
 } from "#types/rpc.types";
 
 type AlcanceCalibracion = "UNO" | "LOTE";
-type MetodoCalibracion = "DOS_PUNTOS" | "UN_PUNTO";
-type PasoWizard =
-  | "CONFIG"
-  | "HIELO"
-  | "EBULLICION"
-  | "PATRON"
-  | "RESUMEN";
+type PasoWizard = "CONFIG" | "HIELO" | "EBULLICION" | "RESUMEN";
+
+const DURACION_ESTABILIZACION_SEG = 180; // 3 minutos automáticos
 
 interface LecturaEnVivoSensor {
   tempCorregida: number;
   tempCruda: number;
   timestampEsp: number;
-  muestrasCrudas: number[];
   deltaEstabilidad: number;
   estable: boolean;
 }
@@ -53,49 +57,6 @@ interface LecturaEnVivoSensor {
 interface CapturasSensor {
   errorInf: number | null;
   errorSup: number | null;
-  offsetUnPunto: number | null;
-}
-
-/**
- * Invierte la recta de calibración exacta de Sensor.hpp:
- *   T_corr = m * T_cruda + b   =>   T_cruda = (T_corr - b) / m
- */
-function reconstruirTemperaturaCruda(
-  tempCorregida: number,
-  perfil: PerfilSensorCliente | undefined,
-  ambiente: CalibracionAmbienteDTO | null
-): number {
-  if (!perfil) return redondearDecimal(tempCorregida, 2);
-
-  const refInf = ambiente?.activa ? ambiente.tempCongelacionRef : 0;
-  const refSup = ambiente?.activa ? ambiente.tempEbullicionRef : 100;
-  const deltaMedido = perfil.errorSup - perfil.errorInf;
-
-  let m = 1;
-  let b = perfil.offset;
-
-  if (Math.abs(deltaMedido) > 1.0 && Math.abs(refSup - refInf) > 1.0) {
-    m = (refSup - refInf) / deltaMedido;
-    b = refInf - m * perfil.errorInf + perfil.offset;
-  }
-
-  if (!Number.isFinite(m) || Math.abs(m) < 0.001) {
-    return redondearDecimal(tempCorregida, 2);
-  }
-  return redondearDecimal((tempCorregida - b) / m, 2);
-}
-
-function calcularPendienteResultante(
-  errorInf: number,
-  errorSup: number,
-  refInf: number,
-  refSup: number
-): number | null {
-  const deltaMedido = errorSup - errorInf;
-  if (Math.abs(deltaMedido) <= 1.0 || Math.abs(refSup - refInf) <= 1.0) {
-    return null;
-  }
-  return (refSup - refInf) / deltaMedido;
 }
 
 export function CalibrationWizardModal({
@@ -115,36 +76,37 @@ export function CalibrationWizardModal({
 }) {
   const [paso, setPaso] = useState<PasoWizard>("CONFIG");
   const [alcance, setAlcance] = useState<AlcanceCalibracion>("UNO");
-  const [metodo, setMetodo] = useState<MetodoCalibracion>("DOS_PUNTOS");
   const [macsSeleccionadas, setMacsSeleccionadas] = useState<string[]>([]);
 
-  // Datos cargados del ESP32
+  // Datos del ESP32
   const [ambiente, setAmbiente] = useState<CalibracionAmbienteDTO | null>(null);
   const [perfilesPorMac, setPerfilesPorMac] = useState<
     Record<string, PerfilSensorCliente>
   >({});
   const [cargandoInicio, setCargandoInicio] = useState(false);
 
-  // Lecturas en vivo del bus 1-Wire (mac UPPER -> info)
+  // Telemetría viva (mac UPPER -> lectura)
   const [enVivoPorMac, setEnVivoPorMac] = useState<
     Record<string, LecturaEnVivoSensor>
   >({});
+  const enVivoRef = useRef<Record<string, LecturaEnVivoSensor>>({});
   const historialCrudoRef = useRef<Record<string, number[]>>({});
   const ultimoTsEspRef = useRef<number>(0);
 
-  // Ventana de tiempo del ESP32 para purga quirúrgica de sensos falsos
+  // Ventana de limpieza de censos falsos
   const [tsInicioCalibEsp, setTsInicioCalibEsp] = useState<number>(0);
-  const [borrarSensosFalsos, setBorrarSensosFalsos] = useState<boolean>(true);
+  const [borrarCensosFalsos, setBorrarCensosFalsos] = useState<boolean>(true);
 
-  // Capturas por sensor (mac UPPER)
+  // Capturas de los 2 extremos
   const [capturas, setCapturas] = useState<Record<string, CapturasSensor>>({});
-  const [tempPatronRef, setTempPatronRef] = useState<number>(25.0);
+  const [autoCapturadoPaso, setAutoCapturadoPaso] = useState<boolean>(false);
 
-  // Cronómetro no bloqueante de estabilización (3 min = 180 s)
-  const [timerSegundos, setTimerSegundos] = useState<number>(0);
-  const [timerActivo, setTimerActivo] = useState<boolean>(false);
+  // Cuenta regresiva automática de 3:00 min (180 -> 0 s)
+  const [segundosRestantes, setSegundosRestantes] = useState<number>(
+    DURACION_ESTABILIZACION_SEG
+  );
+  const [timerCorriendo, setTimerCorriendo] = useState<boolean>(false);
 
-  // Estado de guardado / mute
   const [aplicando, setAplicando] = useState<boolean>(false);
   const [progresoTexto, setProgresoTexto] = useState<string>("");
   const [muteando, setMuteando] = useState<boolean>(false);
@@ -153,19 +115,57 @@ export function CalibrationWizardModal({
   const ambienteRef = useRef<CalibracionAmbienteDTO | null>(null);
   perfilesRef.current = perfilesPorMac;
   ambienteRef.current = ambiente;
+  enVivoRef.current = enVivoPorMac;
 
-  // Reiniciar estado al abrir el modal y suscribir al stream en vivo
+  const actualizarDesdeLote = useCallback((lote: LecturaSensorCliente[]) => {
+    if (!lote || lote.length === 0) return;
+    if (lote[0].timestampMs > 0) {
+      ultimoTsEspRef.current = lote[0].timestampMs;
+    }
+
+    setEnVivoPorMac((prev) => {
+      const next = { ...prev };
+      for (const l of lote) {
+        const mac = l.macHex.toUpperCase();
+        const perfil = perfilesRef.current[mac];
+        const cruda = perfil
+          ? reconstruirTempCrudaDesdeCorregida(
+              l.temperaturaCorregida,
+              perfil.errorInf,
+              perfil.errorSup,
+              perfil.offset,
+              ambienteRef.current
+            )
+          : redondearDecimal(l.temperaturaCorregida, 2);
+
+        const hist = [...(historialCrudoRef.current[mac] ?? []), cruda].slice(-6);
+        historialCrudoRef.current[mac] = hist;
+
+        const delta = redondearDecimal(Math.max(...hist) - Math.min(...hist), 2);
+        next[mac] = {
+          tempCorregida: l.temperaturaCorregida,
+          tempCruda: cruda,
+          timestampEsp: l.timestampMs,
+          deltaEstabilidad: delta,
+          estable: hist.length >= 4 && delta <= 0.15,
+        };
+      }
+      return next;
+    });
+  }, []);
+
+  // Reiniciar al abrir
   useEffect(() => {
     if (!open) return;
 
     setPaso("CONFIG");
     setAlcance("UNO");
-    setMetodo("DOS_PUNTOS");
     setCapturas({});
     setTsInicioCalibEsp(0);
-    setBorrarSensosFalsos(true);
-    setTimerActivo(false);
-    setTimerSegundos(0);
+    setBorrarCensosFalsos(true);
+    setTimerCorriendo(false);
+    setSegundosRestantes(DURACION_ESTABILIZACION_SEG);
+    setAutoCapturadoPaso(false);
     setAplicando(false);
     setProgresoTexto("");
     historialCrudoRef.current = {};
@@ -202,45 +202,7 @@ export function CalibrationWizardModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, macInicial]);
 
-  const actualizarDesdeLote = (lote: LecturaSensorCliente[]) => {
-    if (!lote || lote.length === 0) return;
-    if (lote[0].timestampMs > 0) {
-      ultimoTsEspRef.current = lote[0].timestampMs;
-    }
-
-    setEnVivoPorMac((prev) => {
-      const next = { ...prev };
-      for (const l of lote) {
-        const mac = l.macHex.toUpperCase();
-        const perfil = perfilesRef.current[mac];
-        const cruda = reconstruirTemperaturaCruda(
-          l.temperaturaCorregida,
-          perfil,
-          ambienteRef.current
-        );
-        const hist = [...(historialCrudoRef.current[mac] ?? []), cruda].slice(
-          -6
-        );
-        historialCrudoRef.current[mac] = hist;
-
-        const minV = Math.min(...hist);
-        const maxV = Math.max(...hist);
-        const delta = redondearDecimal(maxV - minV, 2);
-
-        next[mac] = {
-          tempCorregida: l.temperaturaCorregida,
-          tempCruda: cruda,
-          timestampEsp: l.timestampMs,
-          muestrasCrudas: hist,
-          deltaEstabilidad: delta,
-          estable: hist.length >= 4 && delta <= 0.15,
-        };
-      }
-      return next;
-    });
-  };
-
-  // Polling de telemetría viva mientras el modal está abierto
+  // Stream en vivo cada 1 s
   useEffect(() => {
     if (!open) return;
     const id = window.setInterval(async () => {
@@ -254,19 +216,70 @@ export function CalibrationWizardModal({
       }
     }, 1000);
     return () => window.clearInterval(id);
-  }, [open]);
+  }, [open, actualizarDesdeLote]);
 
-  // Cronómetro de estabilización (3:00 min recomendados)
+  const capturarTodosParaPaso = useCallback(
+    (campo: "errorInf" | "errorSup", fueAutomatico = false) => {
+      const mapaVivo = enVivoRef.current;
+      let capturados = 0;
+
+      setCapturas((prev) => {
+        const next = { ...prev };
+        for (const mac of macsSeleccionadas) {
+          const live = mapaVivo[mac];
+          if (live) {
+            next[mac] = {
+              ...(next[mac] ?? { errorInf: null, errorSup: null }),
+              [campo]: live.tempCruda,
+            };
+            capturados++;
+          }
+        }
+        return next;
+      });
+
+      if (capturados > 0) {
+        if (fueAutomatico) {
+          setAutoCapturadoPaso(true);
+          toast.success(
+            campo === "errorInf"
+              ? `¡03:00 completados! Se capturó el punto de hielo en ${capturados} sensor(es).`
+              : `¡03:00 completados! Se capturó el punto de ebullición en ${capturados} sensor(es).`
+          );
+        }
+      } else {
+        toast.warning(
+          "Ningún sensor seleccionado reporta lecturas en vivo en este momento."
+        );
+      }
+    },
+    [macsSeleccionadas]
+  );
+
+  // Cuenta regresiva automática 03:00 -> 00:00 con autocaptura al llegar a cero
   useEffect(() => {
-    if (!open || !timerActivo) return;
-    const id = window.setInterval(() => {
-      setTimerSegundos((s) => s + 1);
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [open, timerActivo]);
+    if (!open || !timerCorriendo) return;
+    if (paso !== "HIELO" && paso !== "EBULLICION") return;
 
-  const refCongelacion = ambiente?.activa ? ambiente.tempCongelacionRef : 0;
-  const refEbullicion = ambiente?.activa ? ambiente.tempEbullicionRef : 100;
+    const id = window.setInterval(() => {
+      setSegundosRestantes((prev) => {
+        if (prev <= 1) {
+          window.clearInterval(id);
+          setTimerCorriendo(false);
+          capturarTodosParaPaso(
+            paso === "HIELO" ? "errorInf" : "errorSup",
+            true
+          );
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(id);
+  }, [open, timerCorriendo, paso, capturarTodosParaPaso]);
+
+  const { refCong, refEbull } = obtenerReferenciasActivas(ambiente);
 
   const sensoresSeleccionados = useMemo(() => {
     const set = new Set(macsSeleccionadas.map((m) => m.toUpperCase()));
@@ -285,14 +298,19 @@ export function CalibrationWizardModal({
     const conectados = sensores
       .map((s) => s.mac.toUpperCase())
       .filter((mac) => Boolean(enVivoPorMac[mac]));
-    if (conectados.length > 0) {
-      setMacsSeleccionadas(conectados);
-    } else {
-      setMacsSeleccionadas(sensores.map((s) => s.mac.toUpperCase()));
-    }
+    setMacsSeleccionadas(
+      conectados.length > 0
+        ? conectados
+        : sensores.map((s) => s.mac.toUpperCase())
+    );
   };
 
-  // Paso 1 -> Paso 2: carga los perfiles completos (errorInf/errorSup/umbrales) de los sensores elegidos
+  const reiniciarTimerPaso = () => {
+    setTimerCorriendo(false);
+    setSegundosRestantes(DURACION_ESTABILIZACION_SEG);
+    setAutoCapturadoPaso(false);
+  };
+
   const iniciarProcedimiento = async () => {
     if (macsSeleccionadas.length === 0) {
       toast.warning("Seleccione al menos un sensor para calibrar.");
@@ -314,7 +332,6 @@ export function CalibrationWizardModal({
     perfilesRef.current = nuevosPerfiles;
     historialCrudoRef.current = {};
 
-    // Marcar inicio de ventana en reloj del ESP32 (con margen de 10 s previos)
     const tsBase =
       ultimoTsEspRef.current > 0
         ? ultimoTsEspRef.current
@@ -323,14 +340,13 @@ export function CalibrationWizardModal({
 
     const capInit: Record<string, CapturasSensor> = {};
     for (const mac of macsSeleccionadas) {
-      capInit[mac] = { errorInf: null, errorSup: null, offsetUnPunto: null };
+      capInit[mac] = { errorInf: null, errorSup: null };
     }
     setCapturas(capInit);
 
-    setTimerSegundos(0);
-    setTimerActivo(false);
+    reiniciarTimerPaso();
     setCargandoInicio(false);
-    setPaso(metodo === "DOS_PUNTOS" ? "HIELO" : "PATRON");
+    setPaso("HIELO");
   };
 
   const silenciarAlarma = async () => {
@@ -343,95 +359,11 @@ export function CalibrationWizardModal({
     if (res) toast.info("Bocina silenciada temporalmente.");
   };
 
-  const capturarHieloTodos = () => {
-    setCapturas((prev) => {
-      const next = { ...prev };
-      let capturados = 0;
-      for (const mac of macsSeleccionadas) {
-        const live = enVivoPorMac[mac];
-        if (live) {
-          next[mac] = {
-            ...(next[mac] ?? {
-              errorInf: null,
-              errorSup: null,
-              offsetUnPunto: null,
-            }),
-            errorInf: live.tempCruda,
-          };
-          capturados++;
-        }
-      }
-      if (capturados === 0) {
-        toast.warning("Ningún sensor seleccionado reporta lecturas en vivo.");
-      }
-      return next;
-    });
-  };
-
-  const capturarEbullicionTodos = () => {
-    setCapturas((prev) => {
-      const next = { ...prev };
-      let capturados = 0;
-      for (const mac of macsSeleccionadas) {
-        const live = enVivoPorMac[mac];
-        if (live) {
-          next[mac] = {
-            ...(next[mac] ?? {
-              errorInf: null,
-              errorSup: null,
-              offsetUnPunto: null,
-            }),
-            errorSup: live.tempCruda,
-          };
-          capturados++;
-        }
-      }
-      if (capturados === 0) {
-        toast.warning("Ningún sensor seleccionado reporta lecturas en vivo.");
-      }
-      return next;
-    });
-  };
-
-  const capturarPatronTodos = () => {
-    setCapturas((prev) => {
-      const next = { ...prev };
-      let capturados = 0;
-      for (const mac of macsSeleccionadas) {
-        const live = enVivoPorMac[mac];
-        if (live) {
-          const offsetCalc = redondearDecimal(
-            Math.max(-20, Math.min(20, tempPatronRef - live.tempCruda)),
-            2
-          );
-          next[mac] = {
-            ...(next[mac] ?? {
-              errorInf: null,
-              errorSup: null,
-              offsetUnPunto: null,
-            }),
-            offsetUnPunto: offsetCalc,
-          };
-          capturados++;
-        }
-      }
-      if (capturados === 0) {
-        toast.warning("Ningún sensor seleccionado reporta lecturas en vivo.");
-      }
-      return next;
-    });
-  };
-
   const todosHieloListos = macsSeleccionadas.every(
     (m) => capturas[m]?.errorInf !== null && capturas[m]?.errorInf !== undefined
   );
   const todosEbullicionListos = macsSeleccionadas.every(
     (m) => capturas[m]?.errorSup !== null && capturas[m]?.errorSup !== undefined
-  );
-  const todosPatronListos = macsSeleccionadas.every(
-    (m) =>
-      capturas[m]?.offsetUnPunto !== null &&
-      capturas[m]?.offsetUnPunto !== undefined
   );
 
   const validarResumen = useMemo(() => {
@@ -441,48 +373,31 @@ export function CalibrationWizardModal({
     for (const s of sensoresSeleccionados) {
       const mac = s.mac.toUpperCase();
       const cap = capturas[mac];
-      if (!cap) {
-        errores.push(`${s.nombre || mac}: faltan capturas.`);
+      if (!cap || cap.errorInf === null || cap.errorSup === null) {
+        errores.push(`${s.nombre || mac}: faltan capturas de hielo/ebullición.`);
         continue;
       }
-      if (metodo === "DOS_PUNTOS") {
-        if (cap.errorInf === null || cap.errorSup === null) {
-          errores.push(`${s.nombre || mac}: faltan puntos de hielo/ebullición.`);
-        } else if (cap.errorSup - cap.errorInf <= 1.0) {
-          errores.push(
-            `${s.nombre || mac}: la medición de ebullición (${cap.errorSup}°C) debe ser mayor que la de hielo (${cap.errorInf}°C).`
-          );
-        } else {
-          const m = calcularPendienteResultante(
-            cap.errorInf,
-            cap.errorSup,
-            refCongelacion,
-            refEbullicion
-          );
-          if (m !== null && (m < 0.85 || m > 1.15)) {
-            advertencias.push(
-              `${s.nombre || mac}: pendiente inusual (m=${m.toFixed(3)}). Verifique que la sonda se haya estabilizado bien.`
-            );
-          }
-        }
-      } else {
-        if (cap.offsetUnPunto === null) {
-          errores.push(`${s.nombre || mac}: falta capturar el offset.`);
-        } else if (Math.abs(cap.offsetUnPunto) > 10) {
-          advertencias.push(
-            `${s.nombre || mac}: offset elevado (${cap.offsetUnPunto > 0 ? "+" : ""}${cap.offsetUnPunto}°C).`
-          );
-        }
+      if (cap.errorSup - cap.errorInf <= 1.0) {
+        errores.push(
+          `${s.nombre || mac}: T_ebull (${cap.errorSup}°C) debe ser mayor que T_hielo (${cap.errorInf}°C).`
+        );
+        continue;
+      }
+      const recta = calcularRectaCalibracion(
+        cap.errorInf,
+        cap.errorSup,
+        refCong,
+        refEbull,
+        0
+      );
+      if (recta.pendienteM < 0.85 || recta.pendienteM > 1.15) {
+        advertencias.push(
+          `${s.nombre || mac}: pendiente inusual (m = ${recta.pendienteM.toFixed(4)}). Verifique la estabilización térmica.`
+        );
       }
     }
     return { errores, advertencias };
-  }, [
-    sensoresSeleccionados,
-    capturas,
-    metodo,
-    refCongelacion,
-    refEbullicion,
-  ]);
+  }, [sensoresSeleccionados, capturas, refCong, refEbull]);
 
   const aplicarCalibracionYLimpiar = async () => {
     if (validarResumen.errores.length > 0) return;
@@ -495,43 +410,41 @@ export function CalibrationWizardModal({
       const mac = s.mac.toUpperCase();
       const perfil = perfilesPorMac[mac];
       const cap = capturas[mac];
-      if (!cap) continue;
+      if (!cap || cap.errorInf === null || cap.errorSup === null) continue;
 
       setProgresoTexto(
-        `Guardando calibración ${i + 1}/${sensoresSeleccionados.length} (${s.nombre || mac})...`
+        `Aplicando calibración ${i + 1}/${sensoresSeleccionados.length} (${s.nombre || mac})...`
       );
 
-      const umbralSup = perfil ? perfil.umbralSup : s.umbralSup;
-      const umbralInf = perfil ? perfil.umbralInf : s.umbralInf;
-      const errorInf =
-        metodo === "DOS_PUNTOS" ? redondearDecimal(cap.errorInf ?? 0, 2) : 0;
-      const errorSup =
-        metodo === "DOS_PUNTOS" ? redondearDecimal(cap.errorSup ?? 0, 2) : 0;
-      const offset =
-        metodo === "DOS_PUNTOS"
-          ? 0
-          : redondearDecimal(cap.offsetUnPunto ?? 0, 2);
+      const errorInf = redondearDecimal(cap.errorInf, 2);
+      const errorSup = redondearDecimal(cap.errorSup, 2);
+      const recta = calcularRectaCalibracion(
+        errorInf,
+        errorSup,
+        refCong,
+        refEbull,
+        0
+      );
 
       const ok = await safeRpc(
         () =>
           client.actualizarCalibracionSensor(
             s.mac,
-            umbralSup,
-            umbralInf,
+            perfil ? perfil.umbralSup : s.umbralSup,
+            perfil ? perfil.umbralInf : s.umbralInf,
             errorSup,
             errorInf,
-            offset
+            redondearDecimal(recta.ordenadaB, 2)
           ),
         `wizardCalibrar(${s.mac})`
       );
       if (ok) aplicadosOk++;
     }
 
-    // Limpieza quirúrgica de sensos y alertas generados durante la ventana de calibración
-    let sensosBorrados = 0;
+    let censosBorrados = 0;
     let eventosBorrados = 0;
 
-    if (borrarSensosFalsos && tsInicioCalibEsp > 0 && aplicadosOk > 0) {
+    if (borrarCensosFalsos && tsInicioCalibEsp > 0 && aplicadosOk > 0) {
       const tsFin =
         (ultimoTsEspRef.current > 0
           ? ultimoTsEspRef.current
@@ -540,38 +453,36 @@ export function CalibrationWizardModal({
       for (let i = 0; i < sensoresSeleccionados.length; i++) {
         const s = sensoresSeleccionados[i];
         setProgresoTexto(
-          `Limpiando sensos de calibración ${i + 1}/${sensoresSeleccionados.length} (${s.nombre || s.mac})...`
+          `Limpiando censos de calibración ${i + 1}/${sensoresSeleccionados.length} (${s.nombre || s.mac})...`
         );
 
-        // 1. Identificar sensos generados en [tsInicioCalibEsp, tsFin] para borrar sus alertas vinculadas
         const recientes = await safeRpc(
           () =>
-            client.listarSensosPaginados({
+            client.listarCensosPaginados({
               idSensor: s.idSensor,
               limiteRegistros: 32,
               offsetRegistros: 0,
             }),
-          "listarSensosParaLimpieza",
+          "listarCensosParaLimpieza",
           { silent: true }
         );
-        const idsSensoEnVentana = new Set(
+        const idsCensoEnVentana = new Set(
           (recientes ?? [])
             .filter(
               (r) =>
-                r.fechaCreacion >= tsInicioCalibEsp &&
-                r.fechaCreacion <= tsFin
+                r.fechaCreacion >= tsInicioCalibEsp && r.fechaCreacion <= tsFin
             )
-            .map((r) => r.idSenso)
+            .map((r) => r.idCenso)
         );
 
-        if (idsSensoEnVentana.size > 0) {
+        if (idsCensoEnVentana.size > 0) {
           const auds = await safeRpc(
             () => client.listarAuditoriaSensorPorMac(s.mac, 32),
             "listarAuditoriaParaLimpieza",
             { silent: true }
           );
           for (const ev of auds ?? []) {
-            if (idsSensoEnVentana.has(ev.idSenso)) {
+            if (idsCensoEnVentana.has(ev.idCenso)) {
               await safeRpc(
                 () => client.eliminarAuditoriaSensorPorId(ev.idAuditoriaSensor),
                 "eliminarAuditoriaCalib",
@@ -582,26 +493,25 @@ export function CalibrationWizardModal({
           }
         }
 
-        // 2. Eliminar los registros de Senso del intervalo con 1 sola sentencia SQL rápida
         const delRes = await safeRpc(
           () =>
             client.ejecutarSqlTerminal(
-              `DELETE FROM Senso WHERE id_sensor = ${s.idSensor} AND fecha_creacion >= ${tsInicioCalibEsp} AND fecha_creacion <= ${tsFin};`
+              `DELETE FROM Censo WHERE id_sensor = ${s.idSensor} AND fecha_creacion >= ${tsInicioCalibEsp} AND fecha_creacion <= ${tsFin};`
             ),
-          "limpiarSensosCalibracionSql",
+          "limpiarCensosCalibracionSql",
           { silent: true }
         );
 
         if (delRes?.exito) {
-          sensosBorrados += delRes.filasAfectadas;
-        } else if (idsSensoEnVentana.size > 0) {
-          for (const idSenso of idsSensoEnVentana) {
+          censosBorrados += delRes.filasAfectadas;
+        } else if (idsCensoEnVentana.size > 0) {
+          for (const idCenso of idsCensoEnVentana) {
             await safeRpc(
-              () => client.eliminarSensoPorId(idSenso),
-              "eliminarSensoFallback",
+              () => client.eliminarCensoPorId(idCenso),
+              "eliminarCensoFallback",
               { silent: true }
             );
-            sensosBorrados++;
+            censosBorrados++;
           }
         }
       }
@@ -615,11 +525,11 @@ export function CalibrationWizardModal({
     setProgresoTexto("");
 
     if (aplicadosOk > 0) {
-      const detalleLimpieza = borrarSensosFalsos
-        ? ` · ${sensosBorrados} sensos y ${eventosBorrados} alertas de prueba limpiados.`
+      const detalleLimpieza = borrarCensosFalsos
+        ? ` · ${censosBorrados} censos y ${eventosBorrados} alertas de prueba descartados.`
         : ".";
       toast.success(
-        `Calibración aplicada en ${aplicadosOk} sensor(es)${detalleLimpieza}`
+        `Calibración 2 puntos aplicada en caliente y en BD para ${aplicadosOk} sensor(es)${detalleLimpieza}`
       );
       onCompletado();
       onClose();
@@ -628,27 +538,24 @@ export function CalibrationWizardModal({
 
   if (!open) return null;
 
-  const mmTimer = String(Math.floor(timerSegundos / 60)).padStart(2, "0");
-  const ssTimer = String(timerSegundos % 60).padStart(2, "0");
+  const mmTimer = String(Math.floor(segundosRestantes / 60)).padStart(2, "0");
+  const ssTimer = String(segundosRestantes % 60).padStart(2, "0");
+  const progresoTimerPct =
+    ((DURACION_ESTABILIZACION_SEG - segundosRestantes) /
+      DURACION_ESTABILIZACION_SEG) *
+    100;
 
-  const pasosOrden: Array<{ id: PasoWizard; label: string }> =
-    metodo === "DOS_PUNTOS"
-      ? [
-          { id: "CONFIG", label: "1. Sensores y Método" },
-          { id: "HIELO", label: "2. Baño de Hielo" },
-          { id: "EBULLICION", label: "3. Agua Hirviendo" },
-          { id: "RESUMEN", label: "4. Revisión y Limpieza" },
-        ]
-      : [
-          { id: "CONFIG", label: "1. Sensores y Método" },
-          { id: "PATRON", label: "2. Termómetro Patrón" },
-          { id: "RESUMEN", label: "3. Revisión y Limpieza" },
-        ];
+  const pasosOrden: Array<{ id: PasoWizard; label: string }> = [
+    { id: "CONFIG", label: "1. Sensores" },
+    { id: "HIELO", label: "2. Frío Extremo (3 min)" },
+    { id: "EBULLICION", label: "3. Calor Extremo (3 min)" },
+    { id: "RESUMEN", label: "4. Ecuación y Aplicación" },
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]">
       <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl">
-        {/* Cabecera del Wizard */}
+        {/* Cabecera */}
         <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-warning-light text-warning">
@@ -656,11 +563,11 @@ export function CalibrationWizardModal({
             </div>
             <div>
               <h2 className="text-base font-bold">
-                Asistente de Calibración Metrológica DS18B20
+                Asistente de Calibración Automática (2 Puntos · 3 + 3 min)
               </h2>
               <p className="text-xs text-foreground-secondary">
-                Reconstruye la lectura cruda real del sensor y protege los
-                umbrales de alarma existentes
+                Captura automática en frío y calor extremo para 1 o múltiples
+                sensores · Conserva intactos los umbrales TL / TH
               </p>
             </div>
           </div>
@@ -700,12 +607,11 @@ export function CalibrationWizardModal({
           })}
         </div>
 
-        {/* Cuerpo scrolleable */}
+        {/* Contenido */}
         <div className="flex-1 space-y-4 overflow-y-auto p-5 text-xs">
-          {/* ==================== PASO 1: CONFIG ==================== */}
+          {/* PASO 1: SELECCIÓN DE SENSORES Y REFERENCIAS */}
           {paso === "CONFIG" && (
             <div className="space-y-4">
-              {/* Alcance: 1 sensor vs Lote */}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <button
                   type="button"
@@ -725,10 +631,10 @@ export function CalibrationWizardModal({
                       : "border-border bg-background hover:border-primary/50"
                   }`}
                 >
-                  <div className="font-bold text-sm">Calibrar 1 sensor</div>
+                  <div className="text-sm font-bold">Calibrar 1 sensor</div>
                   <p className="mt-1 text-xs text-foreground-secondary">
-                    Ideal al incorporar una sonda nueva o reajustar un único
-                    sensor del grupo.
+                    Para calibrar una sonda individual o incorporar un sensor
+                    nuevo al grupo.
                   </p>
                 </button>
 
@@ -744,17 +650,18 @@ export function CalibrationWizardModal({
                       : "border-border bg-background hover:border-primary/50"
                   }`}
                 >
-                  <div className="font-bold text-sm">
-                    Calibración en lote (múltiples sensores)
+                  <div className="text-sm font-bold">
+                    Calibrar múltiples sensores a la vez
                   </div>
                   <p className="mt-1 text-xs text-foreground-secondary">
-                    Sumerja todos los sensores juntos en hielo y agua hirviendo
-                    y capture el lote completo de una sola vez.
+                    Sumerja todas las sondas juntas en hielo y agua hirviendo:
+                    al finalizar cada contador de 3 minutos se capturan todas en
+                    simultáneo.
                   </p>
                 </button>
               </div>
 
-              {/* Selección de sensores */}
+              {/* Lista de sensores */}
               <div className="rounded-lg border border-border bg-background p-3.5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-bold">
@@ -766,9 +673,9 @@ export function CalibrationWizardModal({
                     <button
                       type="button"
                       onClick={seleccionarConectados}
-                      className="text-primary underline"
+                      className="font-semibold text-primary underline"
                     >
-                      Seleccionar conectados en vivo
+                      Seleccionar todos los conectados en vivo
                     </button>
                   )}
                 </div>
@@ -787,13 +694,14 @@ export function CalibrationWizardModal({
                             : "border-border bg-card hover:bg-secondary/40"
                         }`}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
                           <input
                             type={alcance === "UNO" ? "radio" : "checkbox"}
                             name="wizard-sensor"
                             checked={marcado}
                             onChange={() => {
-                              if (alcance === "UNO") setMacsSeleccionadas([mac]);
+                              if (alcance === "UNO")
+                                setMacsSeleccionadas([mac]);
                               else toggleMacEnLote(mac);
                             }}
                           />
@@ -813,7 +721,9 @@ export function CalibrationWizardModal({
                               : "bg-secondary text-foreground-secondary"
                           }`}
                         >
-                          {live ? `${live.tempCorregida.toFixed(2)} °C` : "Offline"}
+                          {live
+                            ? `${live.tempCorregida.toFixed(2)} °C`
+                            : "Offline"}
                         </span>
                       </label>
                     );
@@ -821,247 +731,148 @@ export function CalibrationWizardModal({
                 </div>
               </div>
 
-              {/* Método de calibración */}
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => setMetodo("DOS_PUNTOS")}
-                  className={`rounded-lg border p-3.5 text-left transition-all ${
-                    metodo === "DOS_PUNTOS"
-                      ? "border-warning bg-warning-light/50 ring-1 ring-warning/40"
-                      : "border-border bg-background hover:border-warning/50"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-bold text-sm">
-                    <Sparkles className="h-4 w-4 text-warning" />
-                    2 Puntos (Hielo + Agua Hirviendo)
-                  </div>
-                  <p className="mt-1 text-xs text-foreground-secondary">
-                    Estándar metrológico completo: corrige ganancia (pendiente) y
-                    desplazamiento usando referencias ambientales.
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setMetodo("UN_PUNTO")}
-                  className={`rounded-lg border p-3.5 text-left transition-all ${
-                    metodo === "UN_PUNTO"
-                      ? "border-info bg-info-light/50 ring-1 ring-info/40"
-                      : "border-border bg-background hover:border-info/50"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-bold text-sm">
-                    <Thermometer className="h-4 w-4 text-info" />
-                    1 Punto (Termómetro Patrón / Offset)
-                  </div>
-                  <p className="mt-1 text-xs text-foreground-secondary">
-                    Ajuste rápido de desplazamiento constante comparando contra
-                    un termómetro certificado a temperatura ambiente o de cámara.
-                  </p>
-                </button>
-              </div>
-
-              {/* Referencias ambientales actuales */}
-              {metodo === "DOS_PUNTOS" && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-secondary/40 px-3.5 py-2.5">
-                  <div className="flex items-center gap-2">
-                    <Globe className="h-4 w-4 text-info shrink-0" />
-                    <div>
-                      <span className="font-semibold">
-                        Referencias ambientales activas:{" "}
-                      </span>
-                      <span className="font-mono">
-                        Hielo = {refCongelacion.toFixed(2)} °C · Ebullición ={" "}
-                        {refEbullicion.toFixed(2)} °C
-                      </span>
-                      {ambiente && (
-                        <span className="text-foreground-secondary">
-                          {" "}
-                          ({ambiente.altura} m · {ambiente.presionAtmosferica}{" "}
-                          hPa)
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {onIrAConfigAmbiente && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onClose();
-                        onIrAConfigAmbiente();
-                      }}
-                      className="text-info underline font-semibold"
-                    >
-                      Ajustar en Configuración
-                    </button>
+              {/* Referencias ambientales globales con globo de ecuación */}
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-secondary/40 px-3.5 py-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Globe className="h-4 w-4 shrink-0 text-info" />
+                  <span className="font-semibold">Referencias globales:</span>
+                  <span className="font-mono">
+                    Hielo = {refCong.toFixed(2)} °C · Ebullición ={" "}
+                    {refEbull.toFixed(2)} °C
+                  </span>
+                  {ambiente && (
+                    <FormulaTooltip
+                      titulo="Modelo Atmosférico Global"
+                      archivoModelo="ModeloAtmosfericoBarometrico.hpp"
+                      ecuacion={
+                        "P(h) = 1013.25 · (1 − 2.25577×10⁻⁵ · h)^5.25588\nT_ebull = [1/373.15 − (R/ΔH)·ln(P/1013.25)]⁻¹ − 273.15"
+                      }
+                      sustitucion={`h = ${ambiente.altura} m → P ≈ ${estimarPresionDesdeAltura(ambiente.altura).toFixed(2)} hPa | P_cfg = ${ambiente.presionAtmosferica} hPa → T_ebull ≈ ${estimarEbullicionDesdePresion(ambiente.presionAtmosferica).toFixed(2)} °C`}
+                      descripcion="Referencias teóricas contra las que se ajusta la recta de 2 puntos de todos los sensores."
+                    />
                   )}
                 </div>
-              )}
+                {onIrAConfigAmbiente && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onIrAConfigAmbiente();
+                    }}
+                    className="font-semibold text-info underline"
+                  >
+                    Ajustar en Configuración
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
-          {/* ==================== PASO 2: HIELO ==================== */}
+          {/* PASO 2: FRÍO EXTREMO (HIELO · 3 MIN AUTOMÁTICO) */}
           {paso === "HIELO" && (
-            <PasoCapturaEnVivo
-              titulo={`Punto Inferior: Baño de Hielo (Ref. ${refCongelacion.toFixed(2)} °C)`}
+            <PasoBanoTermico
+              titulo={`Paso 1 · Frío Extremo: Baño de Hielo (Ref. ${refCong.toFixed(2)} °C)`}
               icono={<Snowflake className="h-5 w-5 text-info" />}
+              recomendacionExtra="Consejo práctico: apenas inicies el contador de 3 minutos, poné a hervir el agua en una pava o recipiente para tenerla lista justo al terminar este paso."
               instrucciones={[
-                "Llene un vaso térmico con hielo picado y agua fría (proporción 50/50) y mezcle 30 segundos.",
-                "Sumerja la punta metálica de la(s) sonda(s) en el centro sin tocar paredes ni fondo.",
-                "Espere a que el indicador marque ESTABLE (recomendado ~3 minutos) y pulse Capturar.",
+                "Llená un vaso térmico con hielo picado y agua fría (mitad y mitad) y revolvé 30 segundos.",
+                "Sumergí la(s) sonda(s) en el centro del vaso sin tocar las paredes ni el fondo.",
+                "Pulsá 'Iniciar 03:00': al llegar a 00:00 se guardarán automáticamente las lecturas crudas de todos los sensores.",
               ]}
               sensores={sensoresSeleccionados}
               enVivoPorMac={enVivoPorMac}
               valoresCapturados={Object.fromEntries(
                 macsSeleccionadas.map((m) => [m, capturas[m]?.errorInf ?? null])
               )}
-              etiquetaValor="Cruda capturada (E_inf °C)"
-              onCapturarTodos={capturarHieloTodos}
+              etiquetaValor="T_hielo capturada (°C)"
+              timerTexto={`${mmTimer}:${ssTimer}`}
+              progresoPct={progresoTimerPct}
+              timerCorriendo={timerCorriendo}
+              autoCapturado={autoCapturadoPaso}
+              onToggleTimer={() => {
+                if (segundosRestantes === 0) {
+                  setSegundosRestantes(DURACION_ESTABILIZACION_SEG);
+                  setAutoCapturadoPaso(false);
+                }
+                setTimerCorriendo((c) => !c);
+              }}
+              onResetTimer={reiniciarTimerPaso}
+              onCapturarAhora={() => capturarTodosParaPaso("errorInf", false)}
               onCambiarValor={(mac, val) =>
                 setCapturas((prev) => ({
                   ...prev,
                   [mac]: {
-                    ...(prev[mac] ?? {
-                      errorInf: null,
-                      errorSup: null,
-                      offsetUnPunto: null,
-                    }),
+                    ...(prev[mac] ?? { errorInf: null, errorSup: null }),
                     errorInf: val,
                   },
                 }))
               }
-              timerTexto={`${mmTimer}:${ssTimer}`}
-              timerActivo={timerActivo}
-              onToggleTimer={() => setTimerActivo((a) => !a)}
-              onResetTimer={() => {
-                setTimerActivo(false);
-                setTimerSegundos(0);
-              }}
               muteando={muteando}
               onMute={silenciarAlarma}
             />
           )}
 
-          {/* ==================== PASO 3: EBULLICIÓN ==================== */}
+          {/* PASO 3: CALOR EXTREMO (AGUA HIRVIENDO · 3 MIN AUTOMÁTICO) */}
           {paso === "EBULLICION" && (
-            <PasoCapturaEnVivo
-              titulo={`Punto Superior: Agua en Ebullición (Ref. ${refEbullicion.toFixed(2)} °C)`}
+            <PasoBanoTermico
+              titulo={`Paso 2 · Calor Extremo: Agua en Ebullición (Ref. ${refEbull.toFixed(2)} °C)`}
               icono={<Flame className="h-5 w-5 text-error" />}
+              recomendacionExtra="Si salta la alarma de temperatura alta mientras las sondas están en el agua hirviendo, usá el botón 'Mute Bocina'. Las alertas y censos de prueba se limpiarán al finalizar."
               instrucciones={[
-                "Lleve agua a ebullición franca (burbujeo continuo).",
-                "Sumerja la(s) sonda(s) en el centro del agua sin tocar el fondo caliente ni los bordes del recipiente.",
-                "Espere estabilización (chip ESTABLE) y pulse Capturar. Puede silenciar la bocina si se dispara la alarma de temperatura alta.",
+                "Mantené el agua en ebullición franca (burbujeo continuo).",
+                "Sumergí la(s) sonda(s) en el centro del agua sin tocar el fondo caliente del recipiente.",
+                "Pulsá 'Iniciar 03:00': al finalizar la cuenta regresiva se capturará automáticamente T_ebull de todos los sensores.",
               ]}
               sensores={sensoresSeleccionados}
               enVivoPorMac={enVivoPorMac}
               valoresCapturados={Object.fromEntries(
                 macsSeleccionadas.map((m) => [m, capturas[m]?.errorSup ?? null])
               )}
-              etiquetaValor="Cruda capturada (E_sup °C)"
-              onCapturarTodos={capturarEbullicionTodos}
+              etiquetaValor="T_ebull capturada (°C)"
+              timerTexto={`${mmTimer}:${ssTimer}`}
+              progresoPct={progresoTimerPct}
+              timerCorriendo={timerCorriendo}
+              autoCapturado={autoCapturadoPaso}
+              onToggleTimer={() => {
+                if (segundosRestantes === 0) {
+                  setSegundosRestantes(DURACION_ESTABILIZACION_SEG);
+                  setAutoCapturadoPaso(false);
+                }
+                setTimerCorriendo((c) => !c);
+              }}
+              onResetTimer={reiniciarTimerPaso}
+              onCapturarAhora={() => capturarTodosParaPaso("errorSup", false)}
               onCambiarValor={(mac, val) =>
                 setCapturas((prev) => ({
                   ...prev,
                   [mac]: {
-                    ...(prev[mac] ?? {
-                      errorInf: null,
-                      errorSup: null,
-                      offsetUnPunto: null,
-                    }),
+                    ...(prev[mac] ?? { errorInf: null, errorSup: null }),
                     errorSup: val,
                   },
                 }))
               }
-              timerTexto={`${mmTimer}:${ssTimer}`}
-              timerActivo={timerActivo}
-              onToggleTimer={() => setTimerActivo((a) => !a)}
-              onResetTimer={() => {
-                setTimerActivo(false);
-                setTimerSegundos(0);
-              }}
               muteando={muteando}
               onMute={silenciarAlarma}
             />
           )}
 
-          {/* ==================== PASO 2 (ALT): 1 PUNTO PATRÓN ==================== */}
-          {paso === "PATRON" && (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border border-info/40 bg-info-light/30 p-3.5">
-                <div>
-                  <div className="font-bold text-sm">
-                    Temperatura del Termómetro Patrón Certificado
-                  </div>
-                  <p className="text-xs text-foreground-secondary">
-                    Coloque la(s) sonda(s) junto al termómetro patrón, ingrese
-                    la temperatura real y capture el offset calculado.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="font-semibold">T_patrón (°C):</label>
-                  <NumericInput
-                    value={tempPatronRef}
-                    onChange={setTempPatronRef}
-                    decimals={2}
-                    min={-55}
-                    max={126}
-                    className="w-24 rounded border border-border bg-card px-2.5 py-1.5 font-mono font-bold"
-                  />
-                </div>
-              </div>
-
-              <PasoCapturaEnVivo
-                titulo="Captura de Offset (Δ = T_patrón − T_cruda)"
-                icono={<Thermometer className="h-5 w-5 text-info" />}
-                instrucciones={[
-                  "Verifique que la lectura cruda reconstruida esté estable antes de capturar.",
-                  "Al capturar, el offset se calcula automáticamente como (T_patrón − T_cruda) y borra una recta de 2 puntos anterior.",
-                ]}
-                sensores={sensoresSeleccionados}
-                enVivoPorMac={enVivoPorMac}
-                valoresCapturados={Object.fromEntries(
-                  macsSeleccionadas.map((m) => [
-                    m,
-                    capturas[m]?.offsetUnPunto ?? null,
-                  ])
-                )}
-                etiquetaValor="Offset a aplicar (°C)"
-                minValor={-20}
-                maxValor={20}
-                onCapturarTodos={capturarPatronTodos}
-                onCambiarValor={(mac, val) =>
-                  setCapturas((prev) => ({
-                    ...prev,
-                    [mac]: {
-                      ...(prev[mac] ?? {
-                        errorInf: null,
-                        errorSup: null,
-                        offsetUnPunto: null,
-                      }),
-                      offsetUnPunto: val,
-                    },
-                  }))
-                }
-                timerTexto={`${mmTimer}:${ssTimer}`}
-                timerActivo={timerActivo}
-                onToggleTimer={() => setTimerActivo((a) => !a)}
-                onResetTimer={() => {
-                  setTimerActivo(false);
-                  setTimerSegundos(0);
-                }}
-                muteando={muteando}
-                onMute={silenciarAlarma}
-              />
-            </div>
-          )}
-
-          {/* ==================== PASO FINAL: RESUMEN Y LIMPIEZA ==================== */}
+          {/* PASO 4: RESUMEN DE ECUACIÓN Y LIMPIEZA */}
           {paso === "RESUMEN" && (
             <div className="space-y-4">
-              <div className="rounded-lg border border-alert-success-border bg-alert-success-bg px-3.5 py-2.5 text-alert-success-icon">
-                <strong>Protección de alarmas:</strong> los umbrales TL / TH de
-                cada sensor se mantienen exactamente como estaban configurados.
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-alert-success-border bg-alert-success-bg px-3.5 py-2.5 text-alert-success-icon">
+                <span>
+                  <strong>Protección de alarmas:</strong> los umbrales TL / TH
+                  de cada sensor permanecen intactos.
+                </span>
+                <FormulaTooltip
+                  titulo="Modelo Recta Lineal de 2 Puntos"
+                  archivoModelo="ModeloCalibracionDosPuntos.hpp"
+                  ecuacion={
+                    "m = (T_ref,sup − T_ref,inf) / (T_ebull − T_hielo)\nb = T_ref,inf − m · T_hielo\nT_cal = m · T_cruda + b"
+                  }
+                  sustitucion={`Referencias: T_ref,inf = ${refCong.toFixed(2)} °C | T_ref,sup = ${refEbull.toFixed(2)} °C`}
+                  descripcion="Al aplicar, el ESP32 actualiza m y b en RAM al instante y guarda T_hielo, T_ebull y el desplazamiento b en la base de datos."
+                />
               </div>
 
               {validarResumen.errores.length > 0 && (
@@ -1093,34 +904,25 @@ export function CalibrationWizardModal({
                   <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
                     <tr>
                       <th className="px-3 py-2">Sensor</th>
-                      <th className="px-3 py-2">Umbrales (intactos)</th>
-                      <th className="px-3 py-2">E_inf / E_sup</th>
-                      <th className="px-3 py-2">Offset</th>
+                      <th className="px-3 py-2">T_hielo / T_ebull</th>
                       <th className="px-3 py-2">Pendiente (m)</th>
+                      <th className="px-3 py-2">Desplazamiento (b)</th>
+                      <th className="px-3 py-2">Ecuación Resultante</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
                     {sensoresSeleccionados.map((s) => {
                       const mac = s.mac.toUpperCase();
-                      const perf = perfilesPorMac[mac];
                       const cap = capturas[mac];
-                      const eInf =
-                        metodo === "DOS_PUNTOS" ? (cap?.errorInf ?? 0) : 0;
-                      const eSup =
-                        metodo === "DOS_PUNTOS" ? (cap?.errorSup ?? 0) : 0;
-                      const off =
-                        metodo === "DOS_PUNTOS"
-                          ? 0
-                          : (cap?.offsetUnPunto ?? 0);
-                      const m =
-                        metodo === "DOS_PUNTOS"
-                          ? calcularPendienteResultante(
-                              eInf,
-                              eSup,
-                              refCongelacion,
-                              refEbullicion
-                            )
-                          : 1;
+                      const eInf = cap?.errorInf ?? 0;
+                      const eSup = cap?.errorSup ?? 0;
+                      const recta = calcularRectaCalibracion(
+                        eInf,
+                        eSup,
+                        refCong,
+                        refEbull,
+                        0
+                      );
                       return (
                         <tr key={mac}>
                           <td className="px-3 py-2">
@@ -1131,19 +933,30 @@ export function CalibrationWizardModal({
                               {mac}
                             </div>
                           </td>
-                          <td className="px-3 py-2 font-mono text-foreground-secondary">
-                            {(perf?.umbralInf ?? s.umbralInf).toFixed(1)} /{" "}
-                            {(perf?.umbralSup ?? s.umbralSup).toFixed(1)} °C
-                          </td>
                           <td className="px-3 py-2 font-mono font-semibold">
                             {eInf.toFixed(2)} / {eSup.toFixed(2)} °C
                           </td>
-                          <td className="px-3 py-2 font-mono font-semibold">
-                            {off >= 0 ? `+${off.toFixed(2)}` : off.toFixed(2)}{" "}
+                          <td className="px-3 py-2 font-mono">
+                            {recta.pendienteM.toFixed(4)}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-bold text-primary">
+                            {recta.ordenadaB >= 0
+                              ? `+${recta.ordenadaB.toFixed(2)}`
+                              : recta.ordenadaB.toFixed(2)}{" "}
                             °C
                           </td>
-                          <td className="px-3 py-2 font-mono">
-                            {m !== null ? m.toFixed(4) : "—"}
+                          <td className="px-3 py-2 font-mono text-[11px]">
+                            <FormulaTooltip
+                              titulo={`Recta de #${s.idSensor} (${s.nombre || mac})`}
+                              archivoModelo="ModeloCalibracionDosPuntos.hpp"
+                              ecuacion={formatearEcuacionRecta(recta)}
+                              sustitucion={`m = (${refEbull.toFixed(2)} − ${refCong.toFixed(2)}) / (${eSup.toFixed(2)} − ${eInf.toFixed(2)}) = ${recta.pendienteM.toFixed(4)} | b = ${refCong.toFixed(2)} − m·${eInf.toFixed(2)} = ${recta.ordenadaB.toFixed(2)}`}
+                              descripcion="Verifica exactitud: al ingresar T_hielo devuelve T_ref,inf y al ingresar T_ebull devuelve T_ref,sup."
+                            >
+                              <span className="underline decoration-dotted">
+                                {formatearEcuacionRecta(recta)}
+                              </span>
+                            </FormulaTooltip>
                           </td>
                         </tr>
                       );
@@ -1152,30 +965,28 @@ export function CalibrationWizardModal({
                 </table>
               </div>
 
-              {/* Opción de limpieza de sensos falsos */}
               <div className="rounded-lg border border-border bg-background p-3.5">
                 <label className="flex cursor-pointer items-start gap-2.5">
                   <input
                     type="checkbox"
-                    checked={borrarSensosFalsos}
-                    onChange={(e) => setBorrarSensosFalsos(e.target.checked)}
+                    checked={borrarCensosFalsos}
+                    onChange={(e) => setBorrarCensosFalsos(e.target.checked)}
                     className="mt-0.5"
                   />
                   <div>
                     <div className="flex items-center gap-1.5 font-bold">
                       <Trash2 className="h-3.5 w-3.5 text-error" />
-                      Descartar sensos y alertas falsas generadas durante la
+                      Descartar censos y alertas falsas generadas durante la
                       calibración (recomendado)
                     </div>
                     <p className="mt-0.5 text-[11px] text-foreground-secondary">
-                      Elimina únicamente los registros de <code>Senso</code> y{" "}
+                      Borra únicamente los registros de <code>Censo</code> y{" "}
                       <code>AuditoriaSensores</code> de los sensores
                       seleccionados creados desde{" "}
                       <span className="font-mono text-foreground">
                         {formatearEpochSegundos(tsInicioCalibEsp)}
                       </span>{" "}
-                      hasta ahora, evitando contaminar promedios, mínimas y
-                      máximas históricas con el agua hirviendo o el hielo.
+                      hasta ahora.
                     </p>
                   </div>
                 </label>
@@ -1191,7 +1002,7 @@ export function CalibrationWizardModal({
           )}
         </div>
 
-        {/* Pie con botones de navegación */}
+        {/* Pie */}
         <div className="flex items-center justify-between border-t border-border bg-secondary/30 px-5 py-3">
           <div>
             {paso !== "CONFIG" && (
@@ -1199,13 +1010,10 @@ export function CalibrationWizardModal({
                 type="button"
                 disabled={aplicando}
                 onClick={() => {
-                  setTimerActivo(false);
-                  setTimerSegundos(0);
-                  if (paso === "HIELO" || paso === "PATRON") setPaso("CONFIG");
+                  reiniciarTimerPaso();
+                  if (paso === "HIELO") setPaso("CONFIG");
                   else if (paso === "EBULLICION") setPaso("HIELO");
-                  else if (paso === "RESUMEN") {
-                    setPaso(metodo === "DOS_PUNTOS" ? "EBULLICION" : "PATRON");
-                  }
+                  else if (paso === "RESUMEN") setPaso("EBULLICION");
                 }}
                 className="btn btn-outline px-3 py-1.5 text-xs"
               >
@@ -1237,7 +1045,7 @@ export function CalibrationWizardModal({
                 ) : (
                   <ArrowRight className="h-3.5 w-3.5" />
                 )}
-                Comenzar Calibración
+                Comenzar en Frío Extremo
               </button>
             )}
 
@@ -1246,13 +1054,12 @@ export function CalibrationWizardModal({
                 type="button"
                 disabled={!todosHieloListos}
                 onClick={() => {
-                  setTimerActivo(false);
-                  setTimerSegundos(0);
+                  reiniciarTimerPaso();
                   setPaso("EBULLICION");
                 }}
                 className="btn btn-solid btn-primary px-4 py-1.5 text-xs font-bold"
               >
-                Siguiente: Agua Hirviendo
+                Siguiente: Calor Extremo (Agua Hirviendo)
                 <ArrowRight className="h-3.5 w-3.5" />
               </button>
             )}
@@ -1262,27 +1069,12 @@ export function CalibrationWizardModal({
                 type="button"
                 disabled={!todosEbullicionListos}
                 onClick={() => {
-                  setTimerActivo(false);
+                  setTimerCorriendo(false);
                   setPaso("RESUMEN");
                 }}
                 className="btn btn-solid btn-primary px-4 py-1.5 text-xs font-bold"
               >
-                Revisar y Aplicar
-                <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            )}
-
-            {paso === "PATRON" && (
-              <button
-                type="button"
-                disabled={!todosPatronListos}
-                onClick={() => {
-                  setTimerActivo(false);
-                  setPaso("RESUMEN");
-                }}
-                className="btn btn-solid btn-primary px-4 py-1.5 text-xs font-bold"
-              >
-                Revisar y Aplicar
+                Revisar Ecuación y Aplicar
                 <ArrowRight className="h-3.5 w-3.5" />
               </button>
             )}
@@ -1299,7 +1091,7 @@ export function CalibrationWizardModal({
                 ) : (
                   <CheckCircle2 className="h-3.5 w-3.5" />
                 )}
-                Aplicar Calibración ({sensoresSeleccionados.length})
+                Calibrar y Guardar ({sensoresSeleccionados.length})
               </button>
             )}
           </div>
@@ -1309,117 +1101,155 @@ export function CalibrationWizardModal({
   );
 }
 
-// Subcomponente reutilizable para los pasos de captura en vivo (Hielo / Ebullición / Patrón)
-function PasoCapturaEnVivo({
+function PasoBanoTermico({
   titulo,
   icono,
+  recomendacionExtra,
   instrucciones,
   sensores,
   enVivoPorMac,
   valoresCapturados,
   etiquetaValor,
-  minValor = -55,
-  maxValor = 126,
-  onCapturarTodos,
-  onCambiarValor,
   timerTexto,
-  timerActivo,
+  progresoPct,
+  timerCorriendo,
+  autoCapturado,
   onToggleTimer,
   onResetTimer,
+  onCapturarAhora,
+  onCambiarValor,
   muteando,
   onMute,
 }: {
   titulo: string;
   icono: React.ReactNode;
+  recomendacionExtra: string;
   instrucciones: string[];
   sensores: ResumenSensorCliente[];
   enVivoPorMac: Record<string, LecturaEnVivoSensor>;
   valoresCapturados: Record<string, number | null>;
   etiquetaValor: string;
-  minValor?: number;
-  maxValor?: number;
-  onCapturarTodos: () => void;
-  onCambiarValor: (macUpper: string, val: number) => void;
   timerTexto: string;
-  timerActivo: boolean;
+  progresoPct: number;
+  timerCorriendo: boolean;
+  autoCapturado: boolean;
   onToggleTimer: () => void;
   onResetTimer: () => void;
+  onCapturarAhora: () => void;
+  onCambiarValor: (macUpper: string, val: number) => void;
   muteando: boolean;
   onMute: () => void;
 }) {
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border bg-background p-3.5">
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2 text-sm font-bold">
-            {icono}
-            <span>{titulo}</span>
-          </div>
-          <ol className="list-decimal space-y-0.5 pl-4 text-xs text-foreground-secondary">
-            {instrucciones.map((txt, idx) => (
-              <li key={idx}>{txt}</li>
-            ))}
-          </ol>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 font-mono">
-            <Clock className="h-3.5 w-3.5 text-primary" />
-            <span className="font-bold">{timerTexto}</span>
-            <span className="text-[10px] text-foreground-secondary">/ 03:00</span>
-            <button
-              type="button"
-              onClick={onToggleTimer}
-              className="ml-1 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-semibold hover:bg-hover"
-            >
-              {timerActivo ? "Pausar" : "Iniciar"}
-            </button>
-            <button
-              type="button"
-              onClick={onResetTimer}
-              className="rounded p-0.5 hover:bg-secondary"
-              title="Reiniciar cronómetro"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </button>
+      <div className="rounded-lg border border-border bg-background p-3.5 space-y-2.5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-sm font-bold">
+              {icono}
+              <span>{titulo}</span>
+            </div>
+            <ol className="list-decimal space-y-0.5 pl-4 text-xs text-foreground-secondary">
+              {instrucciones.map((txt, idx) => (
+                <li key={idx}>{txt}</li>
+              ))}
+            </ol>
           </div>
 
           <button
             type="button"
             disabled={muteando}
             onClick={onMute}
-            className="btn btn-outline btn-error px-2.5 py-1.5 text-xs"
+            className="btn btn-outline btn-error px-2.5 py-1.5 text-xs shrink-0"
             title="Silenciar bocina física si saltó alarma de umbral"
           >
             <VolumeX className="h-3.5 w-3.5" />
             Mute Bocina
           </button>
         </div>
+
+        <div className="rounded-md border border-info/40 bg-info-light/40 px-3 py-2 text-[11px] text-foreground">
+          {recomendacionExtra}
+        </div>
+
+        {/* Contador regresivo automático 03:00 -> 00:00 */}
+        <div className="rounded-lg border border-border bg-card p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 text-primary" />
+              <span className="font-mono text-lg font-bold tabular-nums">
+                {timerTexto}
+              </span>
+              <span className="text-[11px] text-foreground-secondary">
+                {autoCapturado
+                  ? "Captura automática completada"
+                  : timerCorriendo
+                    ? "Estabilizando… capturará automáticamente al llegar a 00:00"
+                    : "Listo para iniciar cuenta regresiva de 3 minutos"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onToggleTimer}
+                className="btn btn-solid btn-primary px-3 py-1.5 text-xs font-bold"
+              >
+                {timerCorriendo ? (
+                  <>
+                    <Pause className="h-3.5 w-3.5" />
+                    Pausar
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-3.5 w-3.5" />
+                    {progresoPct > 0 && progresoPct < 100
+                      ? "Reanudar"
+                      : "Iniciar 03:00"}
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={onResetTimer}
+                className="btn btn-outline px-2 py-1.5 text-xs"
+                title="Reiniciar contador a 03:00"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={onCapturarAhora}
+                className="btn btn-outline btn-warning px-2.5 py-1.5 text-xs font-semibold"
+                title="Capturar manualmente antes de que termine el contador"
+              >
+                Capturar ahora
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-secondary">
+            <div
+              className={`h-full transition-all duration-300 ${
+                autoCapturado ? "bg-success" : "bg-primary"
+              }`}
+              style={{ width: `${Math.min(100, Math.max(0, progresoPct))}%` }}
+            />
+          </div>
+        </div>
       </div>
 
-      <div className="flex items-center justify-between">
-        <span className="font-semibold text-foreground-secondary">
-          Telemetría en vivo (reconstrucción automática de temperatura cruda):
-        </span>
-        <button
-          type="button"
-          onClick={onCapturarTodos}
-          className="btn btn-solid btn-warning px-3 py-1.5 text-xs font-bold"
-        >
-          Capturar Todos Ahora
-        </button>
-      </div>
-
+      {/* Tabla en vivo de sensores seleccionados */}
       <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full text-left text-xs">
           <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
             <tr>
               <th className="px-3 py-2">Sensor</th>
-              <th className="px-3 py-2">Temp. Actual (Corr.)</th>
+              <th className="px-3 py-2">Temp. Actual</th>
               <th className="px-3 py-2">Temp. Cruda Real</th>
               <th className="px-3 py-2">Estabilidad</th>
               <th className="px-3 py-2">{etiquetaValor}</th>
-              <th className="px-3 py-2 text-right">Acción</th>
+              <th className="px-3 py-2 text-right">Manual</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -1463,9 +1293,9 @@ function PasoCapturaEnVivo({
                       value={capturado ?? 0}
                       onChange={(v) => onCambiarValor(mac, v)}
                       decimals={2}
-                      min={minValor}
-                      max={maxValor}
-                      placeholder="Sin capturar"
+                      min={-55}
+                      max={126}
+                      placeholder="Pendiente"
                       className={`w-24 rounded border px-2 py-1 font-mono ${
                         capturado !== null
                           ? "border-success bg-alert-success-bg/30 font-bold"

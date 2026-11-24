@@ -13,7 +13,7 @@ namespace DbRuntime::Repositories {
     struct ConfiguracionSistemaDTO {
         PgInt    idConfiguracionSistema = 1;
         PgInt    zonaHorariaMin         = -180;
-        PgPosInt retencionSensoDias     = 365;
+        PgPosInt retencionCensoDias     = 365;
         PgPosInt retencionEventosDias   = 730;
         PgPosInt retencionAuditoriaDias = 1095;
         PgPosInt sdLibreMinimoKb        = 51200;
@@ -35,7 +35,7 @@ namespace DbRuntime::Repositories {
             ConfiguracionSistemaDTO dto{};
             dto.idConfiguracionSistema = r.getInt32("id_configuracion_sistema", 1);
             dto.zonaHorariaMin         = r.getInt32("zona_horaria_min", -180);
-            dto.retencionSensoDias     = r.getUInt32("retencion_senso_dias", 365);
+            dto.retencionCensoDias     = r.getUInt32("retencion_censo_dias", 365);
             dto.retencionEventosDias   = r.getUInt32("retencion_eventos_dias", 730);
             dto.retencionAuditoriaDias = r.getUInt32("retencion_auditoria_dias", 1095);
             dto.sdLibreMinimoKb        = r.getUInt32("sd_libre_minimo_kb", 51200);
@@ -63,7 +63,7 @@ namespace DbRuntime::Repositories {
             PgRowBuffer row(schema);
             row.setInt32("id_configuracion_sistema", 1);
             row.setInt32("zona_horaria_min",         -180);
-            row.setUInt32("retencion_senso_dias",     365);
+            row.setUInt32("retencion_censo_dias",     365);
             row.setUInt32("retencion_eventos_dias",   730);
             row.setUInt32("retencion_auditoria_dias", 1095);
             row.setUInt32("sd_libre_minimo_kb",       51200);
@@ -97,7 +97,7 @@ namespace DbRuntime::Repositories {
                 [](const PgRowView& r) -> bool { return r.getInt32("id_configuracion_sistema") == 1; },
                 [&](PgRowBuffer& row) {
                     row.setInt32("zona_horaria_min",          dto.zonaHorariaMin);
-                    row.setUInt32("retencion_senso_dias",     dto.retencionSensoDias);
+                    row.setUInt32("retencion_censo_dias",     dto.retencionCensoDias);
                     row.setUInt32("retencion_eventos_dias",   dto.retencionEventosDias);
                     row.setUInt32("retencion_auditoria_dias", dto.retencionAuditoriaDias);
                     row.setUInt32("sd_libre_minimo_kb",       dto.sdLibreMinimoKb);

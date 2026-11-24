@@ -34,6 +34,7 @@ import {
   ReporteHelpLogBiosDTO,
   TelemetriaTareaRtosDTO,
 } from "#types/rpc.types";
+import { DataTable } from "#components/ui/DataTable";
 
 export function BiosHardwareView() {
   const [infoEsp, setInfoEsp] = useState<InfoCompletaEspDTO | null>(null);
@@ -360,21 +361,52 @@ export function BiosHardwareView() {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-              <tr>
-                <th className="px-3 py-2">Tarea</th>
-                <th className="px-3 py-2">Core / Prio / Período</th>
-                <th className="px-3 py-2">Salud de Stack (Libre / Total)</th>
-                <th className="px-3 py-2">Ciclos / Max Exec</th>
-                <th className="px-3 py-2">Último Latido</th>
-                <th className="px-3 py-2">Resurrecciones</th>
-                <th className="px-3 py-2">Estado</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {tareasRtos.map((t) => {
+        <DataTable
+          data={tareasRtos}
+          rowKey={(t) => t.nombre}
+          filters={[
+            {
+              key: "nucleo",
+              label: "Núcleo",
+              getValue: (t) => t.nucleo,
+              options: [
+                { value: "0", label: "Core 0" },
+                { value: "1", label: "Core 1" },
+              ],
+            },
+            {
+              key: "activa",
+              label: "Estado",
+              getValue: (t) => (t.activa ? "1" : "0"),
+              options: [
+                { value: "1", label: "ACTIVA" },
+                { value: "0", label: "DETENIDA" },
+              ],
+            },
+          ]}
+          columns={[
+            {
+              key: "nombre",
+              header: "Tarea",
+              sortValue: (t) => t.nombre,
+              cellClassName: "font-mono font-bold text-primary",
+              cell: (t) => t.nombre,
+            },
+            {
+              key: "core",
+              header: "Core / Prio / Período",
+              sortValue: (t) => t.nucleo * 100 + t.prioridad,
+              cellClassName: "font-mono text-[11px]",
+              cell: (t) => `Core ${t.nucleo} · P${t.prioridad} · ${t.periodoMs} ms`,
+            },
+            {
+              key: "stack",
+              header: "Salud de Stack (Libre / Total)",
+              sortValue: (t) =>
+                t.stackReservadoBytes > 0
+                  ? t.stackLibreMinBytes / t.stackReservadoBytes
+                  : 0,
+              cell: (t) => {
                 const pctStackLibre =
                   t.stackReservadoBytes > 0
                     ? Math.min(
@@ -383,84 +415,90 @@ export function BiosHardwareView() {
                       )
                     : 0;
                 return (
-                  <tr key={t.nombre} className="hover:bg-secondary/40">
-                    <td className="px-3 py-2 font-mono font-bold text-primary">
-                      {t.nombre}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-[11px]">
-                      Core {t.nucleo} · P{t.prioridad} · {t.periodoMs} ms
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center justify-between font-mono text-[11px]">
-                        <span>
-                          {t.stackLibreMinBytes} / {t.stackReservadoBytes} B
-                        </span>
-                        <span>{pctStackLibre.toFixed(0)}%</span>
-                      </div>
-                      <div className="mt-1 h-1.5 w-36 overflow-hidden rounded-full bg-secondary">
-                        <div
-                          className={`h-full ${
-                            pctStackLibre < 20
-                              ? "bg-error"
-                              : pctStackLibre < 40
-                                ? "bg-warning"
-                                : "bg-success"
-                          }`}
-                          style={{ width: `${pctStackLibre}%` }}
-                        />
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 font-mono text-[11px]">
-                      <div>{t.ciclosEjecutados.toLocaleString("es-AR")}</div>
-                      <div className="text-foreground-secondary">
-                        máx {t.maxTiempoEjecucionUs} µs
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 font-mono">
-                      {t.msDesdeUltimoLatido} ms
-                    </td>
-                    <td className="px-3 py-2 font-mono">
-                      <span
-                        className={
-                          t.reiniciosBios > 0
-                            ? "font-bold text-error"
-                            : "text-foreground-secondary"
-                        }
-                      >
-                        {t.reiniciosBios}
+                  <>
+                    <div className="flex items-center justify-between font-mono text-[11px]">
+                      <span>
+                        {t.stackLibreMinBytes} / {t.stackReservadoBytes} B
                       </span>
-                    </td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                          t.activa
-                            ? "bg-alert-success-bg text-alert-success-icon"
-                            : "bg-alert-err-bg text-alert-err-icon"
+                      <span>{pctStackLibre.toFixed(0)}%</span>
+                    </div>
+                    <div className="mt-1 h-1.5 w-36 overflow-hidden rounded-full bg-secondary">
+                      <div
+                        className={`h-full ${
+                          pctStackLibre < 20
+                            ? "bg-error"
+                            : pctStackLibre < 40
+                              ? "bg-warning"
+                              : "bg-success"
                         }`}
-                      >
-                        {t.enEjecucionPaso
-                          ? "EN PASO"
-                          : t.activa
-                            ? "ACTIVA"
-                            : "DETENIDA"}
-                      </span>
-                    </td>
-                  </tr>
+                        style={{ width: `${pctStackLibre}%` }}
+                      />
+                    </div>
+                  </>
                 );
-              })}
-              {tareasRtos.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={7}
-                    className="px-3 py-6 text-center text-foreground-secondary"
-                  >
-                    Sin telemetría de tareas FreeRTOS disponible.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              },
+            },
+            {
+              key: "ciclos",
+              header: "Ciclos / Max Exec",
+              sortValue: (t) => t.maxTiempoEjecucionUs,
+              cellClassName: "font-mono text-[11px]",
+              cell: (t) => (
+                <>
+                  <div>{t.ciclosEjecutados.toLocaleString("es-AR")}</div>
+                  <div className="text-foreground-secondary">
+                    máx {t.maxTiempoEjecucionUs} µs
+                  </div>
+                </>
+              ),
+            },
+            {
+              key: "latido",
+              header: "Último Latido",
+              sortValue: (t) => t.msDesdeUltimoLatido,
+              cellClassName: "font-mono",
+              cell: (t) => `${t.msDesdeUltimoLatido} ms`,
+            },
+            {
+              key: "reinicios",
+              header: "Resurrecciones",
+              sortValue: (t) => t.reiniciosBios,
+              cellClassName: "font-mono",
+              cell: (t) => (
+                <span
+                  className={
+                    t.reiniciosBios > 0
+                      ? "font-bold text-error"
+                      : "text-foreground-secondary"
+                  }
+                >
+                  {t.reiniciosBios}
+                </span>
+              ),
+            },
+            {
+              key: "estado",
+              header: "Estado",
+              sortValue: (t) => (t.enEjecucionPaso ? 2 : t.activa ? 1 : 0),
+              cell: (t) => (
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    t.activa
+                      ? "bg-alert-success-bg text-alert-success-icon"
+                      : "bg-alert-err-bg text-alert-err-icon"
+                  }`}
+                >
+                  {t.enEjecucionPaso
+                    ? "EN PASO"
+                    : t.activa
+                      ? "ACTIVA"
+                      : "DETENIDA"}
+                </span>
+              ),
+            },
+          ]}
+          emptyMessage="Sin telemetría de tareas FreeRTOS disponible."
+        />
       </div>
 
       {/* Panel 3 y Panel 4: Caja Negra BIOS + Banco de Control Hardware */}

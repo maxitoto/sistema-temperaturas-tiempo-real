@@ -99,7 +99,7 @@ auto resUpd = Sensor
 
 #### C. Regla de Oro: ¿Cuándo llamo a un Repositorio directamente y cuándo uso la Cola de RTOS?
 
-Cuando en unos días conectes tus repositorios (`RepoSensor`, `RepoSenso`, `RepoAuditoria`, `RepoUsuarios`), solo tienes que seguir esta regla:
+Cuando en unos días conectes tus repositorios (`RepoSensor`, `RepoCenso`, `RepoAuditoria`, `RepoUsuarios`), solo tienes que seguir esta regla:
 
 | Situación en tu código | ¿Cómo interactúo con la Base de Datos / RTOS? | ¿Por qué? |
 | --- | --- | --- |
@@ -107,7 +107,7 @@ Cuando en unos días conectes tus repositorios (`RepoSensor`, `RepoSenso`, `Repo
 
  |
 | **2. Quieres dejar registrada una Auditoría o un Evento desde un RPC o Middleware sin frenar la respuesta** | Llamas en 1 línea a **`RTOS::encolarAuditoria(...)`** y retornas enseguida. | La llamada tarda **3 microsegundos** (solo copia el struct POD a la cola) y `TaskAlertasYPersistencia` hace el `INSERT` en la MicroSD en segundo plano. |
-| **3. Guardado automático cada 2 minutos o fallos eléctricos de sensores** | **Ya está conectado automáticamente:** `TaskSensores` encola el evento y `TaskAlertasYPersistencia` lo recibe en su `switch (reg.tipo)`. | Tú solo tienes que poner la llamada `RepoSenso::crearEnLote(...)` o `RepoEventoSensor::crear(...)` donde dejamos el comentario `// consulta DB` en `TaskAlertasYPersistencia.hpp`. |
+| **3. Guardado automático cada 2 minutos o fallos eléctricos de sensores** | **Ya está conectado automáticamente:** `TaskSensores` encola el evento y `TaskAlertasYPersistencia` lo recibe en su `switch (reg.tipo)`. | Tú solo tienes que poner la llamada `RepoCenso::crearEnLote(...)` o `RepoEventoSensor::crear(...)` donde dejamos el comentario `// consulta DB` en `TaskAlertasYPersistencia.hpp`. |
 
 ---
 
@@ -120,23 +120,23 @@ Aquí no tienes que tocar tareas ni colas; llamas directamente a tu repositorio:
 static void obtenerCensosPorMac(const FiltroPorMacDTO& filtro, HistorialSensoresDTO& salida) {
     memset(&salida, 0, sizeof(HistorialSensoresDTO));
     // Llamas directamente a tu repositorio (el SGBD ya protege la concurrencia por dentro):
-    // auto lista = RepoSenso::buscarPorMac(macHex, limiteSeguro);
+    // auto lista = RepoCenso::buscarPorMac(macHex, limiteSeguro);
 }
 
 ```
 
 **Lugar 2: En `src/rtos/tasks/TaskAlertasYPersistencia.hpp` (donde están los 4 `// consulta DB`)**
-Cuando tengas listos `RepoSenso`, `RepoEventoSensor` y `RepoAuditoria`, solo reemplazas cada `// consulta DB` dentro de `procesarColaPersistenciaDB()`:
+Cuando tengas listos `RepoCenso`, `RepoEventoSensor` y `RepoAuditoria`, solo reemplazas cada `// consulta DB` dentro de `procesarColaPersistenciaDB()`:
 
 ```cpp
-case TipoRegistroDB::LOTE_SENSOS_2_MINUTOS: {
+case TipoRegistroDB::LOTE_CENSOS_2_MINUTOS: {
     SnapshotSensor lista[GestorSensores::MAX_SENSORES];
     uint8_t cant = gestorSensores.obtenerSensoresConectados(lista);
     if (cant > 0) {
         DbRuntime::Repositories::TransaccionBatch tx; // Abre batch (1 sola escritura física a SD)
         PgDateTime ahora = RelojSistema::fechaHoraActualPg();
         for (uint8_t i = 0; i < cant; ++i) {
-            // RepoSenso::crear({ lista[i].idSensorDB, lista[i].tempCruda, lista[i].tempCorregida, ahora });
+            // RepoCenso::crear({ lista[i].idSensorDB, lista[i].tempCruda, lista[i].tempCorregida, ahora });
         }
         tx.confirmar(); // Cierra batch y vuelca a la MicroSD
     }

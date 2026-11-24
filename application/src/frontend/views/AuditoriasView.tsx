@@ -36,6 +36,11 @@ import {
   LABEL_TIPO_EVENTO,
 } from "../lib/labels";
 import {
+  DataTable,
+  DataTableColumn,
+  DataTableFilter,
+} from "../components/ui/DataTable";
+import {
   AuditoriaAuthDetalleDTO,
   AuditoriaSensorRowDTO,
   AuditoriaSistemaRowDTO,
@@ -47,6 +52,7 @@ import {
   ResumenAuditoriaAuthDTO,
   ResumenSensorCliente,
   RolUsuario,
+  EstadoBus, EstadoSensor, MedioConexion
 } from "#types/rpc.types";
 
 const PAGE_AUTH = 16; // Máximo 16 por página según protocolo
@@ -432,117 +438,158 @@ export function AuditoriasView() {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                  <tr>
-                    <th className="px-2.5 py-2">Seq</th>
-                    <th className="px-2.5 py-2">Usuario</th>
-                    <th className="px-2.5 py-2">Acción</th>
-                    <th className="px-2.5 py-2">Medio / Origen</th>
-                    <th className="px-2.5 py-2">Resultado</th>
-                    <th className="px-2.5 py-2">Criticidad</th>
-                    <th className="px-2.5 py-2">Fecha / Hora</th>
-                    {esAdmin && (
-                      <th className="px-2.5 py-2 text-right">HMAC / Acciones</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {filasAuth.map((item) => (
-                    <tr
-                      key={item.idAuditoriaAuth}
-                      onClick={() =>
-                        esAdmin && void abrirDetalleAuth(item.idAuditoriaAuth)
-                      }
-                      className={
-                        esAdmin
-                          ? "cursor-pointer hover:bg-secondary/40"
-                          : "hover:bg-secondary/30"
-                      }
-                    >
-                      <td className="px-2.5 py-2 font-mono font-bold">
-                        #{item.seq}
-                      </td>
-                      <td className="px-2.5 py-2 font-mono">
-                        {item.usuarioIntentado || "—"}
-                      </td>
-                      <td className="px-2.5 py-2 font-mono text-[11px]">
-                        {item.accion}
-                      </td>
-                      <td className="px-2.5 py-2 text-foreground-secondary">
+            <DataTable
+                data={filasAuth}
+                rowKey={(item) => item.idAuditoriaAuth}
+                onRowClick={
+                  esAdmin
+                    ? (item) => void abrirDetalleAuth(item.idAuditoriaAuth)
+                    : undefined
+                }
+                searchPlaceholder="Buscar usuario, acción, IP..."
+                searchValue={(item) =>
+                  `${item.usuarioIntentado} ${item.accion} ${item.origenRemoto}`
+                }
+                filters={
+                  [
+                    {
+                      key: "resultado",
+                      label: "Resultado",
+                      getValue: (r) => r.resultado,
+                      options: Object.entries(LABEL_RESULTADO_AUDITORIA).map(
+                        ([value, label]) => ({ value, label })
+                      ),
+                    },
+                    {
+                      key: "criticidad",
+                      label: "Criticidad",
+                      getValue: (r) => r.criticidad,
+                      options: Object.entries(LABEL_CRITICIDAD).map(
+                        ([value, label]) => ({ value, label })
+                      ),
+                    },
+                    {
+                      key: "medio",
+                      label: "Medio",
+                      getValue: (r) => r.medioConexion,
+                      options: Object.entries(LABEL_MEDIO_CONEXION).map(
+                        ([value, label]) => ({ value, label })
+                      ),
+                    },
+                  ] as DataTableFilter<ResumenAuditoriaAuthDTO>[]
+                }
+                columns={[
+                  {
+                    key: "seq",
+                    header: "Seq",
+                    sortValue: (r) => r.seq,
+                    cellClassName: "font-mono font-bold",
+                    cell: (r) => `#${r.seq}`,
+                  },
+                  {
+                    key: "usuario",
+                    header: "Usuario",
+                    sortValue: (r) => r.usuarioIntentado,
+                    cellClassName: "font-mono",
+                    cell: (r) => r.usuarioIntentado || "—",
+                  },
+                  {
+                    key: "accion",
+                    header: "Acción",
+                    sortValue: (r) => r.accion,
+                    cellClassName: "font-mono text-[11px]",
+                    cell: (r) => r.accion,
+                  },
+                  {
+                    key: "medio",
+                    header: "Medio / Origen",
+                    sortValue: (r) =>
+                      `${LABEL_MEDIO_CONEXION[r.medioConexion] ?? r.medioConexion} ${r.origenRemoto}`,
+                    cellClassName: "text-foreground-secondary",
+                    cell: (r) => (
+                      <>
                         <span className="font-semibold text-foreground">
-                          {LABEL_MEDIO_CONEXION[item.medioConexion] ??
-                            item.medioConexion}
+                          {LABEL_MEDIO_CONEXION[r.medioConexion] ??
+                            r.medioConexion}
                         </span>{" "}
-                        · <span className="font-mono">{item.origenRemoto}</span>
-                      </td>
-                      <td className="px-2.5 py-2">
-                        <span
-                          className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
-                            item.resultado === ResultadoAuditoria.EXITO
-                              ? "bg-alert-success-bg text-alert-success-icon"
-                              : "bg-alert-err-bg text-alert-err-icon"
-                          }`}
-                        >
-                          {LABEL_RESULTADO_AUDITORIA[item.resultado] ??
-                            item.resultado}
-                        </span>
-                      </td>
-                      <td className="px-2.5 py-2">
-                        <span
-                          className={`rounded px-2 py-0.5 text-[10px] font-semibold ${badgeCriticidad(
-                            item.criticidad
-                          )}`}
-                        >
-                          {LABEL_CRITICIDAD[item.criticidad] ?? item.criticidad}
-                        </span>
-                      </td>
-                      <td className="px-2.5 py-2 font-mono text-foreground-secondary">
-                        {formatearEpochSegundos(item.fechaCreacion)}
-                      </td>
-                      {esAdmin && (
-                        <td
-                          className="px-2.5 py-2 text-right"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              className="btn btn-icon btn-info"
-                              onClick={() =>
-                                void abrirDetalleAuth(item.idAuditoriaAuth)
-                              }
-                              title="Inspeccionar hashes HMAC-64"
-                            >
-                              <Eye className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              className="btn btn-icon btn-error"
-                              onClick={() =>
-                                void eliminarAuth(item.idAuditoriaAuth)
-                              }
-                              title="Eliminar registro"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                  {filasAuth.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={esAdmin ? 8 : 7}
-                        className="px-3 py-6 text-center text-foreground-secondary"
+                        · <span className="font-mono">{r.origenRemoto}</span>
+                      </>
+                    ),
+                  },
+                  {
+                    key: "resultado",
+                    header: "Resultado",
+                    sortValue: (r) =>
+                      LABEL_RESULTADO_AUDITORIA[r.resultado] ?? r.resultado,
+                    cell: (r) => (
+                      <span
+                        className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
+                          r.resultado === ResultadoAuditoria.EXITO
+                            ? "bg-alert-success-bg text-alert-success-icon"
+                            : "bg-alert-err-bg text-alert-err-icon"
+                        }`}
                       >
-                        Sin registros en esta página.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                        {LABEL_RESULTADO_AUDITORIA[r.resultado] ?? r.resultado}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "criticidad",
+                    header: "Criticidad",
+                    sortValue: (r) => r.criticidad,
+                    cell: (r) => (
+                      <span
+                        className={`rounded px-2 py-0.5 text-[10px] font-semibold ${badgeCriticidad(
+                          r.criticidad
+                        )}`}
+                      >
+                        {LABEL_CRITICIDAD[r.criticidad] ?? r.criticidad}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "fecha",
+                    header: "Fecha / Hora",
+                    sortValue: (r) => r.fechaCreacion,
+                    cellClassName: "font-mono text-foreground-secondary",
+                    cell: (r) => formatearEpochSegundos(r.fechaCreacion),
+                  },
+                  ...(esAdmin
+                    ? ([
+                        {
+                          key: "acciones",
+                          header: "HMAC / Acciones",
+                          headerClassName: "text-right",
+                          cellClassName: "text-right",
+                          stopRowClick: true,
+                          cell: (r) => (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                className="btn btn-icon btn-info"
+                                onClick={() =>
+                                  void abrirDetalleAuth(r.idAuditoriaAuth)
+                                }
+                                title="Inspeccionar hashes HMAC-64"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                className="btn btn-icon btn-error"
+                                onClick={() =>
+                                  void eliminarAuth(r.idAuditoriaAuth)
+                                }
+                                title="Eliminar registro"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ),
+                        },
+                      ] as DataTableColumn<ResumenAuditoriaAuthDTO>[])
+                    : []),
+                ]}
+                emptyMessage="Sin registros en esta página."
+              />
           </div>
         </div>
       )}
@@ -619,29 +666,61 @@ export function AuditoriasView() {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                  <tr>
-                    <th className="px-2.5 py-2">ID</th>
-                    <th className="px-2.5 py-2">Transición de Estado</th>
-                    <th className="px-2.5 py-2">Bus 1-Wire</th>
-                    <th className="px-2.5 py-2">Tipo / Criticidad</th>
-                    <th className="px-2.5 py-2">Estado Reporte</th>
-                    <th className="px-2.5 py-2">Fecha</th>
-                    {esAdmin && <th className="px-2.5 py-2 text-right">Acciones</th>}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {filasAudSensor.map((ev) => (
-                    <tr
-                      key={ev.idAuditoriaSensor}
-                      className="hover:bg-secondary/40"
-                    >
-                      <td className="px-2.5 py-2 font-mono">
-                        #{ev.idAuditoriaSensor}
-                      </td>
-                      <td className="px-2.5 py-2 font-mono text-[11px]">
+            <DataTable
+                data={filasAudSensor}
+                rowKey={(ev) => ev.idAuditoriaSensor}
+                filters={
+                  [
+                    {
+                      key: "estadoNuevo",
+                      label: "Estado Nuevo",
+                      getValue: (ev) => ev.estadoNuevoSensor,
+                      options: [
+                        EstadoSensor.OK,
+                        EstadoSensor.ALARMA_SUPERIOR,
+                        EstadoSensor.ALARMA_INFERIOR,
+                        EstadoSensor.DESCONECTADO,
+                        EstadoSensor.ERROR_CRC_SCRATCHPAD,
+                      ].map((e) => ({
+                        value: String(e),
+                        label: LABEL_ESTADO_SENSOR[e] ?? String(e),
+                      })),
+                    },
+                    {
+                      key: "criticidad",
+                      label: "Criticidad",
+                      getValue: (ev) => ev.criticidadSensor,
+                      options: Object.entries(LABEL_CRITICIDAD).map(
+                        ([value, label]) => ({ value, label })
+                      ),
+                    },
+                    {
+                      key: "reporte",
+                      label: "Reporte",
+                      getValue: (ev) => ev.estadoReporte,
+                      options: Object.entries(LABEL_ESTADO_ENVIO).map(
+                        ([value, label]) => ({ value, label })
+                      ),
+                    },
+                  ] as DataTableFilter<AuditoriaSensorRowDTO>[]
+                }
+                columns={[
+                  {
+                    key: "id",
+                    header: "ID",
+                    sortValue: (ev) => ev.idAuditoriaSensor,
+                    cellClassName: "font-mono",
+                    cell: (ev) => `#${ev.idAuditoriaSensor}`,
+                  },
+                  {
+                    key: "transicion",
+                    header: "Transición de Estado",
+                    sortValue: (ev) =>
+                      LABEL_ESTADO_SENSOR[ev.estadoNuevoSensor] ??
+                      ev.estadoNuevoSensor,
+                    cellClassName: "font-mono text-[11px]",
+                    cell: (ev) => (
+                      <>
                         <span className="text-foreground-secondary">
                           {LABEL_ESTADO_SENSOR[ev.estadoPrevioSensor] ??
                             ev.estadoPrevioSensor}
@@ -651,11 +730,24 @@ export function AuditoriasView() {
                           {LABEL_ESTADO_SENSOR[ev.estadoNuevoSensor] ??
                             ev.estadoNuevoSensor}
                         </span>
-                      </td>
-                      <td className="px-2.5 py-2 font-mono text-[11px]">
-                        {LABEL_ESTADO_BUS[ev.estadoBus] ?? ev.estadoBus}
-                      </td>
-                      <td className="px-2.5 py-2">
+                      </>
+                    ),
+                  },
+                  {
+                    key: "bus",
+                    header: "Bus 1-Wire",
+                    sortValue: (ev) =>
+                      LABEL_ESTADO_BUS[ev.estadoBus] ?? ev.estadoBus,
+                    cellClassName: "font-mono text-[11px]",
+                    cell: (ev) =>
+                      LABEL_ESTADO_BUS[ev.estadoBus] ?? ev.estadoBus,
+                  },
+                  {
+                    key: "criticidad",
+                    header: "Tipo / Criticidad",
+                    sortValue: (ev) => ev.criticidadSensor,
+                    cell: (ev) => (
+                      <>
                         <span className="mr-1.5 rounded bg-secondary px-1.5 py-0.5 text-[10px]">
                           {LABEL_TIPO_EVENTO[ev.tipoEventoSensor] ??
                             ev.tipoEventoSensor}
@@ -668,67 +760,75 @@ export function AuditoriasView() {
                           {LABEL_CRITICIDAD[ev.criticidadSensor] ??
                             ev.criticidadSensor}
                         </span>
-                      </td>
-                      <td className="px-2.5 py-2">
-                        {esAdmin ? (
-                          <select
-                            value={ev.estadoReporte}
-                            onChange={(e) =>
-                              void cambiarEstadoReporteSensor(
-                                ev.idAuditoriaSensor,
-                                Number(e.target.value) as EstadoEnvioCorreo
-                              )
-                            }
-                            className="rounded border border-border bg-background px-2 py-1 text-[11px]"
-                          >
-                            <option value={EstadoEnvioCorreo.PENDIENTE}>
-                              PENDIENTE
-                            </option>
-                            <option value={EstadoEnvioCorreo.ENVIADO}>
-                              ENVIADO
-                            </option>
-                            <option value={EstadoEnvioCorreo.FALLIDO}>
-                              FALLIDO
-                            </option>
-                          </select>
-                        ) : (
-                          <span className="rounded bg-secondary px-2 py-0.5 text-[10px] font-semibold">
-                            {LABEL_ESTADO_ENVIO[ev.estadoReporte] ??
-                              ev.estadoReporte}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-2.5 py-2 font-mono text-foreground-secondary">
-                        {ev.fechaCreacion || "—"}
-                      </td>
-                      {esAdmin && (
-                        <td className="px-2.5 py-2 text-right">
-                          <button
-                            className="btn btn-icon btn-error"
-                            onClick={() =>
-                              void eliminarAudSensor(ev.idAuditoriaSensor)
-                            }
-                            title="Eliminar evento"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                  {filasAudSensor.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={esAdmin ? 7 : 6}
-                        className="px-3 py-6 text-center text-foreground-secondary"
-                      >
-                        Sin eventos registrados para el sensor seleccionado.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                      </>
+                    ),
+                  },
+                  {
+                    key: "reporte",
+                    header: "Estado Reporte",
+                    sortValue: (ev) => ev.estadoReporte,
+                    stopRowClick: true,
+                    cell: (ev) =>
+                      esAdmin ? (
+                        <select
+                          value={ev.estadoReporte}
+                          onChange={(e) =>
+                            void cambiarEstadoReporteSensor(
+                              ev.idAuditoriaSensor,
+                              Number(e.target.value) as EstadoEnvioCorreo
+                            )
+                          }
+                          className="rounded border border-border bg-background px-2 py-1 text-[11px]"
+                        >
+                          <option value={EstadoEnvioCorreo.PENDIENTE}>
+                            PENDIENTE
+                          </option>
+                          <option value={EstadoEnvioCorreo.ENVIADO}>
+                            ENVIADO
+                          </option>
+                          <option value={EstadoEnvioCorreo.FALLIDO}>
+                            FALLIDO
+                          </option>
+                        </select>
+                      ) : (
+                        <span className="rounded bg-secondary px-2 py-0.5 text-[10px] font-semibold">
+                          {LABEL_ESTADO_ENVIO[ev.estadoReporte] ??
+                            ev.estadoReporte}
+                        </span>
+                      ),
+                  },
+                  {
+                    key: "fecha",
+                    header: "Fecha",
+                    sortValue: (ev) => ev.fechaCreacion,
+                    cellClassName: "font-mono text-foreground-secondary",
+                    cell: (ev) => ev.fechaCreacion || "—",
+                  },
+                  ...(esAdmin
+                    ? ([
+                        {
+                          key: "acciones",
+                          header: "Acciones",
+                          headerClassName: "text-right",
+                          cellClassName: "text-right",
+                          stopRowClick: true,
+                          cell: (ev) => (
+                            <button
+                              className="btn btn-icon btn-error"
+                              onClick={() =>
+                                void eliminarAudSensor(ev.idAuditoriaSensor)
+                              }
+                              title="Eliminar evento"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ),
+                        },
+                      ] as DataTableColumn<AuditoriaSensorRowDTO>[])
+                    : []),
+                ]}
+                emptyMessage="Sin eventos registrados para el sensor seleccionado."
+              />
           </div>
         </div>
       )}
@@ -791,101 +891,177 @@ export function AuditoriasView() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                <tr>
-                  <th className="px-2.5 py-2">Boot / ID</th>
-                  <th className="px-2.5 py-2">Motivo Reset / FW</th>
-                  <th className="px-2.5 py-2">Recursos (Heap / SD)</th>
-                  <th className="px-2.5 py-2">Bus / Tiempo / Red</th>
-                  <th className="px-2.5 py-2">Detalle</th>
-                  <th className="px-2.5 py-2">Fecha</th>
-                  {esAdmin && <th className="px-2.5 py-2 text-right">Eliminar</th>}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {filasSistema.map((row) => (
-                  <tr
-                    key={row.idAuditoriaSistema}
-                    className="hover:bg-secondary/40"
-                  >
-                    <td className="px-2.5 py-2 font-mono">
-                      <div className="font-bold">Boot #{row.bootId}</div>
+          <DataTable
+              data={filasSistema}
+              rowKey={(row) => row.idAuditoriaSistema}
+              searchPlaceholder="Buscar reset, detalle, FW..."
+              searchValue={(row) =>
+                `${row.resetReason} ${row.detalle} ${row.versionFirmware}`
+              }
+              filters={
+                [
+                  {
+                    key: "criticidad",
+                    label: "Criticidad",
+                    getValue: (r) => r.criticidad,
+                    options: Object.entries(LABEL_CRITICIDAD).map(
+                      ([value, label]) => ({ value, label })
+                    ),
+                  },
+                  {
+                    key: "reporte",
+                    label: "Reporte",
+                    getValue: (r) => r.estadoReporte,
+                    options: Object.entries(LABEL_ESTADO_ENVIO).map(
+                      ([value, label]) => ({ value, label })
+                    ),
+                  },
+                  {
+                    key: "internet",
+                    label: "Red",
+                    getValue: (r) => (r.internet ? "ONLINE" : "OFFLINE"),
+                    options: [
+                      { value: "ONLINE", label: "Online" },
+                      { value: "OFFLINE", label: "Offline" },
+                    ],
+                  },
+                ] as DataTableFilter<AuditoriaSistemaRowDTO>[]
+              }
+              columns={[
+                {
+                  key: "id",
+                  header: "Boot / ID",
+                  sortValue: (r) => r.idAuditoriaSistema,
+                  cellClassName: "font-mono",
+                  cell: (r) => (
+                    <>
+                      <div className="font-bold">Boot #{r.bootId}</div>
                       <div className="text-[10px] text-foreground-secondary">
-                        ID #{row.idAuditoriaSistema}
+                        ID #{r.idAuditoriaSistema}
                       </div>
-                    </td>
-                    <td className="px-2.5 py-2">
+                    </>
+                  ),
+                },
+                {
+                  key: "reset",
+                  header: "Motivo Reset / FW",
+                  sortValue: (r) => r.resetReason,
+                  cell: (r) => (
+                    <>
                       <div className="font-mono font-semibold">
-                        {row.resetReason || "—"}
+                        {r.resetReason || "—"}
                       </div>
                       <div className="text-[10px] text-foreground-secondary">
-                        FW {row.versionFirmware} · Uptime{" "}
-                        {formatearDuracionSegundos(row.uptimeS)}
+                        FW {r.versionFirmware} · Uptime{" "}
+                        {formatearDuracionSegundos(r.uptimeS)}
                       </div>
-                    </td>
-                    <td className="px-2.5 py-2 font-mono text-[11px]">
-                      <div>Heap: {formatearBytes(row.heapLibreBytes)}</div>
+                    </>
+                  ),
+                },
+                {
+                  key: "recursos",
+                  header: "Heap / SD",
+                  sortValue: (r) => r.heapLibreBytes,
+                  cellClassName: "font-mono text-[11px]",
+                  cell: (r) => (
+                    <>
+                      <div>Heap: {formatearBytes(r.heapLibreBytes)}</div>
                       <div className="text-foreground-secondary">
-                        SD libre: {row.espacioSdLibreKb} KB
+                        SD libre: {r.espacioSdLibreKb} KB
                       </div>
-                    </td>
-                    <td className="px-2.5 py-2 text-[11px]">
+                    </>
+                  ),
+                },
+                {
+                  key: "bus",
+                  header: "Bus / Tiempo / Red",
+                  sortValue: (r) =>
+                    LABEL_ESTADO_BUS[r.estadoBus] ?? r.estadoBus,
+                  cellClassName: "text-[11px]",
+                  cell: (r) => (
+                    <>
                       <div>
                         Bus:{" "}
                         <strong>
-                          {LABEL_ESTADO_BUS[row.estadoBus] ?? row.estadoBus}
+                          {LABEL_ESTADO_BUS[r.estadoBus] ?? r.estadoBus}
                         </strong>
                       </div>
                       <div className="text-foreground-secondary">
                         Reloj:{" "}
-                        {LABEL_FUENTE_TIEMPO[row.fuenteTiempo] ??
-                          row.fuenteTiempo}{" "}
-                        · {row.internet ? "Online" : "Offline"}
+                        {LABEL_FUENTE_TIEMPO[r.fuenteTiempo] ?? r.fuenteTiempo}{" "}
+                        · {r.internet ? "Online" : "Offline"}
                       </div>
-                    </td>
-                    <td className="max-w-xs px-2.5 py-2">
+                    </>
+                  ),
+                },
+                {
+                  key: "detalle",
+                  header: "Detalle",
+                  sortValue: (r) => r.criticidad,
+                  cellClassName: "max-w-xs",
+                  cell: (r) => (
+                    <>
                       <span
                         className={`mr-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${badgeCriticidad(
-                          row.criticidad
+                          r.criticidad
                         )}`}
                       >
-                        {LABEL_CRITICIDAD[row.criticidad] ?? row.criticidad}
+                        {LABEL_CRITICIDAD[r.criticidad] ?? r.criticidad}
                       </span>
-                      <span className="text-foreground">{row.detalle}</span>
-                    </td>
-                    <td className="px-2.5 py-2 font-mono text-foreground-secondary">
-                      {row.fechaCreacion || "—"}
-                    </td>
-                    {esAdmin && (
-                      <td className="px-2.5 py-2 text-right">
-                        <button
-                          className="btn btn-icon btn-error"
-                          onClick={() =>
-                            void eliminarAudSistema(row.idAuditoriaSistema)
-                          }
-                          title="Eliminar registro"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-                {filasSistema.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={esAdmin ? 7 : 6}
-                      className="px-3 py-6 text-center text-foreground-secondary"
+                      <span className="text-foreground">{r.detalle}</span>
+                    </>
+                  ),
+                },
+                {
+                  key: "reporte",
+                  header: "Reporte",
+                  sortValue: (r) => r.estadoReporte,
+                  cell: (r) => (
+                    <span
+                      className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
+                        r.estadoReporte === EstadoEnvioCorreo.ENVIADO
+                          ? "bg-alert-success-bg text-alert-success-icon"
+                          : r.estadoReporte === EstadoEnvioCorreo.FALLIDO
+                            ? "bg-alert-err-bg text-alert-err-icon"
+                            : "bg-alert-warn-bg text-alert-warn-icon"
+                      }`}
                     >
-                      Sin registros de auditoría del sistema en esta página.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                      {LABEL_ESTADO_ENVIO[r.estadoReporte] ?? r.estadoReporte}
+                    </span>
+                  ),
+                },
+                {
+                  key: "fecha",
+                  header: "Fecha",
+                  sortValue: (r) => r.fechaCreacion,
+                  cellClassName: "font-mono text-foreground-secondary",
+                  cell: (r) => r.fechaCreacion || "—",
+                },
+                ...(esAdmin
+                  ? ([
+                      {
+                        key: "eliminar",
+                        header: "Eliminar",
+                        headerClassName: "text-right",
+                        cellClassName: "text-right",
+                        stopRowClick: true,
+                        cell: (r) => (
+                          <button
+                            className="btn btn-icon btn-error"
+                            onClick={() =>
+                              void eliminarAudSistema(r.idAuditoriaSistema)
+                            }
+                            title="Eliminar registro"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        ),
+                      },
+                    ] as DataTableColumn<AuditoriaSistemaRowDTO>[])
+                  : []),
+              ]}
+              emptyMessage="Sin registros de auditoría del sistema en esta página."
+            />
         </div>
       )}
 

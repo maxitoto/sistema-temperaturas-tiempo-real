@@ -116,6 +116,6 @@ void setup() {
 }
 
 void loop() {
-    // El trabajo pesado vive en las 4 tareas dedicadas de FreeRTOS; cedemos el hilo base de Arduino
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // Todas las tareas operan en FreeRTOS (GestorRTOS). Devuelve 8 KB contiguos al Heap.
+    vTaskDelete(nullptr);
 }

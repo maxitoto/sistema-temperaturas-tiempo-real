@@ -26,7 +26,7 @@ const POLITICA_LECTURA_POR_NOMBRE: Record<string, { cacheTtlMs: number }> = {
   leerHelpLogBios:                      { cacheTtlMs: 10000 },
   obtenerEstadisticasAuditoriaSensores: { cacheTtlMs: 20000 },
   listarAuditoriaSensorPorMac:          { cacheTtlMs: 15000 },
-  listarSensosPaginados:                { cacheTtlMs: 15000 },
+  listarCensosPaginados:                { cacheTtlMs: 15000 },
   listarAuditoriaSistema:               { cacheTtlMs: 15000 },
   listarAuditoriaAuth:                  { cacheTtlMs: 15000 },
 
@@ -280,8 +280,8 @@ export interface EstadisticasAuditoriaSensoresDTO {
   reportesPendientes: number;
 }
 
-export interface SensoRowDTO {
-  idSenso: number;
+export interface CensoRowDTO {
+  idCenso: number;
   idSensor: number;
   temperaturaCruda: number;
   temperaturaCorregida: number;
@@ -289,13 +289,13 @@ export interface SensoRowDTO {
   fechaCreacion: number; // Unix timestamp en segundos
 }
 
-export interface FiltroPaginadoSensoDTO {
+export interface FiltroPaginadoCensoDTO {
   idSensor: number; // 0 = todos
   limiteRegistros: number;
   offsetRegistros: number;
 }
 
-export interface CrearSensoManualDTO {
+export interface CrearCensoManualDTO {
   idSensor: number;
   temperaturaCruda: number;
   temperaturaCorregida: number;
@@ -305,7 +305,7 @@ export interface CrearSensoManualDTO {
 export interface AuditoriaSensorRowDTO {
   idAuditoriaSensor: number;
   idSensor: number;
-  idSenso: number;
+  idCenso: number;
   estadoPrevioSensor: EstadoSensor;
   estadoNuevoSensor: EstadoSensor;
   estadoBus: EstadoBus;
@@ -319,7 +319,7 @@ export interface AuditoriaSensorRowDTO {
 export interface ConfiguracionSistemaDTO {
   idConfiguracionSistema: number;
   zonaHorariaMin: number;
-  retencionSensoDias: number;
+  retencionCensoDias: number;
   retencionEventosDias: number;
   retencionAuditoriaDias: number;
   sdLibreMinimoKb: number;
@@ -369,6 +369,14 @@ export interface ServidorNtpItemDTO {
   server: string;
   prioridad: number;
   activa: boolean;
+}
+
+export interface ResultadoEnvioSmtpDTO {
+  codigoSmtp: number;
+  exito: boolean;
+  correosEnviados: number;
+  eventosActualizados: number;
+  detalle: string;
 }
 
 export interface AuditoriaSistemaRowDTO {
@@ -559,7 +567,7 @@ function decodificarAuditoriaSensor(
   return {
     idAuditoriaSensor: v.getInt32(base + 0, true),
     idSensor: v.getInt32(base + 4, true),
-    idSenso: v.getInt32(base + 8, true),
+    idCenso: v.getInt32(base + 8, true),
     estadoPrevioSensor: buf[base + 12] as EstadoSensor,
     estadoNuevoSensor: buf[base + 13] as EstadoSensor,
     estadoBus: buf[base + 14] as EstadoBus,
@@ -576,7 +584,7 @@ function decodificarConfigSistema(buf: Uint8Array): ConfiguracionSistemaDTO {
   return {
     idConfiguracionSistema: v.getInt32(0, true),
     zonaHorariaMin: v.getInt32(4, true),
-    retencionSensoDias: v.getUint32(8, true),
+    retencionCensoDias: v.getUint32(8, true),
     retencionEventosDias: v.getUint32(12, true),
     retencionAuditoriaDias: v.getUint32(16, true),
     sdLibreMinimoKb: v.getUint32(20, true),
@@ -632,13 +640,13 @@ function decodificarServidorNtpItem(
   };
 }
 
-function decodificarSensoRow(
+function decodificarCensoRow(
   v: DataView,
   buf: Uint8Array,
   base: number
-): SensoRowDTO {
+): CensoRowDTO {
   return {
-    idSenso: v.getInt32(base + 0, true),
+    idCenso: v.getInt32(base + 0, true),
     idSensor: v.getInt32(base + 4, true),
     temperaturaCruda: limpiarFloat32(v.getFloat32(base + 8, true)),
     temperaturaCorregida: limpiarFloat32(v.getFloat32(base + 12, true)),
@@ -862,30 +870,30 @@ export class ProcedimientosRemotosFirmware {
       };
     };
 
-  listarSensosPaginados = async (
-    filtro: FiltroPaginadoSensoDTO
-  ): Promise<SensoRowDTO[]> => {
+  listarCensosPaginados = async (
+    filtro: FiltroPaginadoCensoDTO
+  ): Promise<CensoRowDTO[]> => {
     const payload = new Uint8Array(8);
     const v = new DataView(payload.buffer);
     v.setInt32(0, filtro.idSensor, true);
     v.setUint16(4, filtro.limiteRegistros, true);
     v.setUint16(6, filtro.offsetRegistros, true);
 
-    const buf = await this.invocar("listarSensosPaginados", payload);
-    return deserializarPgList(buf, 8, 32, decodificarSensoRow);
+    const buf = await this.invocar("listarCensosPaginados", payload);
+    return deserializarPgList(buf, 8, 32, decodificarCensoRow);
   };
 
-  listarPicosSensos = async (
+  listarPicosCensos = async (
     idSensor: number,
     orden: "ALTOS" | "BAJOS",
     limite = 15,
     maxMuestras = 320
-  ): Promise<SensoRowDTO[]> => {
+  ): Promise<CensoRowDTO[]> => {
     const tope = Math.max(32, Math.min(maxMuestras, 640));
-    const muestra: SensoRowDTO[] = [];
+    const muestra: CensoRowDTO[] = [];
 
     for (let offset = 0; offset < tope; offset += 32) {
-      const lote = await this.listarSensosPaginados({
+      const lote = await this.listarCensosPaginados({
         idSensor,
         limiteRegistros: 32,
         offsetRegistros: offset,
@@ -911,7 +919,7 @@ export class ProcedimientosRemotosFirmware {
     return validas.slice(0, Math.max(1, Math.min(limite, 64)));
   };
 
-  crearSensoManual = async (dto: CrearSensoManualDTO): Promise<SensoRowDTO> => {
+  crearCensoManual = async (dto: CrearCensoManualDTO): Promise<CensoRowDTO> => {
     const payload = new Uint8Array(16);
     const v = new DataView(payload.buffer);
     v.setInt32(0, dto.idSensor, true);
@@ -919,23 +927,23 @@ export class ProcedimientosRemotosFirmware {
     v.setFloat32(8, dto.temperaturaCorregida, true);
     payload[12] = dto.estadoSensor;
 
-    const buf = await this.invocar("crearSensoManual", payload);
+    const buf = await this.invocar("crearCensoManual", payload);
     const vr = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    return decodificarSensoRow(vr, buf, 0);
+    return decodificarCensoRow(vr, buf, 0);
   };
 
-  eliminarSensoPorId = async (idSenso: number): Promise<void> => {
+  eliminarCensoPorId = async (idCenso: number): Promise<void> => {
     const payload = new Uint8Array(4);
-    new DataView(payload.buffer).setInt32(0, idSenso, true);
-    await this.invocar("eliminarSensoPorId", payload);
+    new DataView(payload.buffer).setInt32(0, idCenso, true);
+    await this.invocar("eliminarCensoPorId", payload);
   };
 
-  purgarSensosAnterioresA = async (
+  purgarCensosAnterioresA = async (
     timestampLimiteSeg: number
   ): Promise<number> => {
     const payload = new Uint8Array(4);
     new DataView(payload.buffer).setUint32(0, timestampLimiteSeg, true);
-    const buf = await this.invocar("purgarSensosAnterioresA", payload);
+    const buf = await this.invocar("purgarCensosAnterioresA", payload);
     return new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint16(
       0,
       true
@@ -978,7 +986,7 @@ export class ProcedimientosRemotosFirmware {
     const payload = new Uint8Array(28);
     const v = new DataView(payload.buffer);
     v.setInt32(0, dto.zonaHorariaMin, true);
-    v.setUint32(4, dto.retencionSensoDias, true);
+    v.setUint32(4, dto.retencionCensoDias, true);
     v.setUint32(8, dto.retencionEventosDias, true);
     v.setUint32(12, dto.retencionAuditoriaDias, true);
     v.setUint32(16, dto.sdLibreMinimoKb, true);
@@ -1038,6 +1046,34 @@ export class ProcedimientosRemotosFirmware {
     const payload = new Uint8Array(4);
     new DataView(payload.buffer).setInt32(0, idCorreo, true);
     await this.invocar("eliminarCorreoPorId", payload);
+  };
+
+  enviarCorreoPruebaSmtp = async (
+    destinatario = ""
+  ): Promise<ResultadoEnvioSmtpDTO> => {
+    const payload = new Uint8Array(48);
+    escribirTextoFijo(payload, 0, 48, destinatario.trim());
+    const buf = await this.invocar("enviarCorreoPruebaSmtp", payload);
+    const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    return {
+      codigoSmtp: v.getUint16(0, true),
+      exito: buf[2] !== 0,
+      correosEnviados: buf[3],
+      eventosActualizados: v.getUint16(4, true),
+      detalle: leerTextoFijo(buf, 6, 128),
+    };
+  };
+
+  despacharAlertasCorreoAhora = async (): Promise<ResultadoEnvioSmtpDTO> => {
+    const buf = await this.invocar("despacharAlertasCorreoAhora");
+    const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    return {
+      codigoSmtp: v.getUint16(0, true),
+      exito: buf[2] !== 0,
+      correosEnviados: buf[3],
+      eventosActualizados: v.getUint16(4, true),
+      detalle: leerTextoFijo(buf, 6, 128),
+    };
   };
 
   listarServidoresNtp = async (): Promise<ServidorNtpItemDTO[]> => {
@@ -1327,11 +1363,11 @@ export const procedimientosRemotosFirmware = {
   listarAuditoriaSensorPorMac: instancia.listarAuditoriaSensorPorMac,
   obtenerEstadisticasAuditoriaSensores:
     instancia.obtenerEstadisticasAuditoriaSensores,
-  listarSensosPaginados: instancia.listarSensosPaginados,
-  listarPicosSensos: instancia.listarPicosSensos,
-  crearSensoManual: instancia.crearSensoManual,
-  eliminarSensoPorId: instancia.eliminarSensoPorId,
-  purgarSensosAnterioresA: instancia.purgarSensosAnterioresA,
+  listarCensosPaginados: instancia.listarCensosPaginados,
+  listarPicosCensos: instancia.listarPicosCensos,
+  crearCensoManual: instancia.crearCensoManual,
+  eliminarCensoPorId: instancia.eliminarCensoPorId,
+  purgarCensosAnterioresA: instancia.purgarCensosAnterioresA,
   actualizarEstadoReporteAuditoriaSensor:
     instancia.actualizarEstadoReporteAuditoriaSensor,
   eliminarAuditoriaSensorPorId: instancia.eliminarAuditoriaSensorPorId,
@@ -1342,6 +1378,8 @@ export const procedimientosRemotosFirmware = {
   listarCorreos: instancia.listarCorreos,
   guardarCorreo: instancia.guardarCorreo,
   eliminarCorreoPorId: instancia.eliminarCorreoPorId,
+  enviarCorreoPruebaSmtp: instancia.enviarCorreoPruebaSmtp,
+  despacharAlertasCorreoAhora: instancia.despacharAlertasCorreoAhora,
   listarServidoresNtp: instancia.listarServidoresNtp,
   guardarServidorNtp: instancia.guardarServidorNtp,
   eliminarServidorNtpPorId: instancia.eliminarServidorNtpPorId,

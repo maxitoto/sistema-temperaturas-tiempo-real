@@ -22,6 +22,7 @@ import {
   ResumenUsuarioCliente,
   RolUsuario,
 } from "#types/rpc.types";
+import { DataTable, DataTableFilter } from "../components/ui/DataTable";
 
 export function UsuariosView() {
   const { usuario: usuarioActual, rol } = useAuth();
@@ -487,128 +488,183 @@ export function UsuariosView() {
               </label>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                  <tr>
-                    <th className="px-3 py-2">ID</th>
-                    <th className="px-3 py-2">Usuario</th>
-                    <th className="px-3 py-2">Rol RBAC</th>
-                    <th className="px-3 py-2">Estado</th>
-                    <th className="px-3 py-2">Seguridad / Intentos</th>
-                    <th className="px-3 py-2">Última Actualización</th>
-                    <th className="px-3 py-2 text-right">Acciones</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {usuarios.map((u) => {
+            <DataTable
+              data={usuarios}
+              rowKey={(u) => u.idUsuario}
+              searchPlaceholder="Buscar nombre de usuario..."
+              searchValue={(u) => `#${u.idUsuario} ${u.usuario}`}
+              filters={
+                [
+                  {
+                    key: "rol",
+                    label: "Rol",
+                    getValue: (u) => u.rol,
+                    options: [
+                      { value: String(RolUsuario.ADMIN), label: "ADMIN" },
+                      { value: String(RolUsuario.NO_ADMIN), label: "NO_ADMIN" },
+                      { value: String(RolUsuario.NINGUNO), label: "NINGUNO" },
+                    ],
+                  },
+                  {
+                    key: "estado",
+                    label: "Estado",
+                    getValue: (u) => (u.activa ? "1" : "0"),
+                    options: [
+                      { value: "1", label: "ACTIVO" },
+                      { value: "0", label: "INACTIVO" },
+                    ],
+                  },
+                  {
+                    key: "bloqueado",
+                    label: "Seguridad",
+                    getValue: (u) => (u.bloqueado ? "BLOQ" : "OK"),
+                    options: [
+                      { value: "OK", label: "OK" },
+                      { value: "BLOQ", label: "BLOQUEADO" },
+                    ],
+                  },
+                ] as DataTableFilter<ResumenUsuarioCliente>[]
+              }
+              columns={[
+                {
+                  key: "id",
+                  header: "ID",
+                  sortValue: (u) => u.idUsuario,
+                  cellClassName: "font-mono",
+                  cell: (u) => `#${u.idUsuario}`,
+                },
+                {
+                  key: "usuario",
+                  header: "Usuario",
+                  sortValue: (u) => u.usuario,
+                  cellClassName: "font-mono font-bold",
+                  cell: (u) => u.usuario,
+                },
+                {
+                  key: "rol",
+                  header: "Rol RBAC",
+                  sortValue: (u) => u.rol,
+                  cell: (u) => {
                     const esSuperAdmin = u.usuario.toLowerCase() === "admin";
                     return (
-                      <tr key={u.idUsuario} className="hover:bg-secondary/40">
-                        <td className="px-3 py-2 font-mono">#{u.idUsuario}</td>
-                        <td className="px-3 py-2 font-mono font-bold">
-                          {u.usuario}
-                        </td>
-                        <td className="px-3 py-2">
-                          <select
-                            value={u.rol}
-                            disabled={esSuperAdmin}
-                            onChange={(e) =>
-                              void handleActualizarRolYEstado(
-                                u,
-                                Number(e.target.value),
-                                u.activa
-                              )
-                            }
-                            className="rounded border border-border bg-background px-2 py-1 text-xs"
-                          >
-                            <option value={RolUsuario.NINGUNO}>NINGUNO</option>
-                            <option value={RolUsuario.NO_ADMIN}>NO_ADMIN</option>
-                            <option value={RolUsuario.ADMIN}>ADMIN</option>
-                          </select>
-                        </td>
-                        <td className="px-3 py-2">
-                          <button
-                            type="button"
-                            disabled={esSuperAdmin}
-                            onClick={() =>
-                              void handleActualizarRolYEstado(
-                                u,
-                                u.rol,
-                                !u.activa
-                              )
-                            }
-                            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${
-                              u.activa
-                                ? "bg-alert-success-bg text-alert-success-icon"
-                                : "bg-alert-inactive-bg text-alert-inactive-icon"
-                            }`}
-                          >
-                            {u.activa ? (
-                              <CheckCircle2 className="h-3 w-3" />
-                            ) : (
-                              <XCircle className="h-3 w-3" />
-                            )}
-                            {u.activa ? "ACTIVO" : "INACTIVO"}
-                          </button>
-                        </td>
-                        <td className="px-3 py-2">
-                          {u.bloqueado ? (
-                            <span className="rounded bg-alert-err-bg px-2 py-0.5 text-[10px] font-bold text-alert-err-icon">
-                              BLOQUEADO ({u.intentosFallidos} fallos)
-                            </span>
-                          ) : (
-                            <span className="text-foreground-secondary">
-                              OK ({u.intentosFallidos} fallos)
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-foreground-secondary">
-                          {formatearEpochSegundos(u.actualizadoEpoch)}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <div className="inline-flex items-center gap-1">
-                            {u.bloqueado && (
-                              <button
-                                className="btn btn-icon btn-success"
-                                onClick={() => void handleDesbloquear(u.usuario)}
-                                title="Desbloquear cuenta"
-                              >
-                                <Unlock className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            <button
-                              className="btn btn-icon btn-warning"
-                              onClick={() => {
-                                setUsuarioResetTarget(u.usuario);
-                                setClaveResetAdmin("");
-                              }}
-                              title="Resetear contraseña como Admin"
-                            >
-                              <KeyRound className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              className="btn btn-icon btn-error"
-                              disabled={esSuperAdmin}
-                              onClick={() =>
-                                void handleEliminarUsuario(u.usuario)
-                              }
-                              title={
-                                esSuperAdmin
-                                  ? "La cuenta raíz admin no puede eliminarse"
-                                  : "Eliminar usuario"
-                              }
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
+                      <select
+                        value={u.rol}
+                        disabled={esSuperAdmin}
+                        onChange={(e) =>
+                          void handleActualizarRolYEstado(
+                            u,
+                            Number(e.target.value),
+                            u.activa
+                          )
+                        }
+                        className="rounded border border-border bg-background px-2 py-1 text-xs"
+                      >
+                        <option value={RolUsuario.NINGUNO}>NINGUNO</option>
+                        <option value={RolUsuario.NO_ADMIN}>NO_ADMIN</option>
+                        <option value={RolUsuario.ADMIN}>ADMIN</option>
+                      </select>
                     );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  },
+                },
+                {
+                  key: "estado",
+                  header: "Estado",
+                  sortValue: (u) => u.activa,
+                  cell: (u) => {
+                    const esSuperAdmin = u.usuario.toLowerCase() === "admin";
+                    return (
+                      <button
+                        type="button"
+                        disabled={esSuperAdmin}
+                        onClick={() =>
+                          void handleActualizarRolYEstado(u, u.rol, !u.activa)
+                        }
+                        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${
+                          u.activa
+                            ? "bg-alert-success-bg text-alert-success-icon"
+                            : "bg-alert-inactive-bg text-alert-inactive-icon"
+                        }`}
+                      >
+                        {u.activa ? (
+                          <CheckCircle2 className="h-3 w-3" />
+                        ) : (
+                          <XCircle className="h-3 w-3" />
+                        )}
+                        {u.activa ? "ACTIVO" : "INACTIVO"}
+                      </button>
+                    );
+                  },
+                },
+                {
+                  key: "seguridad",
+                  header: "Seguridad / Intentos",
+                  sortValue: (u) =>
+                    (u.bloqueado ? 1000 : 0) + u.intentosFallidos,
+                  cell: (u) =>
+                    u.bloqueado ? (
+                      <span className="rounded bg-alert-err-bg px-2 py-0.5 text-[10px] font-bold text-alert-err-icon">
+                        BLOQUEADO ({u.intentosFallidos} fallos)
+                      </span>
+                    ) : (
+                      <span className="text-foreground-secondary">
+                        OK ({u.intentosFallidos} fallos)
+                      </span>
+                    ),
+                },
+                {
+                  key: "actualizado",
+                  header: "Última Actualización",
+                  sortValue: (u) => u.actualizadoEpoch,
+                  cellClassName: "font-mono text-foreground-secondary",
+                  cell: (u) => formatearEpochSegundos(u.actualizadoEpoch),
+                },
+                {
+                  key: "acciones",
+                  header: "Acciones",
+                  headerClassName: "text-right",
+                  cellClassName: "text-right",
+                  cell: (u) => {
+                    const esSuperAdmin = u.usuario.toLowerCase() === "admin";
+                    return (
+                      <div className="inline-flex items-center gap-1">
+                        {u.bloqueado && (
+                          <button
+                            className="btn btn-icon btn-success"
+                            onClick={() => void handleDesbloquear(u.usuario)}
+                            title="Desbloquear cuenta"
+                          >
+                            <Unlock className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          className="btn btn-icon btn-warning"
+                          onClick={() => {
+                            setUsuarioResetTarget(u.usuario);
+                            setClaveResetAdmin("");
+                          }}
+                          title="Resetear contraseña como Admin"
+                        >
+                          <KeyRound className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          className="btn btn-icon btn-error"
+                          disabled={esSuperAdmin}
+                          onClick={() => void handleEliminarUsuario(u.usuario)}
+                          title={
+                            esSuperAdmin
+                              ? "La cuenta raíz admin no puede eliminarse"
+                              : "Eliminar usuario"
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    );
+                  },
+                },
+              ]}
+              emptyMessage="Sin cuentas registradas."
+            />
           </div>
         </div>
       )}

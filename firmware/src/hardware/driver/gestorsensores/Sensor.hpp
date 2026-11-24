@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "EstadoSensor.hpp"
+#include "models/ModeloCalibracionDosPuntos.hpp"
 
 // Copia segura por valor (Thread-Safe Snapshot) para usar desde cualquier tarea o RPC
 struct SnapshotSensor {
@@ -140,20 +141,29 @@ public:
     }
 
     // Precalcula m y b una sola vez para que cada lectura sea O(1): T_corr = m * T_cruda + b
+    // Precalcula m y b usando ModeloCalibracionDosPuntos (Opción A) para que cada lectura sea O(1)
     void recalcularRectaCalibracion(float refCongelacion = 0.0f, float refEbullicion = 100.0f) {
-        float deltaMedido = error_sup - error_inf;
-        if (fabsf(deltaMedido) > 1.0f && fabsf(refEbullicion - refCongelacion) > 1.0f) {
-            escalaM   = (refEbullicion - refCongelacion) / deltaMedido;
-            ordenadaB = refCongelacion - (escalaM * error_inf) + offset;
-        } else {
-            escalaM   = 1.0f;
-            ordenadaB = offset;
+        const auto params = CalibracionModelos::ModeloCalibracionDosPuntos::calcular(
+            error_inf,
+            error_sup,
+            refCongelacion,
+            refEbullicion,
+            offset
+        );
+        escalaM   = params.pendienteM;
+        ordenadaB = params.ordenadaB;
+        if (params.usaDosPuntos) {
+            // Almacena la ordenada b calculada en 'offset' como resumen visible de desplazamiento en 0 °C
+            offset = limitarOffset(params.ordenadaB);
         }
     }
 
     float aplicarCalibracion(float lecturaCruda) const {
         return (escalaM * lecturaCruda) + ordenadaB;
     }
+
+    float obtenerPendienteM() const { return escalaM; }
+    float obtenerOrdenadaB()  const { return ordenadaB; }
 
     bool coincideROM(const DeviceAddress otraRom) const {
         return activo && (memcmp(rom, otraRom, sizeof(DeviceAddress)) == 0);
@@ -168,10 +178,25 @@ public:
     void setUmbralSuperior(float v) { umbral_sup = limitarTemp(v); }
     void setUmbralInferior(float v) { umbral_inf = limitarTemp(v); }
     void setUmbrales(float sup, float inf) { umbral_sup = limitarTemp(sup); umbral_inf = limitarTemp(inf); }
+
+    void configurarCalibracion(
+        float medSupHirviendo,
+        float medInfHielo,
+        float offsetFallback,
+        float refCong = 0.0f,
+        float refEbull = 100.0f
+    ) {
+        error_sup = limitarTemp(medSupHirviendo);
+        error_inf = limitarTemp(medInfHielo);
+        offset    = limitarOffset(offsetFallback);
+        recalcularRectaCalibracion(refCong, refEbull);
+    }
+
     void setOffset(float v, float refCong = 0.0f, float refEbull = 100.0f) {
         offset = limitarOffset(v);
         recalcularRectaCalibracion(refCong, refEbull);
     }
+
     void setCorrecciones(float medSupHirviendo, float medInfHielo, float refCong = 0.0f, float refEbull = 100.0f) {
         error_sup = limitarTemp(medSupHirviendo);
         error_inf = limitarTemp(medInfHielo);

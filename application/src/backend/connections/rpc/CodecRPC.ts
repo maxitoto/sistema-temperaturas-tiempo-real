@@ -25,7 +25,7 @@ export type {
     PerfilSensorCliente,
     ResumenSensorCliente,
     EstadisticasSensoresCliente,
-    ResumenEstadisticoSensoCliente
+    ResumenEstadisticoCensoCliente
 } from "./domains/RPSensor";
 export type {
     ConfiguracionWiFiCliente,

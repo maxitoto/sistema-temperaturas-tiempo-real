@@ -11,7 +11,7 @@
 #include "../../hardware/driver/tarjetasd/TarjetaSD.hpp"
 #include "../../database/repositories/RepositorioBase.hpp"
 #include "../../database/repositories/repoSensor.hpp"
-#include "../../database/repositories/repoSenso.hpp"
+#include "../../database/repositories/repoCenso.hpp"
 #include "../../database/repositories/repoAuditoriaSensores.hpp"
 #include "../../database/repositories/repoAuditoriaSistema.hpp"
 #include "../../database/repositories/repoAuditoriaAuth.hpp"
@@ -21,6 +21,7 @@
 
 #include "../../connections/middlewares/ColaTrabajoRPC.hpp"
 #include "../../connections/middlewares/middleware_sesion.hpp"
+#include "../../connections/smtp/DespachadorCorreosSmtp.hpp"
 
 namespace RTOS::Tasks {
 
@@ -147,7 +148,7 @@ namespace RTOS::Tasks {
             }
         }
 
-        static void persistirLoteSensos() {
+        static void persistirLoteCensos() {
             using namespace DbRuntime::Repositories;
             static SnapshotSensor lista[GestorSensores::MAX_SENSORES];
             uint8_t cant = gestorSensores.obtenerSensoresConectados(lista);
@@ -163,7 +164,7 @@ namespace RTOS::Tasks {
                 if (idSensor <= 0) continue;
 
                 const bool lecturaValida = estadoTieneLecturaValida(lista[i].estado);
-                RepoSenso::registrarLectura(
+                RepoCenso::registrarLectura(
                     idSensor,
                     lecturaValida ? Sensor::limitarTemp(lista[i].tempCruda)     : 0.0f,
                     lecturaValida ? Sensor::limitarTemp(lista[i].tempCorregida) : 0.0f,
@@ -189,7 +190,7 @@ namespace RTOS::Tasks {
                 ? static_cast<int64_t>(reg.timestampUnix)
                 : static_cast<int64_t>(RelojSistema::obtenerTimestampActual());
 
-            SensoDTO s = RepoSenso::registrarLectura(
+            CensoDTO s = RepoCenso::registrarLectura(
                 idSensor,
                 valida ? Sensor::limitarTemp(reg.tempCruda)     : 0.0f,
                 valida ? Sensor::limitarTemp(reg.tempCorregida) : 0.0f,
@@ -203,7 +204,7 @@ namespace RTOS::Tasks {
 
             RepoAuditoriaSensores::registrarEvento(
                 idSensor,
-                s.idSenso,
+                s.idCenso,
                 estadoPrevio,
                 estadoNuevo,
                 gestorSensores.obtenerEstadoBus(),
@@ -289,8 +290,8 @@ namespace RTOS::Tasks {
             for (uint8_t n = 0; n < 2 && colaPersistenciaDB.recibir(reg, 0); ++n) {
                 try {
                     switch (reg.tipo) {
-                        case TipoRegistroDB::LOTE_SENSOS_2_MINUTOS:
-                            persistirLoteSensos();
+                        case TipoRegistroDB::LOTE_CENSOS_2_MINUTOS:
+                            persistirLoteCensos();
                             break;
                         case TipoRegistroDB::EVENTO_CAMBIO_SENSOR:
                             persistirCambioSensor(reg);
@@ -328,9 +329,9 @@ namespace RTOS::Tasks {
 
                 const uint32_t ahoraEpoch = RelojSistema::obtenerTimestampActual();
 
-                if (cfg.retencionSensoDias > 0) {
-                    const int64_t limiteSenso = static_cast<int64_t>(ahoraEpoch) - (static_cast<int64_t>(cfg.retencionSensoDias) * 86400LL);
-                    RepoSenso::purgarAnterioresA(limiteSenso);
+                if (cfg.retencionCensoDias > 0) {
+                    const int64_t limiteCenso = static_cast<int64_t>(ahoraEpoch) - (static_cast<int64_t>(cfg.retencionCensoDias) * 86400LL);
+                    RepoCenso::purgarAnterioresA(limiteCenso);
                 }
 
                 if (cfg.retencionEventosDias > 0) {
@@ -344,6 +345,17 @@ namespace RTOS::Tasks {
                     const int64_t limiteAud = static_cast<int64_t>(ahoraEpoch) - (static_cast<int64_t>(cfg.retencionAuditoriaDias) * 86400LL);
                     RepoAuditoriaAuth::purgarAnterioresA(limiteAud);
                 }
+            } catch (...) {}
+        }
+
+        static void procesarEnvioCorreosPendientes() {
+            const uint32_t ahoraMs = millis();
+            if (ahoraMs - ultimoChequeoCorreoMs < INTERVALO_CHEQUEO_CORREO_MS) {
+                return;
+            }
+            ultimoChequeoCorreoMs = ahoraMs;
+            try {
+                SmtpNet::DespachadorCorreosSmtp::despacharPendientes(false);
             } catch (...) {}
         }
 
@@ -376,6 +388,7 @@ namespace RTOS::Tasks {
 
                 procesarColaSonidos();
                 procesarColaPersistenciaDB();
+                procesarEnvioCorreosPendientes();
                 ejecutarMantenimientoPeriodicoDB();
             }
         }
@@ -397,7 +410,7 @@ namespace RTOS::Tasks {
             encolarSonido(TipoSonidoEvento::BOOT_SISTEMA);
 
             // Core 1, prioridad 2, stack 8 KB: dueño exclusivo de MicroSD, ORM y RPC L2/L3
-            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 5, 8192, 2, 1);
+            return tarea.iniciarEnNucleo("TaskAlertasDB", &ejecutarCiclo, 5, 10240, 2, 1);
         }
 
         static TareaSegura& obtenerTarea() { return tarea; }

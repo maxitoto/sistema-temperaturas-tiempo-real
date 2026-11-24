@@ -93,7 +93,7 @@ export const TOUR_POR_VISTA: Record<Vista, PasoTour[]> = {
       paraQueSirve:
         "Permite calibrar correctamente sin conocimientos previos de la fórmula interna, reconstruyendo la lectura cruda real del sensor.",
       enQueAfecta:
-        "Actualiza la recta de corrección del sensor sin tocar sus umbrales de alarma TL/TH, y ofrece borrar los sensos falsos generados durante los baños térmicos.",
+        "Actualiza la recta de corrección del sensor sin tocar sus umbrales de alarma TL/TH, y ofrece borrar los censos falsos generados durante los baños térmicos.",
       comoSeUsa:
         "Pulsá el botón amarillo, elegí si calibrás 1 sensor o un lote completo, seguí los pasos de estabilización y confirmá en la pantalla de resumen.",
       soloAdmin: true,
@@ -104,7 +104,7 @@ export const TOUR_POR_VISTA: Record<Vista, PasoTour[]> = {
       titulo: "Curva Histórica y Rango de Fechas",
       subtitulo: "Consultas fragmentadas sobre la MicroSD",
       queEs:
-        "Visor gráfico del historial persistido en la tabla Senso para el sensor seleccionado.",
+        "Visor gráfico del historial persistido en la tabla Censo para el sensor seleccionado.",
       paraQueSirve:
         "Permite analizar el comportamiento térmico pasado por cantidad de lecturas recientes o entre dos fechas y horas exactas.",
       enQueAfecta:
@@ -145,14 +145,14 @@ export const TOUR_POR_VISTA: Record<Vista, PasoTour[]> = {
     {
       id: "sens-tabla",
       selector: '[data-tour="sens-tabla"]',
-      titulo: "Explorador de Tabla Senso y Picos",
+      titulo: "Explorador de Tabla Censo y Picos",
       subtitulo: "Paginación rápida y ranking de extremos",
       queEs:
         "Tabla paginada con los registros crudos vs. corregidos y el estado eléctrico de diagnóstico de cada lectura DS18B20.",
       paraQueSirve:
         "Sirve para auditar mediciones puntuales, detectar fallos CRC/desconexión o encontrar los picos máximos y mínimos.",
       enQueAfecta:
-        "La consulta de solo lectura no modifica datos; las herramientas de inserción manual, eliminación y purga (solo ADMIN) escriben directo en el archivo binario Senso.pgb.",
+        "La consulta de solo lectura no modifica datos; las herramientas de inserción manual, eliminación y purga (solo ADMIN) escriben directo en el archivo binario Censo.pgb.",
       comoSeUsa:
         "Alterná entre 'Recientes', 'Picos Altos' y 'Picos Bajos', filtrá por sensor con el selector y navegá con las flechas de paginación.",
     },
@@ -167,7 +167,7 @@ export const TOUR_POR_VISTA: Record<Vista, PasoTour[]> = {
       queEs:
         "Mapa visual de las tablas registradas en el catálogo PostgreSQL embebido (/db/pg_catalog.cat) y sus claves foráneas.",
       paraQueSirve:
-        "Permite comprender en segundos cómo se relacionan Sensores, Sensos, Usuarios, Configuraciones y Auditorías.",
+        "Permite comprender en segundos cómo se relacionan Sensores, Censos, Usuarios, Configuraciones y Auditorías.",
       enQueAfecta:
         "Se sincroniza dinámicamente con el catálogo real del ESP32: si creás o eliminás una tabla por SQL, el diagrama se actualiza.",
       comoSeUsa:

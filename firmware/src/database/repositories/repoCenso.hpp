@@ -12,8 +12,8 @@ namespace DbRuntime::Repositories {
     using DbRuntime::Storage::PgRowBuffer;
     using DbRuntime::Storage::PgRowView;
 
-    struct SensoDTO {
-        PgAuto       idSenso              = 0;
+    struct CensoDTO {
+        PgAuto       idCenso              = 0;
         PgInt        idSensor             = 0;
         PgFloat      temperaturaCruda     = 0.0f;
         PgFloat      temperaturaCorregida = 0.0f;
@@ -21,7 +21,7 @@ namespace DbRuntime::Repositories {
         PgBigInt     fechaCreacion        = 0;
     };
 
-    struct NuevaLecturaSensoDTO {
+    struct NuevaLecturaCensoDTO {
         PgInt        idSensor             = 0;
         PgFloat      temperaturaCruda     = 0.0f;
         PgFloat      temperaturaCorregida = 0.0f;
@@ -29,16 +29,16 @@ namespace DbRuntime::Repositories {
         PgBigInt     fechaCreacion        = 0;
     };
 
-    struct ResumenEstadisticoSensoDTO {
+    struct ResumenEstadisticoCensoDTO {
         PgInt   totalLecturas       = 0;
         PgFloat temperaturaMinima   = 0.0f;
         PgFloat temperaturaMaxima   = 0.0f;
         PgFloat temperaturaPromedio = 0.0f;
     };
 
-    class RepoSenso {
+    class RepoCenso {
     private:
-        static constexpr const char* TABLA = "Senso";
+        static constexpr const char* TABLA = "Censo";
 
         static int64_t epochActual() {
             return static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual());
@@ -49,9 +49,9 @@ namespace DbRuntime::Repositories {
         }
 
     public:
-        static SensoDTO mapear(const PgRowView& r) {
-            SensoDTO s{};
-            s.idSenso              = r.getInt32("id_senso");
+        static CensoDTO mapear(const PgRowView& r) {
+            CensoDTO s{};
+            s.idCenso              = r.getInt32("id_censo");
             s.idSensor             = r.getInt32("id_sensor");
             s.temperaturaCruda     = r.getFloat("temperatura_cruda");
             s.temperaturaCorregida = r.getFloat("temperatura_corregida");
@@ -60,7 +60,7 @@ namespace DbRuntime::Repositories {
             return s;
         }
 
-        static SensoDTO registrarLectura(
+        static CensoDTO registrarLectura(
             int32_t idSensor,
             float temperaturaCruda,
             float temperaturaCorregida,
@@ -76,12 +76,12 @@ namespace DbRuntime::Repositories {
             row.setInt64("fecha_creacion",        resolverTimestamp(fechaCreacion));
 
             if (!PgBinaryStorage::getInstance().appendRecord(TABLA, row)) {
-                throw std::runtime_error("IOError: no se pudo registrar la lectura en Senso");
+                throw std::runtime_error("IOError: no se pudo registrar la lectura en Censo");
             }
             return mapear(row.view());
         }
 
-        static uint16_t registrarLoteLecturas(const std::vector<NuevaLecturaSensoDTO>& lote) {
+        static uint16_t registrarLoteLecturas(const std::vector<NuevaLecturaCensoDTO>& lote) {
             const auto* schema = asegurarEsquemaTabla(TABLA);
             if (lote.empty()) return 0;
 
@@ -101,16 +101,16 @@ namespace DbRuntime::Repositories {
                 }
             }
             if (!tx.confirmar()) {
-                throw std::runtime_error("IOError: fallo commitBatch en Senso");
+                throw std::runtime_error("IOError: fallo commitBatch en Censo");
             }
             return insertados;
         }
 
-        static bool obtenerPorId(int32_t idSenso, SensoDTO& outDto) {
+        static bool obtenerPorId(int32_t idCenso, CensoDTO& outDto) {
             asegurarEsquemaTabla(TABLA);
             bool ok = false;
             PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
-                if (r.getInt32("id_senso") == idSenso) {
+                if (r.getInt32("id_censo") == idCenso) {
                     outDto = mapear(r);
                     ok = true;
                     return false;
@@ -121,7 +121,7 @@ namespace DbRuntime::Repositories {
         }
 
         // Paginación rápida inversa (idSensor == 0 trae todos los sensores)
-        static std::vector<SensoDTO> listarPaginados(
+        static std::vector<CensoDTO> listarPaginados(
             int32_t idSensor = 0,
             uint16_t limite = 32,
             uint16_t offset = 0
@@ -129,7 +129,7 @@ namespace DbRuntime::Repositories {
             asegurarEsquemaTabla(TABLA);
             if (limite == 0 || limite > 32) limite = 32;
 
-            std::vector<SensoDTO> out;
+            std::vector<CensoDTO> out;
             out.reserve(limite);
             uint32_t matched = 0;
 
@@ -145,7 +145,7 @@ namespace DbRuntime::Repositories {
             return out;
         }
 
-        static std::vector<SensoDTO> listarPorIdSensor(
+        static std::vector<CensoDTO> listarPorIdSensor(
             int32_t idSensor,
             uint16_t limite = 32,
             uint16_t offset = 0
@@ -153,7 +153,7 @@ namespace DbRuntime::Repositories {
             return listarPaginados(idSensor, limite, offset);
         }
 
-        static std::vector<SensoDTO> listarPorIdSensorYRangoFecha(
+        static std::vector<CensoDTO> listarPorIdSensorYRangoFecha(
             int32_t idSensor,
             int64_t timestampDesde,
             int64_t timestampHasta,
@@ -165,7 +165,7 @@ namespace DbRuntime::Repositories {
             }
             if (limite == 0 || limite > 32) limite = 32;
 
-            std::vector<SensoDTO> out;
+            std::vector<CensoDTO> out;
             out.reserve(limite);
 
             PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
@@ -180,12 +180,12 @@ namespace DbRuntime::Repositories {
             return out;
         }
 
-        static std::vector<SensoDTO> listarPorMac(const char* macHex, uint16_t limite = 32) {
+        static std::vector<CensoDTO> listarPorMac(const char* macHex, uint16_t limite = 32) {
             SensorDTO sensor = RepoSensor::exigirPorMac(macHex);
             return listarPorIdSensor(sensor.idSensor, limite, 0);
         }
 
-        static std::vector<SensoDTO> listarPorMacYRangoFecha(
+        static std::vector<CensoDTO> listarPorMacYRangoFecha(
             const char* macHex,
             int64_t timestampDesde,
             int64_t timestampHasta,
@@ -195,9 +195,9 @@ namespace DbRuntime::Repositories {
             return listarPorIdSensorYRangoFecha(sensor.idSensor, timestampDesde, timestampHasta, limite);
         }
 
-        static ResumenEstadisticoSensoDTO obtenerEstadisticasPorSensor(int32_t idSensor) {
+        static ResumenEstadisticoCensoDTO obtenerEstadisticasPorSensor(int32_t idSensor) {
             asegurarEsquemaTabla(TABLA);
-            ResumenEstadisticoSensoDTO out{};
+            ResumenEstadisticoCensoDTO out{};
             double suma = 0.0;
             bool primero = true;
 
@@ -223,11 +223,11 @@ namespace DbRuntime::Repositories {
             return out;
         }
 
-        static void eliminarPorId(int32_t idSenso) {
+        static void eliminarPorId(int32_t idCenso) {
             asegurarEsquemaTabla(TABLA);
             PgBinaryStorage::getInstance().deleteWhere(
                 TABLA,
-                [&](const PgRowView& r) -> bool { return r.getInt32("id_senso") == idSenso; },
+                [&](const PgRowView& r) -> bool { return r.getInt32("id_censo") == idCenso; },
                 true
             );
         }

@@ -92,7 +92,7 @@ namespace DbSql::Schema {
         "CREATE TABLE IF NOT EXISTS ConfiguracionSistema ("
             "id_configuracion_sistema INTEGER PRIMARY KEY DEFAULT 1, "
             "zona_horaria_min INTEGER NOT NULL DEFAULT -180, "
-            "retencion_senso_dias INTEGER NOT NULL DEFAULT 365, "
+            "retencion_censo_dias INTEGER NOT NULL DEFAULT 365, "
             "retencion_eventos_dias INTEGER NOT NULL DEFAULT 730, "
             "retencion_auditoria_dias INTEGER NOT NULL DEFAULT 1095, "
             "sd_libre_minimo_kb INTEGER NOT NULL DEFAULT 51200, "
@@ -136,9 +136,9 @@ namespace DbSql::Schema {
             "fecha_modificacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         ");",
 
-        // 8. Senso
-        "CREATE TABLE IF NOT EXISTS Senso ("
-            "id_senso SERIAL PRIMARY KEY, "
+        // 8. Censo
+        "CREATE TABLE IF NOT EXISTS Censo ("
+            "id_censo SERIAL PRIMARY KEY, "
             "id_sensor INTEGER NOT NULL REFERENCES Sensor(id_sensor) ON DELETE RESTRICT, "
             "temperatura_cruda REAL NOT NULL DEFAULT 0.0, "
             "temperatura_corregida REAL NOT NULL DEFAULT 0.0, "
@@ -150,7 +150,7 @@ namespace DbSql::Schema {
         "CREATE TABLE IF NOT EXISTS AuditoriaSensores ("
             "id_auditoria_sensor SERIAL PRIMARY KEY, "
             "id_sensor INTEGER NOT NULL REFERENCES Sensor(id_sensor) ON DELETE RESTRICT, "
-            "id_senso INTEGER NOT NULL REFERENCES Senso(id_senso) ON DELETE CASCADE, "
+            "id_censo INTEGER NOT NULL REFERENCES Censo(id_censo) ON DELETE CASCADE, "
             "estado_previo_sensor estado_sensor_enum NOT NULL DEFAULT 'OK', "
             "estado_nuevo_sensor estado_sensor_enum NOT NULL DEFAULT 'ALARMA_SUPERIOR', "
             "estado_bus estado_bus_enum NOT NULL DEFAULT 'OK', "
@@ -226,8 +226,8 @@ namespace DbSql::Schema {
         "CREATE INDEX IF NOT EXISTS idx_usuario_activa ON Usuario (activa);",
         "CREATE INDEX IF NOT EXISTS idx_sensor_activo ON Sensor (activa);",
         "CREATE INDEX IF NOT EXISTS idx_sensor_ubicacion ON Sensor (ubicacion);",
-        "CREATE INDEX IF NOT EXISTS idx_senso_sensor_fecha ON Senso (id_sensor, fecha_creacion);",
-        "CREATE INDEX IF NOT EXISTS idx_senso_fecha ON Senso (fecha_creacion);",
+        "CREATE INDEX IF NOT EXISTS idx_censo_sensor_fecha ON Censo (id_sensor, fecha_creacion);",
+        "CREATE INDEX IF NOT EXISTS idx_censo_fecha ON Censo (fecha_creacion);",
         "CREATE INDEX IF NOT EXISTS idx_aud_sensor_fecha ON AuditoriaSensores (id_sensor, fecha_creacion);",
         "CREATE INDEX IF NOT EXISTS idx_aud_sensor_reporte ON AuditoriaSensores (estado_reporte);",
         "CREATE INDEX IF NOT EXISTS idx_aud_sensor_criticidad ON AuditoriaSensores (criticidad_sensor);",

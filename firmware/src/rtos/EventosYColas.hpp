@@ -17,7 +17,7 @@ namespace RTOS {
     };
 
     enum class TipoRegistroDB : uint8_t {
-        LOTE_SENSOS_2_MINUTOS = 0,
+        LOTE_CENSOS_2_MINUTOS = 0,
         EVENTO_CAMBIO_SENSOR,
         EVENTO_SISTEMA_BUS,
         AUDITORIA_TRANSACCION,

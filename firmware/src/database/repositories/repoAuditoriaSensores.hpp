@@ -14,7 +14,7 @@ namespace DbRuntime::Repositories {
     struct AuditoriaSensorDTO {
         PgAuto            idAuditoriaSensor  = 0;
         PgInt             idSensor           = 0;
-        PgInt             idSenso            = 0;
+        PgInt             idCenso            = 0;
         EstadoSensor      estadoPrevioSensor = EstadoSensor::OK;
         EstadoSensor      estadoNuevoSensor  = EstadoSensor::ALARMA_SUPERIOR;
         EstadoBus         estadoBus          = EstadoBus::OK;
@@ -40,7 +40,7 @@ namespace DbRuntime::Repositories {
             AuditoriaSensorDTO dto{};
             dto.idAuditoriaSensor  = r.getInt32("id_auditoria_sensor");
             dto.idSensor           = r.getInt32("id_sensor");
-            dto.idSenso            = r.getInt32("id_senso");
+            dto.idCenso            = r.getInt32("id_censo");
             dto.estadoPrevioSensor = r.getEnum<EstadoSensor>("estado_previo_sensor");
             dto.estadoNuevoSensor  = r.getEnum<EstadoSensor>("estado_nuevo_sensor");
             dto.estadoBus          = r.getEnum<EstadoBus>("estado_bus");
@@ -54,7 +54,7 @@ namespace DbRuntime::Repositories {
 
         static AuditoriaSensorDTO registrarEvento(
             int32_t idSensor,
-            int32_t idSenso,
+            int32_t idCenso,
             EstadoSensor estadoPrevio,
             EstadoSensor estadoNuevo,
             EstadoBus estadoBus,
@@ -64,7 +64,7 @@ namespace DbRuntime::Repositories {
             const auto* schema = asegurarEsquemaTabla(TABLA);
             PgRowBuffer row(schema);
             row.setInt32("id_sensor",           idSensor);
-            row.setInt32("id_senso",            idSenso);
+            row.setInt32("id_censo",            idCenso);
             row.setEnum("estado_previo_sensor", estadoPrevio);
             row.setEnum("estado_nuevo_sensor",  estadoNuevo);
             row.setEnum("estado_bus",           estadoBus);
@@ -108,7 +108,7 @@ namespace DbRuntime::Repositories {
             if (limite == 0 || limite > 32) limite = 32;
 
             std::vector<AuditoriaSensorDTO> out;
-            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
                 if (r.getEnum<EstadoEnvioCorreo>("estado_reporte") == EstadoEnvioCorreo::PENDIENTE) {
                     out.push_back(mapear(r));
                     if (out.size() >= limite) return false;

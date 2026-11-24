@@ -45,7 +45,7 @@ namespace RTOS::Tasks {
                     encolarSonido(TipoSonidoEvento::SENSOR_DESCONECTADO);
                 }
 
-                gestorSensores.escanearYAsignarSensores();
+                gestorSensores.escanearYAsignarSensores(12, false, false);
 
                 RegistroPersistenciaPOD regBus{};
                 regBus.tipo          = TipoRegistroDB::EVENTO_SISTEMA_BUS;
@@ -77,11 +77,11 @@ namespace RTOS::Tasks {
                 encolarPersistencia(ev);
             }
 
-            // 4. Cada 2 minutos exactos: ordenar el guardado en lote de todos los sensores conectados en la tabla Senso
+            // 4. Cada 2 minutos exactos: ordenar el guardado en lote de todos los sensores conectados en la tabla Censo
             if (ahoraMs - ultimoGuardadoLoteDbMs >= INTERVALO_GUARDADO_DB_MS) {
                 ultimoGuardadoLoteDbMs = ahoraMs;
                 RegistroPersistenciaPOD lote{};
-                lote.tipo          = TipoRegistroDB::LOTE_SENSOS_2_MINUTOS;
+                lote.tipo          = TipoRegistroDB::LOTE_CENSOS_2_MINUTOS;
                 lote.timestampUnix = RelojSistema::obtenerTimestampActual();
                 strncpy(lote.detalle, "Censo periodico 2 min", sizeof(lote.detalle) - 1);
                 encolarPersistencia(lote);

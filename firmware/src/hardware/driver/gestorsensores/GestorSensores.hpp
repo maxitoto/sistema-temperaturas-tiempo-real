@@ -75,7 +75,8 @@ public:
 
     // --- 1. CICLO DE HARDWARE 1-WIRE (Llamado por TaskSensores) ---
     EstadoBus verificarEstadoElectricoBus();
-    uint8_t escanearYAsignarSensores(uint8_t resolucionGlobal = 12, bool guardarEnEeprom = false);
+    uint8_t escanearYAsignarSensores(uint8_t resolucionGlobal = 12, bool guardarEnEeprom = false, bool solicitarConversionInicial = true);
+    
     bool verificarCambiosEnCaliente();
 
     bool solicitarConversionGlobal(bool bloqueante = true);
@@ -109,6 +110,8 @@ public:
 
     // Calibración de 2 puntos ingresando lo que midió el sensor en hielo (3 min) y en agua hirviendo (3 min)
     bool calibrarPuntosPorMAC(const char* macHex, float tempMedidaHirviendo, float tempMedidaHielo, float offsetManual = 0.0f);
+    // Recalcula en caliente m y b de todos los sensores activos cuando cambian las referencias ambientales globales
+    void recalcularCalibracionGlobalActiva();
 
     bool configurarUmbralesPorMAC(const char* macHex, float thAltoC, float tlBajoC, bool guardarEeprom = false);
     bool configurarUmbralesPorId(int32_t idSensorDB, float thAltoC, float tlBajoC, bool guardarEeprom = false);

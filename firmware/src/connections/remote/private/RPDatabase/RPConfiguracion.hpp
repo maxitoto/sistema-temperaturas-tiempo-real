@@ -11,10 +11,11 @@
 #include "../../../../database/repositories/repoServidorNtp.hpp"
 #include "../../../../rtos/RelojSistema.hpp"
 #include "../../../../rtos/EventosYColas.hpp"
+#include "../../../smtp/DespachadorCorreosSmtp.hpp"
 
 struct ActualizarConfigSistemaInputDTO {
     PgInt    zonaHorariaMin;
-    PgPosInt retencionSensoDias;
+    PgPosInt retencionCensoDias;
     PgPosInt retencionEventosDias;
     PgPosInt retencionAuditoriaDias;
     PgPosInt sdLibreMinimoKb;
@@ -70,6 +71,20 @@ struct IdRegistroConfigDTO {
     PgInt id;
 };
 
+struct SolicitudCorreoPruebaDTO {
+    PgChar<48> destinatario; // 0..47 (vacío = primer destinatario activo o remitente)
+};
+static_assert(sizeof(SolicitudCorreoPruebaDTO) == 48, "SolicitudCorreoPruebaDTO debe medir 48 B");
+
+struct ResultadoEnvioSmtpDTO {
+    PgPosSmallInt codigoSmtp;          // 0..1
+    PgBool        exito;               // 2
+    PgUInt8       correosEnviados;     // 3
+    PgPosSmallInt eventosActualizados; // 4..5
+    PgChar<128>   detalle;             // 6..133
+};
+static_assert(sizeof(ResultadoEnvioSmtpDTO) == 134, "ResultadoEnvioSmtpDTO debe medir 134 B");
+
 using ListaCorreosDTO       = PgList<CorreoItemDTO, 12>;
 using ListaServidoresNtpDTO = PgList<ServidorNtpItemDTO, 16>;
 
@@ -121,7 +136,7 @@ namespace RPConfiguracion {
             ConfiguracionSistemaDTO dto{};
             dto.idConfiguracionSistema = 1;
             dto.zonaHorariaMin         = in.zonaHorariaMin;
-            dto.retencionSensoDias     = in.retencionSensoDias;
+            dto.retencionCensoDias     = in.retencionCensoDias;
             dto.retencionEventosDias   = in.retencionEventosDias;
             dto.retencionAuditoriaDias = in.retencionAuditoriaDias;
             dto.sdLibreMinimoKb        = in.sdLibreMinimoKb;
@@ -251,6 +266,38 @@ namespace RPConfiguracion {
         "eliminarServidorNtpPorId",
         [](const IdRegistroConfigDTO& dto) {
             RepoServidoresNtp::eliminarPorId(dto.id);
+        },
+        RolUsuario::ADMIN
+    );
+
+    // 11. Enviar un correo de prueba inmediato con la configuración SMTP guardada (ADMIN)
+    inline auto enviarCorreoPruebaSmtp = llamadoSemantico.exactamenteUnaVez<SolicitudCorreoPruebaDTO, ResultadoEnvioSmtpDTO>(
+        "enviarCorreoPruebaSmtp",
+        [](const SolicitudCorreoPruebaDTO& in) -> ResultadoEnvioSmtpDTO {
+            const auto r = SmtpNet::DespachadorCorreosSmtp::enviarCorreoDePrueba(in.destinatario.c_str());
+            ResultadoEnvioSmtpDTO out{};
+            out.codigoSmtp          = r.codigoSmtp;
+            out.exito               = r.exito;
+            out.correosEnviados     = r.correosEnviados;
+            out.eventosActualizados = r.eventosActualizados;
+            out.detalle             = r.detalle;
+            return out;
+        },
+        RolUsuario::ADMIN
+    );
+
+    // 12. Forzar despacho inmediato de avisos PENDIENTE (saltea cooldown para prueba en vivo) (ADMIN)
+    inline auto despacharAlertasCorreoAhora = llamadoSemantico.exactamenteUnaVez<void, ResultadoEnvioSmtpDTO>(
+        "despacharAlertasCorreoAhora",
+        []() -> ResultadoEnvioSmtpDTO {
+            const auto r = SmtpNet::DespachadorCorreosSmtp::despacharPendientes(true);
+            ResultadoEnvioSmtpDTO out{};
+            out.codigoSmtp          = r.codigoSmtp;
+            out.exito               = r.exito;
+            out.correosEnviados     = r.correosEnviados;
+            out.eventosActualizados = r.eventosActualizados;
+            out.detalle             = r.detalle;
+            return out;
         },
         RolUsuario::ADMIN
     );

@@ -61,10 +61,10 @@ namespace DbRuntime::Tests {
         static void testDmlTypesConstraintsAndReturning(RuntimeSuiteSummary& sum) {
             Serial.println("\n--- GRUPO 1: Validacion de Tipos DDL, Constraints, RETURNING y Determinismo DML ---");
             ModelManager Sensor = runtimeDb.model("Sensor");
-            ModelManager Senso  = runtimeDb.model("Senso");
+            ModelManager Censo  = runtimeDb.model("Censo");
 
             // Limpieza inicial usando DELETE determinista con permiso explícito (sin depender de DDL TRUNCATE)
-            Senso.objects().remove(true);
+            Censo.objects().remove(true);
             Sensor.objects().remove(true);
 
             // 1.1 INSERT válido con generación IDENTITY, valores DEFAULT del DDL y cláusula RETURNING
@@ -109,8 +109,8 @@ namespace DbRuntime::Tests {
                               !r4.success && DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance().last().returnedSqlState == SqlState::UNIQUE_VIOLATION,
                               r4.cost);
 
-            // 1.5 INSERT en tabla hija Senso apuntando a id_sensor padre inexistente -> SQLSTATE 23503
-            auto r5 = Senso.create({
+            // 1.5 INSERT en tabla hija Censo apuntando a id_sensor padre inexistente -> SQLSTATE 23503
+            auto r5 = Censo.create({
                 PgCell("id_sensor", "9999", PgDataType::INTEGER),
                 PgCell("temperatura_cruda", "4.20", PgDataType::REAL),
                 PgCell("temperatura_corregida", "4.20", PgDataType::REAL)
@@ -221,11 +221,11 @@ namespace DbRuntime::Tests {
         static void testFullPostgresDqlCapabilities(RuntimeSuiteSummary& sum) {
             Serial.println("\n--- GRUPO 4: DQL Completo (Joins, LATERAL, ROLLUP, FILTER, WITHIN GROUP, OVER, CTE, Conjuntos) ---");
             ModelManager Sensor = runtimeDb.model("Sensor");
-            Senso.objects().remove(true);
+            Censo.objects().remove(true);
 
             const float medicionesS1[] = { 2.0f, 4.0f, 6.0f, 8.0f };
             for (float t : medicionesS1) {
-                Senso.create({
+                Censo.create({
                     PgCell("id_sensor", "1", PgDataType::INTEGER),
                     PgCell("temperatura_cruda", String(t, 2), PgDataType::REAL),
                     PgCell("temperatura_corregida", String(t, 2), PgDataType::REAL)
@@ -239,13 +239,13 @@ namespace DbRuntime::Tests {
             }
             const int32_t idS2 = filaS2.getInt("id_sensor", -1);
 
-            auto resSensoS2 = Senso.create({
+            auto resCensoS2 = Censo.create({
                 PgCell("id_sensor", String(idS2), PgDataType::INTEGER),
                 PgCell("temperatura_cruda", "10.00", PgDataType::REAL),
                 PgCell("temperatura_corregida", "10.00", PgDataType::REAL)
             });
-            if (!resSensoS2.success) {
-                Serial.println(" [FIXTURE] Fallo insert en Senso para sensor 2:");
+            if (!resCensoS2.success) {
+                Serial.println(" [FIXTURE] Fallo insert en Censo para sensor 2:");
                 Serial.println(DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance().last().toPsqlFormat());
             }
 
@@ -255,7 +255,7 @@ namespace DbRuntime::Tests {
             condAlta.op           = FilterOp::GT;
             condAlta.valueA       = "5.0";
 
-            auto aggRows = Senso.objects()
+            auto aggRows = Censo.objects()
                 .group_by({"id_sensor"}, GroupingMode::ROLLUP)
                 .annotate("total_muestras", AggregateFunc::COUNT_ALL)
                 .annotate("muestras_altas", AggregateFunc::COUNT_COL, "temperatura_corregida", true, condAlta)
@@ -267,11 +267,11 @@ namespace DbRuntime::Tests {
                               aggRows[0].getFloat("mediana") == 5.0f,
                               ModuloDQL::getInstance().getLastCost());
 
-            // 4.3 Ventanas Analíticas OVER (PARTITION BY id_sensor ORDER BY id_senso ROWS BETWEEN ...)
-            auto winRows = Senso.filter_eq("id_sensor", 1)
-                .window("fila_num", WindowFunc::ROW_NUMBER, "", {"id_sensor"}, "id_senso")
-                .window("temp_anterior", WindowFunc::LAG, "temperatura_corregida", {"id_sensor"}, "id_senso")
-                .window("suma_acum", WindowFunc::SUM_OVER, "temperatura_corregida", {"id_sensor"}, "id_senso")
+            // 4.3 Ventanas Analíticas OVER (PARTITION BY id_sensor ORDER BY id_censo ROWS BETWEEN ...)
+            auto winRows = Censo.filter_eq("id_sensor", 1)
+                .window("fila_num", WindowFunc::ROW_NUMBER, "", {"id_sensor"}, "id_censo")
+                .window("temp_anterior", WindowFunc::LAG, "temperatura_corregida", {"id_sensor"}, "id_censo")
+                .window("suma_acum", WindowFunc::SUM_OVER, "temperatura_corregida", {"id_sensor"}, "id_censo")
                 .all();
             assertWithMetrics(sum, "4.3 Ventanas OVER (ROW_NUMBER, LAG, SUM Acumulada)",
                               winRows.size() == 4 &&
@@ -295,9 +295,9 @@ namespace DbRuntime::Tests {
                               ModuloDQL::getInstance().getLastCost());
 
             // 4.5 DISTINCT ON + UNION DISTINCT / INTERSECT / EXCEPT
-            auto set1 = Senso.filter_eq("id_sensor", 1).values({"id_sensor"}).distinct({"id_sensor"}).all();
-            auto set2 = Senso.filter_eq("id_sensor", idS2).values({"id_sensor"}).distinct({"id_sensor"}).all();
-            auto unionRows = Senso.filter_eq("id_sensor", 1)
+            auto set1 = Censo.filter_eq("id_sensor", 1).values({"id_sensor"}).distinct({"id_sensor"}).all();
+            auto set2 = Censo.filter_eq("id_sensor", idS2).values({"id_sensor"}).distinct({"id_sensor"}).all();
+            auto unionRows = Censo.filter_eq("id_sensor", 1)
                                   .values({"id_sensor"})
                                   .distinct({"id_sensor"})
                                   .union_with(set2, false)
@@ -308,11 +308,11 @@ namespace DbRuntime::Tests {
 
             
             // 4.6 ROLLUP y CUBE con 2 columnas (5 filas detalle + 2 subtotales + 1 total = 8; CUBE = 13)
-            auto rollup2 = Senso.objects()
+            auto rollup2 = Censo.objects()
                 .group_by({"id_sensor", "temperatura_corregida"}, GroupingMode::ROLLUP)
                 .annotate("n", AggregateFunc::COUNT_ALL)
                 .all();
-            auto cube2 = Senso.objects()
+            auto cube2 = Censo.objects()
                 .group_by({"id_sensor", "temperatura_corregida"}, GroupingMode::CUBE)
                 .annotate("n", AggregateFunc::COUNT_ALL)
                 .all();
@@ -322,7 +322,7 @@ namespace DbRuntime::Tests {
                               
             
             // 4.7 UPDATE ... FROM correlacionado: solo las 4 filas del sensor 28FFAA01
-            auto upFrom = Senso.objects()
+            auto upFrom = Censo.objects()
                 .filter_col("id_sensor", FilterOp::EQ, "Sensor.id_sensor")
                 .filter("Sensor.hexadecimal", FilterOp::EQ, "28FFAA01")
                 .update({ PgCell("temperatura_cruda", "99.00", PgDataType::REAL) }, false, "Sensor");
@@ -330,7 +330,7 @@ namespace DbRuntime::Tests {
                               upFrom.success && upFrom.affectedRows == 4, upFrom.cost);
 
             // 4.8 DELETE ... USING correlacionado: borra la lectura del sensor 28FFAA02
-            auto delUsing = Senso.objects()
+            auto delUsing = Censo.objects()
                 .filter_col("id_sensor", FilterOp::EQ, "Sensor.id_sensor")
                 .filter("Sensor.hexadecimal", FilterOp::EQ, "28FFAA02")
                 .remove(false, "Sensor");

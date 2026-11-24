@@ -27,12 +27,12 @@ import {
 
 const SQL_PRESETS: Array<{ label: string; sql: string }> = [
   { label: "SHOW TABLES", sql: "SHOW TABLES;" },
-  { label: "\\d Senso", sql: "\\d Senso;" },
-  { label: "COUNT(*) Senso", sql: "SELECT COUNT(*) FROM Senso;" },
+  { label: "\\d Censo", sql: "\\d Censo;" },
+  { label: "COUNT(*) Censo", sql: "SELECT COUNT(*) FROM Censo;" },
   { label: "SELECT Sensor", sql: "SELECT * FROM Sensor LIMIT 10;" },
   {
-    label: "SELECT Senso (últimos 12)",
-    sql: "SELECT id_senso, id_sensor, temperatura_cruda, temperatura_corregida, estado_sensor FROM Senso ORDER BY id_senso DESC LIMIT 12;",
+    label: "SELECT Censo (últimos 12)",
+    sql: "SELECT id_censo, id_sensor, temperatura_cruda, temperatura_corregida, estado_sensor FROM Censo ORDER BY id_censo DESC LIMIT 12;",
   },
   {
     label: "SELECT Usuario",

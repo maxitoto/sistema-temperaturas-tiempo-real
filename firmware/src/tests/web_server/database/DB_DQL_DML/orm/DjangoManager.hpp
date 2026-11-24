@@ -161,7 +161,7 @@ namespace DbRuntime::Orm {
     inline const ModelManager Correos("Correos");
     inline const ModelManager Auditoria("Auditoria");
     inline const ModelManager Sensor("Sensor");
-    inline const ModelManager Senso("Senso");
+    inline const ModelManager Censo("Censo");
     inline const ModelManager EventoSensor("EventoSensor");
     inline const ModelManager EventoSistema("EventoSistema");
 

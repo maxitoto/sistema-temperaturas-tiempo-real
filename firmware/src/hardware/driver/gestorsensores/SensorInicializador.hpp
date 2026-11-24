@@ -53,8 +53,7 @@ public:
             DbRuntime::Repositories::RepoSensor::asegurarPorMacEnDestino(s.obtenerMAC(), d);
             s.setIdSensorDB(d.idSensor);
             s.setUmbrales(d.umbralSup, d.umbralInf);
-            s.setOffset(d.offset, refCongelacionGlobal, refEbullicionGlobal);
-            s.setCorrecciones(d.errorSup, d.errorInf, refCongelacionGlobal, refEbullicionGlobal);
+            s.configurarCalibracion(d.errorSup, d.errorInf, d.offset, refCongelacionGlobal, refEbullicionGlobal);
             s.setHidratadoDB(true);
             return true;
         } catch (...) {

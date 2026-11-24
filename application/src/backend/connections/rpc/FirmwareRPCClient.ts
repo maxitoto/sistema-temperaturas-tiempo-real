@@ -82,7 +82,7 @@ interface EntradaCacheRPC {
 export class FirmwareRPCClient {
     private static readonly INTERVALO_REVISION_KEEPALIVE_MS = 10000;
     private static readonly UMBRAL_SILENCIO_KEEPALIVE_MS    = 40000;
-    private static readonly TIMEOUT_RPC_MS                  = 9000;
+    private static readonly TIMEOUT_RPC_MS                  = 14000;
 
     // Protección del ESP32 desde el backend
     private static readonly CAPACIDAD_MAX_COLA_TAREAS       = 24;

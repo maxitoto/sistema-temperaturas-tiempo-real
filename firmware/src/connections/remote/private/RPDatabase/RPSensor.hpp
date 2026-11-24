@@ -8,7 +8,7 @@
 #include "../../../../hardware/driver/gestorsensores/GestorSensores.hpp"
 #include "../../../../hardware/driver/gestorsensores/SensorInicializador.hpp"
 #include "../../../../database/repositories/repoSensor.hpp"
-#include "../../../../database/repositories/repoSenso.hpp"
+#include "../../../../database/repositories/repoCenso.hpp"
 #include "../../../../database/repositories/repoCalibracion.hpp"
 #include "../../../../database/repositories/repoAuditoriaSensores.hpp"
 #include "../../../../rtos/EventosYColas.hpp"
@@ -104,15 +104,15 @@ using ListaAuditoriaSensorDTO   = PgList<DbRuntime::Repositories::AuditoriaSenso
 namespace RPSensor {
 
     using DbRuntime::Repositories::RepoSensor;
-    using DbRuntime::Repositories::RepoSenso;
+    using DbRuntime::Repositories::RepoCenso;
     using DbRuntime::Repositories::RepoCalibracion;
     using DbRuntime::Repositories::RepoAuditoriaSensores;
     using DbRuntime::Repositories::SensorDTO;
-    using DbRuntime::Repositories::SensoDTO;
+    using DbRuntime::Repositories::CensoDTO;
     using DbRuntime::Repositories::CalibracionDTO;
     using DbRuntime::Repositories::AuditoriaSensorDTO;
     using DbRuntime::Repositories::EstadisticasSensoresDTO;
-    using DbRuntime::Repositories::ResumenEstadisticoSensoDTO;
+    using DbRuntime::Repositories::ResumenEstadisticoCensoDTO;
     using DbRuntime::Repositories::EstadisticasAuditoriaSensoresDTO;
 
     inline void auditarAccionSensor(const char* accion, const char* macDetalle) {
@@ -196,7 +196,7 @@ namespace RPSensor {
                 return HistorialSensoresDTO{};
             }
 
-            auto filas = RepoSenso::listarPorIdSensor(sensor.idSensor, lim, 0);
+            auto filas = RepoCenso::listarPorIdSensor(sensor.idSensor, lim, 0);
             HistorialSensoresDTO salida{};
             for (const auto& f : filas) {
                 LecturaSensorDTO item{};
@@ -225,7 +225,7 @@ namespace RPSensor {
                 return HistorialSensoresDTO{};
             }
 
-            auto filas = RepoSenso::listarPorIdSensorYRangoFecha(
+            auto filas = RepoCenso::listarPorIdSensorYRangoFecha(
                 sensor.idSensor,
                 static_cast<int64_t>(filtro.timestampDesde),
                 static_cast<int64_t>(filtro.timestampHasta),
@@ -305,13 +305,24 @@ namespace RPSensor {
                             && gestorSensores.calibrarPuntosPorMAC(dto.mac.c_str(), dto.errorSup, dto.errorInf, dto.offset);
 
             if (!enRam) {
+                const auto params = CalibracionModelos::ModeloCalibracionDosPuntos::calcular(
+                    dto.errorInf,
+                    dto.errorSup,
+                    SensorInicializador::obtenerRefCongelacion(),
+                    SensorInicializador::obtenerRefEbullicion(),
+                    dto.offset
+                );
+                const float offsetPersistir = params.usaDosPuntos
+                    ? Sensor::limitarOffset(params.ordenadaB)
+                    : Sensor::limitarOffset(dto.offset);
+
                 RepoSensor::actualizarCalibracionYUmbralesPorMac(
                     dto.mac.c_str(),
                     dto.umbralSup,
                     dto.umbralInf,
                     dto.errorSup,
                     dto.errorInf,
-                    dto.offset
+                    offsetPersistir
                 );
             }
 
@@ -339,11 +350,11 @@ namespace RPSensor {
         RolUsuario::NO_ADMIN
     );
 
-    inline auto obtenerEstadisticasSensoPorMac = llamadoSemantico.alMenosUnaVez<ConsultaSensorMacDTO, ResumenEstadisticoSensoDTO>(
-        "obtenerEstadisticasSensoPorMac",
-        [](const ConsultaSensorMacDTO& dto) -> ResumenEstadisticoSensoDTO {
+    inline auto obtenerEstadisticasCensoPorMac = llamadoSemantico.alMenosUnaVez<ConsultaSensorMacDTO, ResumenEstadisticoCensoDTO>(
+        "obtenerEstadisticasCensoPorMac",
+        [](const ConsultaSensorMacDTO& dto) -> ResumenEstadisticoCensoDTO {
             SensorDTO sensor = RepoSensor::exigirPorMac(dto.mac.c_str());
-            return RepoSenso::obtenerEstadisticasPorSensor(sensor.idSensor);
+            return RepoCenso::obtenerEstadisticasPorSensor(sensor.idSensor);
         },
         RolUsuario::NO_ADMIN
     );
@@ -369,6 +380,7 @@ namespace RPSensor {
 
             CalibracionDTO act = RepoCalibracion::actualizarTodo(entrada);
             SensorInicializador::invalidarCacheCalibracionGlobal();
+            gestorSensores.recalcularCalibracionGlobalActiva();
             auditarAccionSensor("ACTUALIZAR_CALIBRACION_AMBIENTE", "GLOBAL");
             return act;
         },
@@ -404,13 +416,13 @@ namespace RPSensor {
         RolUsuario::NO_ADMIN
     );
 
-    struct FiltroPaginadoSensoDTO {
+    struct FiltroPaginadoCensoDTO {
         PgInt         idSensor; // 0 = todos los sensores
         PgPosSmallInt limiteRegistros;
         PgPosSmallInt offsetRegistros;
     };
 
-    struct CrearSensoManualDTO {
+    struct CrearCensoManualDTO {
         PgInt        idSensor;
         PgFloat      temperaturaCruda;
         PgFloat      temperaturaCorregida;
@@ -430,16 +442,16 @@ namespace RPSensor {
         EstadoEnvioCorreo nuevoEstado;
     };
 
-    using ListaSensoCompletaDTO = PgList<SensoDTO, 32>;
+    using ListaCensoCompletaDTO = PgList<CensoDTO, 32>;
 
-    // Listar tabla Senso completa con paginación (NO_ADMIN)
-    inline auto listarSensosPaginados = llamadoSemantico.alMenosUnaVez<FiltroPaginadoSensoDTO, ListaSensoCompletaDTO>(
-        "listarSensosPaginados",
-        [](const FiltroPaginadoSensoDTO& f) -> ListaSensoCompletaDTO {
+    // Listar tabla Censo completa con paginación (NO_ADMIN)
+    inline auto listarCensosPaginados = llamadoSemantico.alMenosUnaVez<FiltroPaginadoCensoDTO, ListaCensoCompletaDTO>(
+        "listarCensosPaginados",
+        [](const FiltroPaginadoCensoDTO& f) -> ListaCensoCompletaDTO {
             const uint16_t lim = (f.limiteRegistros == 0 || f.limiteRegistros > 32) ? 32 : f.limiteRegistros;
-            auto filas = RepoSenso::listarPaginados(f.idSensor, lim, f.offsetRegistros);
+            auto filas = RepoCenso::listarPaginados(f.idSensor, lim, f.offsetRegistros);
 
-            ListaSensoCompletaDTO out{};
+            ListaCensoCompletaDTO out{};
             for (const auto& r : filas) {
                 if (!out.agregar(r)) break;
             }
@@ -448,39 +460,39 @@ namespace RPSensor {
         RolUsuario::NO_ADMIN
     );
 
-    // Crear registro manual en Senso (ADMIN)
-    inline auto crearSensoManual = llamadoSemantico.exactamenteUnaVez<CrearSensoManualDTO, SensoDTO>(
-        "crearSensoManual",
-        [](const CrearSensoManualDTO& dto) -> SensoDTO {
-            SensoDTO creado = RepoSenso::registrarLectura(
+    // Crear registro manual en Censo (ADMIN)
+    inline auto crearCensoManual = llamadoSemantico.exactamenteUnaVez<CrearCensoManualDTO, CensoDTO>(
+        "crearCensoManual",
+        [](const CrearCensoManualDTO& dto) -> CensoDTO {
+            CensoDTO creado = RepoCenso::registrarLectura(
                 dto.idSensor,
                 dto.temperaturaCruda,
                 dto.temperaturaCorregida,
                 dto.estadoSensor,
                 static_cast<int64_t>(RTOS::RelojSistema::obtenerTimestampActual())
             );
-            auditarAccionSensor("CREAR_SENSO_MANUAL", "SENSO");
+            auditarAccionSensor("CREAR_CENSO_MANUAL", "CENSO");
             return creado;
         },
         RolUsuario::ADMIN
     );
 
-    // Eliminar un registro de Senso por ID (ADMIN)
-    inline auto eliminarSensoPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
-        "eliminarSensoPorId",
+    // Eliminar un registro de Censo por ID (ADMIN)
+    inline auto eliminarCensoPorId = llamadoSemantico.exactamenteUnaVez<IdentificadorRegistroDTO, void>(
+        "eliminarCensoPorId",
         [](const IdentificadorRegistroDTO& dto) {
-            RepoSenso::eliminarPorId(dto.id);
-            auditarAccionSensor("ELIMINAR_SENSO_ID", "SENSO");
+            RepoCenso::eliminarPorId(dto.id);
+            auditarAccionSensor("ELIMINAR_CENSO_ID", "CENSO");
         },
         RolUsuario::ADMIN
     );
 
-    // Purgar registros antiguos de Senso (ADMIN)
-    inline auto purgarSensosAnterioresA = llamadoSemantico.exactamenteUnaVez<PurgarPorEpochDTO, PgPosSmallInt>(
-        "purgarSensosAnterioresA",
+    // Purgar registros antiguos de Censo (ADMIN)
+    inline auto purgarCensosAnterioresA = llamadoSemantico.exactamenteUnaVez<PurgarPorEpochDTO, PgPosSmallInt>(
+        "purgarCensosAnterioresA",
         [](const PurgarPorEpochDTO& dto) -> PgPosSmallInt {
-            uint16_t borrados = RepoSenso::purgarAnterioresA(static_cast<int64_t>(dto.timestampLimite));
-            auditarAccionSensor("PURGAR_SENSOS", "SENSO");
+            uint16_t borrados = RepoCenso::purgarAnterioresA(static_cast<int64_t>(dto.timestampLimite));
+            auditarAccionSensor("PURGAR_CENSOS", "CENSO");
             return borrados;
         },
         RolUsuario::ADMIN

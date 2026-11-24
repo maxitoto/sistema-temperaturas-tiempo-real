@@ -426,7 +426,7 @@ static void dibujarDetalleSensor(
     snprintf(
         fila2,
         sizeof(fila2),
-        "Ca:%.6sC\xF8 Re:%.6sc\xF8",
+        "Ca:%.6sc\xF8 Re:%.6sc\xF8",
         tempCorregida,
         tempCruda
     );
@@ -440,7 +440,7 @@ static void dibujarDetalleSensor(
     snprintf(
         fila3,
         sizeof(fila3),
-        "Ui:%.6sC\xF8 Us:%.6sc\xF8",
+        "Ui:%.6sc\xF8 Us:%.6sc\xF8",
         tempInferior,
         tempSuperior
     );

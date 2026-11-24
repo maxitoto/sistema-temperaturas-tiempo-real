@@ -7,7 +7,7 @@
 // Este binario:
 //   1. Lee los tipados de los modelos (fields/meta) → arma catálogo en RAM
 //   2. Carga los .tbl de la SD (RuntimeStorageAndIndexManager)
-//   3. Opera con DQL/DML (Orm::Sensor, Orm::Senso, ModuloDQL, ModuloDML)
+//   3. Opera con DQL/DML (Orm::Sensor, Orm::Censo, ModuloDQL, ModuloDML)
 //
 // NO se tocan archivos en SD. NO se ejecuta ModuloDDL.
 
@@ -256,7 +256,7 @@ static void loaderTask(void* /*param*/) {
     registerModelInCatalog(CorreosModel{});
     registerModelInCatalog(AuditoriaModel{});
     registerModelInCatalog(SensorModel{});
-    registerModelInCatalog(SensoModel{});
+    registerModelInCatalog(CensoModel{});
     registerModelInCatalog(EventoSensorModel{});
     registerModelInCatalog(EventoSistemaModel{});
 
@@ -307,7 +307,7 @@ static int32_t lookupOrCreateSensor(uint8_t slot) {
     return -1;
 }
 
-static void insertSenso(uint8_t slot, float tempCruda, float tempCorregida, int16_t estado) {
+static void insertCenso(uint8_t slot, float tempCruda, float tempCorregida, int16_t estado) {
     int32_t idSensor = sensorCache[slot].idSensor;
     if (idSensor < 0) return;
 
@@ -320,8 +320,8 @@ static void insertSenso(uint8_t slot, float tempCruda, float tempCorregida, int1
         Storage::PgCell("fecha_creacion",        String((long)(millis() / 1000)), PgDataType::BIGINT),
     };
 
-    auto r = Orm::Senso.create(cells);
-    if (!r.success) ESP_LOGW(TAG, "Fallo insert Senso (slot %u)", slot);
+    auto r = Orm::Censo.create(cells);
+    if (!r.success) ESP_LOGW(TAG, "Fallo insert Censo (slot %u)", slot);
 }
 
 // ==================================================
@@ -370,7 +370,7 @@ static void sensorTask(void* /*param*/) {
             xSemaphoreGive(lecturasMutex);
 
             xSemaphoreTake(dbMutex, portMAX_DELAY);
-            insertSenso(i, tempCruda, tempCorregida, estadoInt);
+            insertCenso(i, tempCruda, tempCorregida, estadoInt);
             xSemaphoreGive(dbMutex);
         }
 
@@ -410,7 +410,7 @@ static const char* HTML_FOOTER = "</body></html>";
 
 static const char* NAV =
     "<div class='nav'><a href='/'>Dashboard</a><a href='/sensor'>Tabla Sensor</a>"
-    "<a href='/senso'>Tabla Senso</a></div><hr/>";
+    "<a href='/censo'>Tabla Censo</a></div><hr/>";
 
 // ==================================================
 // Handlers HTTP
@@ -522,13 +522,13 @@ static esp_err_t sensorTableHandler(httpd_req_t *req) {
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-static esp_err_t sensoTableHandler(httpd_req_t *req) {
+static esp_err_t censoTableHandler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send_chunk(req, HTML_HEADER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NAV, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req,
-        "<h1>Tabla Senso</h1>"
-        "<form method='POST' action='/senso/clear' style='margin-bottom:10px;'>"
+        "<h1>Tabla Censo</h1>"
+        "<form method='POST' action='/censo/clear' style='margin-bottom:10px;'>"
         "<button type='submit' onclick=\"return confirm('¿Borrar todos los registros?');\">Borrar todo</button>"
         "</form>",
         HTTPD_RESP_USE_STRLEN);
@@ -538,7 +538,7 @@ static esp_err_t sensoTableHandler(httpd_req_t *req) {
     size_t total = 0;
     xSemaphoreTake(dbMutex, portMAX_DELAY);
     {
-        auto& all = Storage::RuntimeStorageAndIndexManager::getInstance().getTableRows("Senso");
+        auto& all = Storage::RuntimeStorageAndIndexManager::getInstance().getTableRows("Censo");
         total = all.size();
         size_t start = (total > MAX_ROWS) ? total - MAX_ROWS : 0;
         toRender.reserve(total - start);
@@ -561,7 +561,7 @@ static esp_err_t sensoTableHandler(httpd_req_t *req) {
     for (const auto& r : toRender) {
         snprintf(buf, sizeof(buf),
             "<tr><td>%ld</td><td>%ld</td><td>%.2f</td><td>%.2f</td><td>%ld</td><td>%ld</td></tr>",
-            (long)r.getInt("id_senso"),
+            (long)r.getInt("id_censo"),
             (long)r.getInt("id_sensor"),
             r.getFloat("temperatura_cruda"),
             r.getFloat("temperatura_corregida"),
@@ -575,17 +575,17 @@ static esp_err_t sensoTableHandler(httpd_req_t *req) {
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-static esp_err_t clearSensoHandler(httpd_req_t *req) {
+static esp_err_t clearCensoHandler(httpd_req_t *req) {
     xSemaphoreTake(dbMutex, portMAX_DELAY);
-    auto r = Orm::Senso.truncate();
+    auto r = Orm::Censo.truncate();
     xSemaphoreGive(dbMutex);
 
     if (!r.success) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                    "No se pudo limpiar la tabla Senso");
+                                    "No se pudo limpiar la tabla Censo");
     }
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/senso");
+    httpd_resp_set_hdr(req, "Location", "/censo");
     return httpd_resp_send(req, NULL, 0);
 }
 
@@ -595,8 +595,8 @@ static esp_err_t clearSensoHandler(httpd_req_t *req) {
 static const httpd_uri_t uri_root        = { .uri = "/",            .method = HTTP_GET,  .handler = rootHandler };
 static const httpd_uri_t uri_stream      = { .uri = "/api/stream",  .method = HTTP_GET,  .handler = streamHandler };
 static const httpd_uri_t uri_sensor      = { .uri = "/sensor",      .method = HTTP_GET,  .handler = sensorTableHandler };
-static const httpd_uri_t uri_senso       = { .uri = "/senso",       .method = HTTP_GET,  .handler = sensoTableHandler };
-static const httpd_uri_t uri_clear_senso = { .uri = "/senso/clear", .method = HTTP_POST, .handler = clearSensoHandler };
+static const httpd_uri_t uri_censo       = { .uri = "/censo",       .method = HTTP_GET,  .handler = censoTableHandler };
+static const httpd_uri_t uri_clear_censo = { .uri = "/censo/clear", .method = HTTP_POST, .handler = clearCensoHandler };
 
 // ==================================================
 // SETUP
@@ -616,7 +616,7 @@ void setup() {
                   (unsigned)ESP.getFreeHeap(),
                   (unsigned)ESP.getMaxAllocHeap());
 
-    // 3. Catálogo en RAM SOLO con Sensor y Senso
+    // 3. Catálogo en RAM SOLO con Sensor y Censo
     loaderDone = xSemaphoreCreateBinary();
     xTaskCreate(loaderTask, "loaderTask", 16384, nullptr, 5, nullptr);
     if (xSemaphoreTake(loaderDone, pdMS_TO_TICKS(60000)) != pdTRUE) {
@@ -629,7 +629,7 @@ void setup() {
                   (unsigned)ESP.getFreeHeap(),
                   (unsigned)ESP.getMaxAllocHeap());
 
-    // 4. Cargar .tbl de la SD (solo Sensor y Senso)
+    // 4. Cargar .tbl de la SD (solo Sensor y Censo)
     if (!Storage::RuntimeStorageAndIndexManager::getInstance().synchronizeWithDdlCatalog()) {
         Serial.println("❌ synchronizeWithDdlCatalog falló");
         while (true) delay(1000);
@@ -676,8 +676,8 @@ void setup() {
     httpd_register_uri_handler(server, &uri_root);
     httpd_register_uri_handler(server, &uri_stream);
     httpd_register_uri_handler(server, &uri_sensor);
-    httpd_register_uri_handler(server, &uri_senso);
-    httpd_register_uri_handler(server, &uri_clear_senso);
+    httpd_register_uri_handler(server, &uri_censo);
+    httpd_register_uri_handler(server, &uri_clear_censo);
 
     Serial.printf("[mem] post-https: free=%u max_alloc=%u\n",
                   (unsigned)ESP.getFreeHeap(),

@@ -552,7 +552,6 @@ inline auto solicitarApagadoSeguro = llamadoSemantico.exactamenteUnaVez<void, Re
 
         // 2. Mostrar en OLED que el sistema se está apagando (lo dibuja TaskOled en Core 0)
         RTOS::pizarraOled.publicarMensajeTemporal("SISTEMA", "Apagando...", "Espere cierre SD", "", "", 15000);
-        RTOS::pizarraOled.volcarAlHardwareI2C();
 
         // 3. Auditoría (se escribirá a SD antes del cierre si hay margen)
         const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
@@ -584,7 +583,7 @@ inline auto solicitarApagadoSeguro = llamadoSemantico.exactamenteUnaVez<void, Re
             // Apagar nuevamente actuadores por seguridad
             buzz.silenciarAlarmaActiva();
             led.apagarLed();
-            oled.limpiarAreaContenido();
+            RTOS::pizarraOled.publicarMensajeTemporal("", "", "", "", "", 15000);
 
             vTaskDelay(pdMS_TO_TICKS(200));
 

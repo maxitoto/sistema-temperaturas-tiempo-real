@@ -23,7 +23,7 @@ namespace RTOS {
             Tasks::TaskOled::iniciar(uarts, l2);
 
             Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskComunicaciones::obtenerTarea(),       6000);
-            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskAlertasYPersistencia::obtenerTarea(), 12000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskAlertasYPersistencia::obtenerTarea(), 18000);
             Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskSensores::obtenerTarea(),             8000);
             Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskOled::obtenerTarea(),                 6000);
             Tasks::TaskBiosRTOS::iniciar();

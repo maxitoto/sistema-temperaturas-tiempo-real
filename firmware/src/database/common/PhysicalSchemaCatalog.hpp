@@ -157,6 +157,8 @@ namespace DbCommon::Engine {
 
         bool hasTable(const String& name) const { return tables.find(normalizeKey(name)) != tables.end(); }
         void registerTable(TablePhysicalSchema schema) {
+            schema.columns.shrink_to_fit();
+            schema.tableConstraints.shrink_to_fit();
             schema.recomputeBinaryLayout();
             tables[normalizeKey(schema.tableName)] = std::move(schema);
         }
@@ -476,7 +478,15 @@ namespace DbCommon::Engine {
             if (!versionValida || tables.empty()) return false;
 
             for (auto& kv : tables) {
+                kv.second.columns.shrink_to_fit();
+                kv.second.tableConstraints.shrink_to_fit();
                 kv.second.recomputeBinaryLayout();
+            }
+            for (auto& kv : enums) {
+                kv.second.labels.shrink_to_fit();
+            }
+            for (auto& kv : indexes) {
+                kv.second.keyColumns.shrink_to_fit();
             }
             return true;
         }

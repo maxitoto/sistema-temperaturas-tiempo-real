@@ -12,7 +12,7 @@ namespace DbRuntime::Tests {
 
     // Struct C++ del usuario para demostrar el mapeo tipado directo sin std::map.
     struct ResumenLecturaDTO {
-        int32_t idSenso;
+        int32_t idCenso;
         String nombreSonda;
         float tempCorregida;
     };
@@ -29,7 +29,7 @@ namespace DbRuntime::Tests {
         DbNotRuntime::Engine::DdlDiagnosticConsole::getInstance().setSerialOutput(true);
         ModelManager Usuarios = runtimeDb.model("Usuarios");
         ModelManager Sensor   = runtimeDb.model("Sensor");
-        ModelManager Senso    = runtimeDb.model("Senso");
+        ModelManager Censo    = runtimeDb.model("Censo");
 
         // =====================================================================
         // PASO 1: [INTENTA INSERTAR O HACER UPSERT EN UNA TABLA AQUI]
@@ -70,21 +70,21 @@ namespace DbRuntime::Tests {
         // =====================================================================
         bannerManualRuntime("3. JOIN + MAPEO DIRECTO A STRUCT C++ (all_as<ResumenLecturaDTO>)");
 
-        auto listaTipada = Senso.objects()
+        auto listaTipada = Censo.objects()
             .select_related("Sensor", "id_sensor", "id_sensor", JoinType::INNER)
             .filter("temperatura_corregida", FilterOp::GT, "5.0")
             .order_by("-temperatura_corregida")
             .all_as<ResumenLecturaDTO>(+[](const PgTuple& r) -> ResumenLecturaDTO {
                 ResumenLecturaDTO dto;
-                dto.idSenso       = static_cast<int32_t>(r.getInt("id_senso"));
+                dto.idCenso       = static_cast<int32_t>(r.getInt("id_censo"));
                 dto.nombreSonda   = r.getText("Sensor.nombre", "<AUSENTE/NULL>");
                 dto.tempCorregida = r.getFloat("temperatura_corregida");
                 return dto;
             });
 
         for (const auto& item : listaTipada) {
-            Serial.print("  -> Struct DTO: idSenso=");
-            Serial.print(item.idSenso);
+            Serial.print("  -> Struct DTO: idCenso=");
+            Serial.print(item.idCenso);
             Serial.print(" | Sonda='");
             Serial.print(item.nombreSonda);
             Serial.print("' | Temp=");

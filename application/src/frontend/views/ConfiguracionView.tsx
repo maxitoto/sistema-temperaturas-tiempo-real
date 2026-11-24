@@ -11,6 +11,9 @@ import {
   Edit2,
   RefreshCw,
   Loader2,
+  Send, 
+  CheckCircle2, 
+  XCircle
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { client, safeRpc } from "../lib/service";
@@ -26,7 +29,14 @@ import {
   RolUsuario,
   ServidorNtpItemDTO,
   TipoRecepcionCorreo,
+  ResultadoEnvioSmtpDTO
 } from "#types/rpc.types";
+import { FormulaTooltip } from "../components/ui/FormulaTooltip";
+import {
+  estimarEbullicionDesdePresion,
+  estimarPresionDesdeAltura,
+} from "../lib/calibracionModels";
+import { DataTable, DataTableColumn } from "#components/ui/DataTable";
 
 export type TabConfiguracion =
   | "SISTEMA"
@@ -56,7 +66,7 @@ export function ConfiguracionView({
   );
   const [formSistema, setFormSistema] = useState({
     zonaHorariaMin: -180,
-    retencionSensoDias: 30,
+    retencionCensoDias: 30,
     retencionEventosDias: 60,
     retencionAuditoriaDias: 90,
     sdLibreMinimoKb: 2048,
@@ -96,9 +106,13 @@ export function ConfiguracionView({
     activa: true,
   });
   const [smtpCfg, setSmtpCfg] = useState<ConfiguracionSmtpDTO | null>(null);
+  const [destinoPruebaSmtp, setDestinoPruebaSmtp] = useState("");
+  const [probandoSmtp, setProbandoSmtp] = useState(false);
+  const [resultadoPruebaSmtp, setResultadoPruebaSmtp] =
+    useState<ResultadoEnvioSmtpDTO | null>(null);
   const [formSmtp, setFormSmtp] = useState({
     hostSmtp: "",
-    puerto: 587,
+    puerto: 465,
     usarTls: true,
     usuario: "",
     passwordCifrado: "",
@@ -127,7 +141,7 @@ export function ConfiguracionView({
       setCfgSistema(cfg);
       setFormSistema({
         zonaHorariaMin: cfg.zonaHorariaMin,
-        retencionSensoDias: cfg.retencionSensoDias,
+        retencionCensoDias: cfg.retencionCensoDias,
         retencionEventosDias: cfg.retencionEventosDias,
         retencionAuditoriaDias: cfg.retencionAuditoriaDias,
         sdLibreMinimoKb: cfg.sdLibreMinimoKb,
@@ -234,7 +248,7 @@ export function ConfiguracionView({
       () =>
         client.actualizarConfiguracionSistema({
           zonaHorariaMin: Math.round(formSistema.zonaHorariaMin),
-          retencionSensoDias: Math.round(formSistema.retencionSensoDias),
+          retencionCensoDias: Math.round(formSistema.retencionCensoDias),
           retencionEventosDias: Math.round(formSistema.retencionEventosDias),
           retencionAuditoriaDias: Math.round(
             formSistema.retencionAuditoriaDias
@@ -267,12 +281,18 @@ export function ConfiguracionView({
   };
 
   // Estimación física estándar de ebullición del agua a partir de presión atmosférica (hPa)
-  const estimarEbullicionPorPresion = () => {
-    const p = Math.max(300, Math.min(1100, formAmbiente.presionAtmosferica));
-    const tEbull = redondearDecimal(
-      100 + 28.0 * Math.log(p / 1013.25),
-      2
-    );
+  const aplicarEstimacionDesdeAltura = () => {
+    const pEst = estimarPresionDesdeAltura(formAmbiente.altura);
+    const tEbull = estimarEbullicionDesdePresion(pEst);
+    setFormAmbiente((prev) => ({
+      ...prev,
+      presionAtmosferica: pEst,
+      tempEbullicionRef: tEbull,
+    }));
+  };
+
+  const aplicarEstimacionDesdePresion = () => {
+    const tEbull = estimarEbullicionDesdePresion(formAmbiente.presionAtmosferica);
     setFormAmbiente((prev) => ({ ...prev, tempEbullicionRef: tEbull }));
   };
 
@@ -322,6 +342,34 @@ export function ConfiguracionView({
       { mensajeExito: "Configuración del servidor SMTP guardada." }
     );
     if (res) setSmtpCfg(res);
+  };
+
+  const probarEnvioSmtp = async () => {
+    setProbandoSmtp(true);
+    setResultadoPruebaSmtp(null);
+    const res = await safeRpc(
+      () => client.enviarCorreoPruebaSmtp(destinoPruebaSmtp.trim()),
+      "enviarCorreoPruebaSmtp"
+    );
+    setProbandoSmtp(false);
+    if (res) {
+      setResultadoPruebaSmtp(res);
+      void cargarCorreosYSmtp();
+    }
+  };
+
+  const despacharPendientesAhora = async () => {
+    setProbandoSmtp(true);
+    setResultadoPruebaSmtp(null);
+    const res = await safeRpc(
+      () => client.despacharAlertasCorreoAhora(),
+      "despacharAlertasCorreoAhora"
+    );
+    setProbandoSmtp(false);
+    if (res) {
+      setResultadoPruebaSmtp(res);
+      void cargarCorreosYSmtp();
+    }
   };
 
   const guardarDestinatario = async (e: React.FormEvent) => {
@@ -530,12 +578,12 @@ export function ConfiguracionView({
 
             <div>
               <label className="mb-1 block font-medium">
-                Retención Tabla Senso (días)
+                Retención Tabla Censo (días)
               </label>
               <NumericInput
-                value={formSistema.retencionSensoDias}
+                value={formSistema.retencionCensoDias}
                 onChange={(v) =>
-                  setFormSistema((p) => ({ ...p, retencionSensoDias: v }))
+                  setFormSistema((p) => ({ ...p, retencionCensoDias: v }))
                 }
                 decimals={0}
                 allowNegative={false}
@@ -644,30 +692,10 @@ export function ConfiguracionView({
           onSubmit={guardarAmbiente}
           className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 className="flex items-center gap-2 text-sm font-bold">
-                <Globe className="h-4 w-4 text-info" />
-                Calibración Ambiental Global del Gestor de Sensores
-              </h2>
-              <p className="text-xs text-foreground-secondary">
-                Parámetros físicos de referencia utilizados por todos los
-                sensores DS18B20 al calcular la recta de calibración de 2 puntos
-                (hielo / ebullición).
-              </p>
-            </div>
-            {ambiente && (
-              <span className="font-mono text-[11px] text-foreground-secondary">
-                Última mod.:{" "}
-                {formatearEpochSegundos(ambiente.fechaModificacion)}
-              </span>
-            )}
-          </div>
-
           <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <label className="mb-1 block font-medium">
-                Altura s.n.m. (m)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Altura s.n.m. (m)</span>
               </label>
               <NumericInput
                 value={formAmbiente.altura}
@@ -681,8 +709,15 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Presión Atmosférica (hPa)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Presión Atmosférica (hPa)</span>
+                <FormulaTooltip
+                  titulo="Fórmula Barométrica ISA"
+                  archivoModelo="ModeloAtmosfericoBarometrico.hpp"
+                  ecuacion={"P(h) = 1013.25 · (1 − 2.25577×10⁻⁵ · h)^5.25588"}
+                  sustitucion={`Con h = ${formAmbiente.altura} m → P ≈ ${estimarPresionDesdeAltura(formAmbiente.altura).toFixed(2)} hPa`}
+                  descripcion="Estima la presión atmosférica media a partir de la altitud sobre el nivel del mar (m s.n.m.)."
+                />
               </label>
               <NumericInput
                 value={formAmbiente.presionAtmosferica}
@@ -699,8 +734,15 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Ref. Congelación (°C)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Ref. Congelación (°C)</span>
+                <FormulaTooltip
+                  titulo="Punto Fijo de Fusión del Agua"
+                  archivoModelo="ModeloAtmosfericoBarometrico.hpp"
+                  ecuacion={"T_ref,inf = 0.00 °C"}
+                  sustitucion={`Referencia activa = ${formAmbiente.tempCongelacionRef.toFixed(2)} °C`}
+                  descripcion="El punto de fusión de una mezcla 50/50 de agua pura y hielo picado es 0.00 °C (variación < 0.01 °C con la presión)."
+                />
               </label>
               <NumericInput
                 value={formAmbiente.tempCongelacionRef}
@@ -716,8 +758,17 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Ref. Ebullición (°C)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Ref. Ebullición (°C)</span>
+                <FormulaTooltip
+                  titulo="Ecuación de Clausius-Clapeyron"
+                  archivoModelo="ModeloAtmosfericoBarometrico.hpp"
+                  ecuacion={
+                    "1/T(K) = 1/373.15 − (R / ΔH_vap) · ln(P / 1013.25)\nT_ref,sup = T(K) − 273.15"
+                  }
+                  sustitucion={`Con P = ${formAmbiente.presionAtmosferica} hPa → T_ebull ≈ ${estimarEbullicionDesdePresion(formAmbiente.presionAtmosferica).toFixed(2)} °C`}
+                  descripcion="Calcula el punto real de ebullición del agua según la presión atmosférica local (R = 8.31446 J/mol·K, ΔH_vap = 40660 J/mol)."
+                />
               </label>
               <NumericInput
                 value={formAmbiente.tempEbullicionRef}
@@ -753,10 +804,17 @@ export function ConfiguracionView({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={estimarEbullicionPorPresion}
+                  onClick={aplicarEstimacionDesdeAltura}
                   className="btn btn-outline px-3 py-1.5 text-xs"
                 >
-                  Estimar ebullición según presión ({formAmbiente.presionAtmosferica} hPa)
+                  Calcular Presión y Ebullición desde Altura ({formAmbiente.altura} m)
+                </button>
+                <button
+                  type="button"
+                  onClick={aplicarEstimacionDesdePresion}
+                  className="btn btn-outline px-3 py-1.5 text-xs"
+                >
+                  Estimar Ebullición desde Presión ({formAmbiente.presionAtmosferica} hPa)
                 </button>
                 <button
                   type="submit"
@@ -910,7 +968,7 @@ export function ConfiguracionView({
             <form
               onSubmit={guardarSmtp}
               className="space-y-3 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
-            >
+            > 
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-bold">
                   Servidor Saliente SMTP (Alertas por Correo)
@@ -1041,6 +1099,84 @@ export function ConfiguracionView({
                 <Save className="h-3.5 w-3.5" />
                 Guardar Servidor SMTP
               </button>
+              <div className="border-t border-border pt-3 space-y-2.5">
+                  <div className="text-[11px] text-foreground-secondary">
+                    Para <strong>Gmail</strong>: use host{" "}
+                    <code>smtp.gmail.com</code>, puerto <code>465</code>,{" "}
+                    <strong>TLS activado</strong> y una{" "}
+                    <strong>Contraseña de Aplicación</strong> de Google (16
+                    caracteres; los espacios se eliminan automáticamente).
+                  </div>
+
+                  <div className="flex flex-wrap items-end gap-2 text-xs">
+                    <div>
+                      <label className="mb-1 block">
+                        Destino de prueba (opcional)
+                      </label>
+                      <input
+                        type="email"
+                        maxLength={47}
+                        value={destinoPruebaSmtp}
+                        onChange={(e) => setDestinoPruebaSmtp(e.target.value)}
+                        placeholder="Vacío = 1° destinatario activo"
+                        className="w-60 rounded border border-border bg-background px-2.5 py-1.5 font-mono"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      disabled={probandoSmtp}
+                      onClick={() => void probarEnvioSmtp()}
+                      className="btn btn-solid btn-info px-3 py-1.5 text-xs font-semibold"
+                    >
+                      {probandoSmtp ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5" />
+                      )}
+                      Enviar Correo de Prueba
+                    </button>
+                    <button
+                      type="button"
+                      disabled={probandoSmtp}
+                      onClick={() => void despacharPendientesAhora()}
+                      className="btn btn-solid btn-success px-3 py-1.5 text-xs font-semibold"
+                      title="Envía ahora los avisos PENDIENTE de AuditoriaSensores y AuditoriaSistema sin esperar cooldown"
+                    >
+                      {probandoSmtp ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Mail className="h-3.5 w-3.5" />
+                      )}
+                      Despachar Avisos Pendientes Ahora
+                    </button>
+                  </div>
+
+                  {resultadoPruebaSmtp && (
+                    <div
+                      className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${
+                        resultadoPruebaSmtp.exito
+                          ? "border-alert-success-border bg-alert-success-bg text-alert-success-icon"
+                          : "border-alert-err-border bg-alert-err-bg text-alert-err-icon"
+                      }`}
+                    >
+                      {resultadoPruebaSmtp.exito ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      ) : (
+                        <XCircle className="h-4 w-4 shrink-0" />
+                      )}
+                      <span className="font-mono">
+                        [{resultadoPruebaSmtp.codigoSmtp || "NET"}]
+                      </span>
+                      <span>{resultadoPruebaSmtp.detalle}</span>
+                      {resultadoPruebaSmtp.eventosActualizados > 0 && (
+                        <span className="rounded bg-background/80 px-2 py-0.5 font-mono text-[11px] text-foreground">
+                          {resultadoPruebaSmtp.eventosActualizados} aviso(s) →
+                          ENVIADO
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
             </form>
           )}
 
@@ -1179,95 +1315,139 @@ export function ConfiguracionView({
               </form>
             )}
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                  <tr>
-                    <th className="px-3 py-2">ID</th>
-                    <th className="px-3 py-2">Destinatario</th>
-                    <th className="px-3 py-2">Email</th>
-                    <th className="px-3 py-2">Filtro</th>
-                    <th className="px-3 py-2">Último Envío</th>
-                    <th className="px-3 py-2">Estado</th>
-                    {esAdmin && <th className="px-3 py-2 text-right">Acciones</th>}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {correos.map((c) => (
-                    <tr key={c.idCorreo} className="hover:bg-secondary/40">
-                      <td className="px-3 py-2 font-mono">#{c.idCorreo}</td>
-                      <td className="px-3 py-2 font-medium">
-                        {c.nombre} {c.apellido}
-                      </td>
-                      <td className="px-3 py-2 font-mono">
-                        {c.correoElectronico}
-                      </td>
-                      <td className="px-3 py-2 text-[11px]">
-                        {LABEL_TIPO_RECEPCION[c.tipoRecepcionMensajes] ??
-                          c.tipoRecepcionMensajes}
-                      </td>
-                      <td className="px-3 py-2 text-[11px]">
-                        {LABEL_ESTADO_ENVIO[c.ultimoEstadoEnvio] ??
-                          c.ultimoEstadoEnvio}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            c.activa
-                              ? "bg-alert-success-bg text-alert-success-icon"
-                              : "bg-alert-inactive-bg text-alert-inactive-icon"
-                          }`}
-                        >
-                          {c.activa ? "ACTIVO" : "INACTIVO"}
-                        </span>
-                      </td>
-                      {esAdmin && (
-                        <td className="px-3 py-2 text-right">
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              className="btn btn-icon btn-info"
-                              onClick={() =>
-                                setFormCorreo({
-                                  idCorreo: c.idCorreo,
-                                  nombre: c.nombre,
-                                  apellido: c.apellido,
-                                  correoElectronico: c.correoElectronico,
-                                  tipoRecepcionMensajes:
-                                    c.tipoRecepcionMensajes,
-                                  activa: c.activa,
-                                })
-                              }
-                              title="Editar"
-                            >
-                              <Edit2 className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              className="btn btn-icon btn-error"
-                              onClick={() =>
-                                void eliminarDestinatario(c.idCorreo)
-                              }
-                              title="Eliminar"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                  {correos.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={esAdmin ? 7 : 6}
-                        className="px-3 py-6 text-center text-foreground-secondary"
+            <DataTable
+                data={correos}
+                rowKey={(c) => c.idCorreo}
+                searchPlaceholder="Buscar nombre o email..."
+                searchValue={(c) =>
+                  `${c.nombre} ${c.apellido} ${c.correoElectronico}`
+                }
+                filters={[
+                  {
+                    key: "filtro",
+                    label: "Filtro",
+                    getValue: (c) => c.tipoRecepcionMensajes,
+                    options: Object.entries(LABEL_TIPO_RECEPCION).map(
+                      ([value, label]) => ({ value, label })
+                    ),
+                  },
+                  {
+                    key: "envio",
+                    label: "Último Envío",
+                    getValue: (c) => c.ultimoEstadoEnvio,
+                    options: Object.entries(LABEL_ESTADO_ENVIO).map(
+                      ([value, label]) => ({ value, label })
+                    ),
+                  },
+                  {
+                    key: "activo",
+                    label: "Estado",
+                    getValue: (c) => (c.activa ? "1" : "0"),
+                    options: [
+                      { value: "1", label: "ACTIVO" },
+                      { value: "0", label: "INACTIVO" },
+                    ],
+                  },
+                ]}
+                columns={[
+                  {
+                    key: "id",
+                    header: "ID",
+                    sortValue: (c) => c.idCorreo,
+                    cellClassName: "font-mono",
+                    cell: (c) => `#${c.idCorreo}`,
+                  },
+                  {
+                    key: "destinatario",
+                    header: "Destinatario",
+                    sortValue: (c) => `${c.nombre} ${c.apellido}`,
+                    cellClassName: "font-medium",
+                    cell: (c) => `${c.nombre} ${c.apellido}`,
+                  },
+                  {
+                    key: "email",
+                    header: "Email",
+                    sortValue: (c) => c.correoElectronico,
+                    cellClassName: "font-mono",
+                    cell: (c) => c.correoElectronico,
+                  },
+                  {
+                    key: "filtro",
+                    header: "Filtro",
+                    sortValue: (c) => c.tipoRecepcionMensajes,
+                    cellClassName: "text-[11px]",
+                    cell: (c) =>
+                      LABEL_TIPO_RECEPCION[c.tipoRecepcionMensajes] ??
+                      c.tipoRecepcionMensajes,
+                  },
+                  {
+                    key: "envio",
+                    header: "Último Envío",
+                    sortValue: (c) => c.ultimoEstadoEnvio,
+                    cellClassName: "text-[11px]",
+                    cell: (c) =>
+                      LABEL_ESTADO_ENVIO[c.ultimoEstadoEnvio] ??
+                      c.ultimoEstadoEnvio,
+                  },
+                  {
+                    key: "estado",
+                    header: "Estado",
+                    sortValue: (c) => c.activa,
+                    cell: (c) => (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          c.activa
+                            ? "bg-alert-success-bg text-alert-success-icon"
+                            : "bg-alert-inactive-bg text-alert-inactive-icon"
+                        }`}
                       >
-                        No hay destinatarios configurados.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                        {c.activa ? "ACTIVO" : "INACTIVO"}
+                      </span>
+                    ),
+                  },
+                  ...(esAdmin
+                    ? ([
+                        {
+                          key: "acciones",
+                          header: "Acciones",
+                          headerClassName: "text-right",
+                          cellClassName: "text-right",
+                          cell: (c) => (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                className="btn btn-icon btn-info"
+                                onClick={() =>
+                                  setFormCorreo({
+                                    idCorreo: c.idCorreo,
+                                    nombre: c.nombre,
+                                    apellido: c.apellido,
+                                    correoElectronico: c.correoElectronico,
+                                    tipoRecepcionMensajes:
+                                      c.tipoRecepcionMensajes,
+                                    activa: c.activa,
+                                  })
+                                }
+                                title="Editar"
+                              >
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                className="btn btn-icon btn-error"
+                                onClick={() =>
+                                  void eliminarDestinatario(c.idCorreo)
+                                }
+                                title="Eliminar"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ),
+                        },
+                      ] as DataTableColumn<CorreoItemDTO>[])
+                    : []),
+                ]}
+                emptyMessage="No hay destinatarios configurados."
+              />
           </div>
         </div>
       )}
@@ -1363,78 +1543,96 @@ export function ConfiguracionView({
             </form>
           )}
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-border bg-secondary/60 text-foreground-secondary uppercase">
-                <tr>
-                  <th className="px-3 py-2">ID</th>
-                  <th className="px-3 py-2">Servidor NTP</th>
-                  <th className="px-3 py-2">Prioridad</th>
-                  <th className="px-3 py-2">Estado</th>
-                  {esAdmin && <th className="px-3 py-2 text-right">Acciones</th>}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {servidoresNtp.map((ntp) => (
-                  <tr key={ntp.idServer} className="hover:bg-secondary/40">
-                    <td className="px-3 py-2 font-mono">#{ntp.idServer}</td>
-                    <td className="px-3 py-2 font-mono font-bold">
-                      {ntp.server}
-                    </td>
-                    <td className="px-3 py-2 font-mono">{ntp.prioridad}</td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                          ntp.activa
-                            ? "bg-alert-success-bg text-alert-success-icon"
-                            : "bg-alert-inactive-bg text-alert-inactive-icon"
-                        }`}
-                      >
-                        {ntp.activa ? "ACTIVO" : "INACTIVO"}
-                      </span>
-                    </td>
-                    {esAdmin && (
-                      <td className="px-3 py-2 text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            className="btn btn-icon btn-info"
-                            onClick={() =>
-                              setFormNtp({
-                                idServer: ntp.idServer,
-                                server: ntp.server,
-                                prioridad: ntp.prioridad,
-                                activa: ntp.activa,
-                              })
-                            }
-                            title="Editar"
-                          >
-                            <Edit2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            className="btn btn-icon btn-error"
-                            onClick={() => void eliminarNtp(ntp.idServer)}
-                            title="Eliminar"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-                {servidoresNtp.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={esAdmin ? 5 : 4}
-                      className="px-3 py-6 text-center text-foreground-secondary"
+          <DataTable
+              data={servidoresNtp}
+              rowKey={(ntp) => ntp.idServer}
+              filters={[
+                {
+                  key: "activo",
+                  label: "Estado",
+                  getValue: (n) => (n.activa ? "1" : "0"),
+                  options: [
+                    { value: "1", label: "ACTIVO" },
+                    { value: "0", label: "INACTIVO" },
+                  ],
+                },
+              ]}
+              columns={[
+                {
+                  key: "id",
+                  header: "ID",
+                  sortValue: (n) => n.idServer,
+                  cellClassName: "font-mono",
+                  cell: (n) => `#${n.idServer}`,
+                },
+                {
+                  key: "server",
+                  header: "Servidor NTP",
+                  sortValue: (n) => n.server,
+                  cellClassName: "font-mono font-bold",
+                  cell: (n) => n.server,
+                },
+                {
+                  key: "prioridad",
+                  header: "Prioridad",
+                  sortValue: (n) => n.prioridad,
+                  cellClassName: "font-mono",
+                  cell: (n) => n.prioridad,
+                },
+                {
+                  key: "estado",
+                  header: "Estado",
+                  sortValue: (n) => n.activa,
+                  cell: (n) => (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        n.activa
+                          ? "bg-alert-success-bg text-alert-success-icon"
+                          : "bg-alert-inactive-bg text-alert-inactive-icon"
+                      }`}
                     >
-                      Sin servidores NTP configurados.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                      {n.activa ? "ACTIVO" : "INACTIVO"}
+                    </span>
+                  ),
+                },
+                ...(esAdmin
+                  ? ([
+                      {
+                        key: "acciones",
+                        header: "Acciones",
+                        headerClassName: "text-right",
+                        cellClassName: "text-right",
+                        cell: (n) => (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              className="btn btn-icon btn-info"
+                              onClick={() =>
+                                setFormNtp({
+                                  idServer: n.idServer,
+                                  server: n.server,
+                                  prioridad: n.prioridad,
+                                  activa: n.activa,
+                                })
+                              }
+                              title="Editar"
+                            >
+                              <Edit2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              className="btn btn-icon btn-error"
+                              onClick={() => void eliminarNtp(n.idServer)}
+                              title="Eliminar"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ),
+                      },
+                    ] as DataTableColumn<ServidorNtpItemDTO>[])
+                  : []),
+              ]}
+              emptyMessage="Sin servidores NTP configurados."
+            />
         </div>
       )}
     </div>

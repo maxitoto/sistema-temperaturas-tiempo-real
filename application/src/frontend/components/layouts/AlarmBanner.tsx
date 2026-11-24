@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, VolumeX, RefreshCw, BellRing } from "lucide-react";
+import { AlertTriangle, VolumeX, RefreshCw, BellRing, ArrowUpRight } from "lucide-react";
+import type { DestinoNavegacion } from "../../pages/App";
 import { toast } from "react-toastify";
 import { client, safeRpc } from "../../lib/service";
 import { useAuth } from "../../contexts/AuthContext";
 import { EstadoAlarmasActivasDTO, RolUsuario } from "#types/rpc.types";
 import { LABEL_ESTADO_BUS, LABEL_ESTADO_SENSOR } from "../../lib/labels";
 
-export function AlarmBanner() {
+export function AlarmBanner({
+  onNavegar,
+}: {
+  onNavegar?: (destino: DestinoNavegacion) => void;
+}) {
   const { rol, usuario } = useAuth();
   const [alarmas, setAlarmas] = useState<EstadoAlarmasActivasDTO | null>(null);
   const [cargando, setCargando] = useState(false);
@@ -79,9 +84,17 @@ export function AlarmBanner() {
 
         <div className="flex flex-1 flex-wrap items-center gap-2">
           {alarmas.sensoresAfectados.map((s) => (
-            <span
+            <button
               key={`${s.slot}-${s.mac}`}
-              className="inline-flex items-center gap-1.5 rounded border border-alert-err-border bg-background px-2.5 py-1 font-mono text-xs"
+              type="button"
+              onClick={() =>
+                onNavegar?.({
+                  vista: "sensores",
+                  sensorMac: s.mac.toUpperCase(),
+                })
+              }
+              title={`Abrir detalle y calibración del sensor ${s.mac}`}
+              className="group inline-flex cursor-pointer items-center gap-1.5 rounded border border-alert-err-border bg-background px-2.5 py-1 font-mono text-xs transition-colors hover:border-error hover:bg-error-light/60"
             >
               <BellRing className="h-3.5 w-3.5 text-alert-err-icon" />
               <strong>{s.mac}</strong>
@@ -92,7 +105,8 @@ export function AlarmBanner() {
               <span className="rounded bg-error-light px-1.5 py-0.5 font-sans text-[10px] font-semibold text-error">
                 {LABEL_ESTADO_SENSOR[s.estado] ?? `E${s.estado}`}
               </span>
-            </span>
+              <ArrowUpRight className="h-3.5 w-3.5 text-alert-err-icon opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:opacity-100" />
+            </button>
           ))}
         </div>
 

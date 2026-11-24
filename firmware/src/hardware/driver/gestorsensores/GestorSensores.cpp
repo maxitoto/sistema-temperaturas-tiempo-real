@@ -171,7 +171,7 @@ EstadoBus GestorSensores::verificarEstadoElectricoBus() {
     return estadoBus;
 }
 
-uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool guardarEnEeprom) {
+uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool guardarEnEeprom, bool solicitarConversionInicial) {
     ScopedSensorLock lk(mutexSensores);
     if (resolucionGlobal < 9 || resolucionGlobal > 12) resolucionGlobal = 12;
 
@@ -257,7 +257,7 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
         totalAsignados++;
     }
 
-    if (totalAsignados > 0) {
+    if (solicitarConversionInicial && totalAsignados > 0) {
         solicitarConversionGlobal(true);
     }
 
@@ -628,14 +628,33 @@ bool GestorSensores::calibrarPuntosPorMAC(const char* macHex, float tempMedidaHi
     int8_t slot = buscarSlotPorMACInterno(macHex);
     if (slot < 0) return false;
     Sensor& s = sensores[slot];
-    s.setOffset(offsetManual, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
-    s.setCorrecciones(tempMedidaHirviendo, tempMedidaHielo, SensorInicializador::obtenerRefCongelacion(), SensorInicializador::obtenerRefEbullicion());
+    s.configurarCalibracion(
+        tempMedidaHirviendo,
+        tempMedidaHielo,
+        offsetManual,
+        SensorInicializador::obtenerRefCongelacion(),
+        SensorInicializador::obtenerRefEbullicion()
+    );
     if (estadoTieneLecturaValida(s.obtenerEstado())) {
         s.setTempCelsius(s.aplicarCalibracion(s.obtenerTempCruda()));
         reevaluarAlarmaSlotInterno(s);
     }
     SensorInicializador::persistirConfiguracionSensor(s);
     return true;
+}
+
+void GestorSensores::recalcularCalibracionGlobalActiva() {
+    ScopedSensorLock lk(mutexSensores);
+    const float refCong  = SensorInicializador::obtenerRefCongelacion();
+    const float refEbull = SensorInicializador::obtenerRefEbullicion();
+    for (uint8_t i = 0; i < MAX_SENSORES; ++i) {
+        if (!sensores[i].estaActivo()) continue;
+        sensores[i].recalcularRectaCalibracion(refCong, refEbull);
+        if (estadoTieneLecturaValida(sensores[i].obtenerEstado())) {
+            sensores[i].setTempCelsius(sensores[i].aplicarCalibracion(sensores[i].obtenerTempCruda()));
+            reevaluarAlarmaSlotInterno(sensores[i]);
+        }
+    }
 }
 
 bool GestorSensores::configurarUmbralesPorMAC(const char* macHex, float thAltoC, float tlBajoC, bool guardarEeprom) {

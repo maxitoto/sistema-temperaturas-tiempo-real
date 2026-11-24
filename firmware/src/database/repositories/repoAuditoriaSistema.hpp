@@ -117,7 +117,7 @@ namespace DbRuntime::Repositories {
             if (limite == 0 || limite > 16) limite = 16;
             std::vector<AuditoriaSistemaDTO> out;
 
-            PgBinaryStorage::getInstance().scanForward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
+            PgBinaryStorage::getInstance().scanBackward(TABLA, [&](const PgRowView& r, uint32_t) -> bool {
                 if (r.getEnum<EstadoEnvioCorreo>("estado_reporte") == EstadoEnvioCorreo::PENDIENTE) {
                     out.push_back(mapear(r));
                     if (out.size() >= limite) return false;
