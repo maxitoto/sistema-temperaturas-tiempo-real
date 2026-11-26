@@ -22,10 +22,11 @@ namespace RTOS {
             Tasks::TaskSensores::iniciar(l3);
             Tasks::TaskOled::iniciar(uarts, l2);
 
-            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskComunicaciones::obtenerTarea(),       6000);
-            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskAlertasYPersistencia::obtenerTarea(), 18000);
-            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskSensores::obtenerTarea(),             8000);
-            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskOled::obtenerTarea(),                 6000);
+            // Timeouts con margen real para SMTP/TLS (TaskAlertasDB) y conversiones 1-Wire (TaskSensores)
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskComunicaciones::obtenerTarea(),       10000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskAlertasYPersistencia::obtenerTarea(), 45000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskSensores::obtenerTarea(),             15000);
+            Tasks::TaskBiosRTOS::registrarTareaVigilada(Tasks::TaskOled::obtenerTarea(),                 10000);
             Tasks::TaskBiosRTOS::iniciar();
         }
     };

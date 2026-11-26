@@ -81,19 +81,24 @@ interface EntradaCacheRPC {
 
 export class FirmwareRPCClient {
     private static readonly INTERVALO_REVISION_KEEPALIVE_MS = 10000;
-    private static readonly UMBRAL_SILENCIO_KEEPALIVE_MS    = 40000;
+    private static readonly UMBRAL_SILENCIO_KEEPALIVE_LAN   = 40000;
+    private static readonly UMBRAL_SILENCIO_KEEPALIVE_WAN   = 25000; // Evita cierre por inactividad en túneles TCP
     private static readonly TIMEOUT_RPC_MS                  = 14000;
 
-    // Protección del ESP32 desde el backend
+    // Fallback de telemetría en vivo sobre TCP cifrado cuando UDP no cruza Internet/NAT
+    private static readonly INTERVALO_FALLBACK_STREAM_MS    = 1500;
+    private static readonly UMBRAL_SILENCIO_UDP_MS          = 3500;
+
+    // Protección del ESP32 desde el backend (ajustado para 2-4 clientes simultáneos)
     private static readonly CAPACIDAD_MAX_COLA_TAREAS       = 24;
     private static readonly PACING_MIN_WIFI_MS              = 45;
-    private static readonly MAX_REINTENTOS_BUSY             = 3;
-    private static readonly BACKOFF_BUSY_MS                 = [250, 500, 900];
+    private static readonly MAX_REINTENTOS_BUSY             = 4;
+    private static readonly BACKOFF_BUSY_MS                 = [200, 450, 800, 1200];
 
     private readonly uarts: UARTSClient;
     private readonly wifi: WiFiClient;
 
-    private medioActivo: MedioActivoCliente ="NINGUNO";
+    private medioActivo: MedioActivoCliente = "NINGUNO";
     private proximoTicket = 1;
     private pendientes = new Map<number, PeticionPendiente>();
     private enVueloPorClave = new Map<string, Promise<Buffer>>();
@@ -107,6 +112,9 @@ export class FirmwareRPCClient {
     private listenersStreamPorProc = new Map<number, (payload: Buffer) => void>();
     private udpWiFiVinculado = false;
     private promesaSuscripcionUdp: Promise<void> | null = null;
+    private inicioStreamWiFiMs = 0;
+    private fallbackStreamTcpLogEmitido = false;
+    private timerFallbackStreamTcp?: ReturnType<typeof setInterval>;
     private timerKeepalive?: ReturnType<typeof setInterval>;
 
     private logsVisor: string[] = [];
@@ -220,12 +228,14 @@ export class FirmwareRPCClient {
         }
     }
 
-    async conectarPorWiFi(ipServidor: string): Promise<void> {
+    async conectarPorWiFi(destinoServidor: string): Promise<void> {
         await this.desconectar();
-        await this.wifi.conectar(ipServidor);
+        await this.wifi.conectar(destinoServidor);
         this.medioActivo = "WIFI";
         this.udpWiFiVinculado = false;
         this.promesaSuscripcionUdp = null;
+        this.inicioStreamWiFiMs = 0;
+        this.fallbackStreamTcpLogEmitido = false;
         this.ultimoContactoMs = Date.now();
 
         try {
@@ -243,6 +253,7 @@ export class FirmwareRPCClient {
 
     async desconectar(): Promise<void> {
         this.detenerPulsoKeepaliveAutomatico();
+        this.detenerFallbackStreamTcp();
         try {
             if (this.medioActivo === "UART-S" && this.uarts.estaConectado()) {
                 await this.invocarPorId(
@@ -283,11 +294,21 @@ export class FirmwareRPCClient {
         if (this.medioActivo !== "WIFI" || this.udpWiFiVinculado) {
             return;
         }
+        // En conexiones por Internet/túnel TCP no se vincula UDP (evita tráfico inútil en el ESP32)
+        if (this.wifi.esRemoto()) {
+            this.udpWiFiVinculado = true;
+            return;
+        }
         if (this.promesaSuscripcionUdp) {
             return this.promesaSuscripcionUdp;
         }
 
         const puertoUdp = this.wifi.obtenerPuertoUdpLocal();
+        if (puertoUdp <= 0) {
+            this.udpWiFiVinculado = true;
+            return;
+        }
+
         this.promesaSuscripcionUdp = this.invocarPorId(
             ProcedimientoSistemaRPC.L1_SUSCRIBIR_UDP_WIFI,
             SuscripcionUdpDTO.serialize({ puertoEscuchaCliente: puertoUdp }),
@@ -306,6 +327,75 @@ export class FirmwareRPCClient {
 
     registrarListenerStream(idProc: number, cb: (payload: Buffer) => void): void {
         this.listenersStreamPorProc.set(idProc, cb);
+        if (this.medioActivo === "WIFI") {
+            if (this.inicioStreamWiFiMs === 0) {
+                this.inicioStreamWiFiMs = Date.now();
+            }
+            this.iniciarFallbackStreamTcp();
+        }
+    }
+
+    private iniciarFallbackStreamTcp(): void {
+        if (this.timerFallbackStreamTcp) return;
+
+        this.timerFallbackStreamTcp = setInterval(() => {
+            if (
+                !this.estaConectado() ||
+                this.medioActivo !== "WIFI" ||
+                this.listenersStreamPorProc.size === 0
+            ) {
+                return;
+            }
+
+            const ahora = Date.now();
+            const esRemoto = this.wifi.esRemoto();
+
+            // Si estamos en LAN y llegan paquetes UDP normalmente, no hacer polling TCP
+            if (!esRemoto) {
+                const ultimoUdp = this.wifi.obtenerUltimoPaqueteUdpMs();
+                if (
+                    (ultimoUdp > 0 && ahora - ultimoUdp < FirmwareRPCClient.UMBRAL_SILENCIO_UDP_MS) ||
+                    ahora - this.inicioStreamWiFiMs < FirmwareRPCClient.UMBRAL_SILENCIO_UDP_MS
+                ) {
+                    return;
+                }
+            }
+
+            // Cede prioridad si el usuario tiene otra petición en cola o en vuelo
+            if (this.colaTareas.length > 0 || this.pendientes.size > 0) {
+                return;
+            }
+
+            if (!this.fallbackStreamTcpLogEmitido) {
+                this.fallbackStreamTcpLogEmitido = true;
+                this.registrarLogVisor(
+                    esRemoto
+                        ? "[WIFI-STREAM] Enlace Internet/Túnel: telemetría en vivo activa sobre TCP cifrado (1.5 s)."
+                        : "[WIFI-STREAM] Sin datagramas UDP recibidos: activando fallback automático sobre TCP cifrado (1.5 s)."
+                );
+            }
+
+            for (const [idProc, cb] of this.listenersStreamPorProc.entries()) {
+                this.invocarPorId(idProc, Buffer.alloc(0), {
+                    deduplicable: true,
+                    prioridad: PrioridadRPC.NORMAL,
+                    cacheTtlMs: 0
+                })
+                    .then(raw => cb(raw))
+                    .catch(() => {
+                        // Silencioso: si el enlace cayó lo gestiona el keepalive/close del socket
+                    });
+            }
+        }, FirmwareRPCClient.INTERVALO_FALLBACK_STREAM_MS);
+    }
+
+    private detenerFallbackStreamTcp(): void {
+        if (this.timerFallbackStreamTcp) {
+            clearInterval(this.timerFallbackStreamTcp);
+            this.timerFallbackStreamTcp = undefined;
+        }
+        this.inicioStreamWiFiMs = 0;
+        this.fallbackStreamTcpLogEmitido = false;
     }
 
     invocarPorId(
@@ -361,7 +451,6 @@ export class FirmwareRPCClient {
             if (prioridad === PrioridadRPC.NORMAL) {
                 return Promise.reject(new Error("BusyError: cola local de consultas saturada"));
             }
-            // Si llega una tarea CRITICA/ALTA, descarta la consulta NORMAL más antigua para hacer lugar
             const idxNormal = this.colaTareas.findIndex(t => t.prioridad === PrioridadRPC.NORMAL);
             if (idxNormal >= 0) {
                 const [descartada] = this.colaTareas.splice(idxNormal, 1);
@@ -451,7 +540,9 @@ export class FirmwareRPCClient {
                         this.estaConectado() &&
                         tarea.reintentosBusy < FirmwareRPCClient.MAX_REINTENTOS_BUSY
                     ) {
-                        const esperaMs = FirmwareRPCClient.BACKOFF_BUSY_MS[tarea.reintentosBusy] ?? 900;
+                        const baseMs = FirmwareRPCClient.BACKOFF_BUSY_MS[tarea.reintentosBusy] ?? 1200;
+                        // Jitter aleatorio (0..160 ms) para evitar colisiones sincronizadas con 2-4 clientes
+                        const esperaMs = baseMs + Math.floor(Math.random() * 160);
                         tarea.reintentosBusy++;
                         this.registrarLogVisor(
                             `[COLA RPC] BusyError en 0x${tarea.idProc.toString(16)}; reintento ${tarea.reintentosBusy}/${FirmwareRPCClient.MAX_REINTENTOS_BUSY} en ${esperaMs} ms`
@@ -537,7 +628,12 @@ export class FirmwareRPCClient {
             if (this.pendientes.size > 0 || this.colaTareas.length > 0) {
                 return;
             }
-            if (Date.now() - this.ultimoContactoMs < FirmwareRPCClient.UMBRAL_SILENCIO_KEEPALIVE_MS) {
+            const umbralSilencio =
+                this.medioActivo === "WIFI" && this.wifi.esRemoto()
+                    ? FirmwareRPCClient.UMBRAL_SILENCIO_KEEPALIVE_WAN
+                    : FirmwareRPCClient.UMBRAL_SILENCIO_KEEPALIVE_LAN;
+
+            if (Date.now() - this.ultimoContactoMs < umbralSilencio) {
                 return;
             }
 
@@ -568,6 +664,7 @@ export class FirmwareRPCClient {
 
     private limpiarEstadoAlDesconectar(): void {
         this.detenerPulsoKeepaliveAutomatico();
+        this.detenerFallbackStreamTcp();
         this.medioActivo = "NINGUNO";
         this.udpWiFiVinculado = false;
         this.promesaSuscripcionUdp = null;

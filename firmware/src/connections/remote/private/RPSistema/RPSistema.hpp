@@ -229,7 +229,7 @@ namespace RPSistema {
         dto.stackLibreMinBytes   = t.obtenerStackLibreMin();
         dto.ciclosEjecutados     = t.obtenerCiclos();
         dto.maxTiempoEjecucionUs = t.obtenerMaxTiempoUs();
-        dto.msDesdeUltimoLatido  = millis() - t.obtenerUltimoLatidoMs();
+        dto.msDesdeUltimoLatido  = t.msDesdeUltimoLatido();
         dto.reiniciosBios        = t.obtenerReiniciosBios();
         dto.activa               = t.estaActiva();
         dto.enEjecucionPaso      = t.estaEjecutandoPaso();
@@ -449,32 +449,48 @@ namespace RPSistema {
         RolUsuario::ADMIN
     );
 
-    // 10. Leer el archivo /db/help.log generado por la tarea BIOS/OS
+    // 10. Leer el archivo /db/help.log (con fallback automático a la Caja Negra en Flash NVS)
     inline auto leerHelpLogBios = llamadoSemantico.alMenosUnaVez<void, ReporteHelpLogBiosDTO>(
         "leerHelpLogBios",
         []() -> ReporteHelpLogBiosDTO {
             ReporteHelpLogBiosDTO out{};
             out.incidentesTotalesBios = RTOS::Tasks::TaskBiosRTOS::obtenerTotalIncidentes();
 
+            auto cargarDesdeNvsOSinIncidentes = [&]() {
+                char nvsBuf[480]{};
+                if (RTOS::Tasks::TaskBiosRTOS::leerRespaldoNvs(nvsBuf, sizeof(nvsBuf))) {
+                    char conPrefijo[512]{};
+                    snprintf(conPrefijo, sizeof(conPrefijo), "[NVS] %.495s", nvsBuf);
+                    out.ultimosRegistrosLog = conPrefijo;
+                } else {
+                    out.ultimosRegistrosLog = "SIN_INCIDENTES_BIOS";
+                }
+            };
+
             TarjetaSD& sd = TarjetaSD::getInstance();
             if (!sd.estaInicializada() || !sd.existeArchivo(RTOS::Tasks::TaskBiosRTOS::RUTA_HELP_LOG)) {
-                out.ultimosRegistrosLog = "SIN_INCIDENTES_BIOS";
+                cargarDesdeNvsOSinIncidentes();
                 return out;
             }
 
             auto lk = DbRuntime::Storage::RuntimeStorageAndIndexManager::lockEngine();
             File f = SD.open(RTOS::Tasks::TaskBiosRTOS::RUTA_HELP_LOG, FILE_READ);
             if (!f) {
-                out.ultimosRegistrosLog = "ERROR_LECTURA_HELP_LOG";
+                cargarDesdeNvsOSinIncidentes();
                 return out;
             }
 
-            size_t size = f.size();
+            const size_t size = f.size();
+            if (size == 0) {
+                f.close();
+                cargarDesdeNvsOSinIncidentes();
+                return out;
+            }
             if (size > 500) {
                 f.seek(size - 500);
             }
             char buf[512]{};
-            size_t leidos = f.readBytes(buf, sizeof(buf) - 1);
+            const size_t leidos = f.readBytes(buf, sizeof(buf) - 1);
             buf[leidos] = '\0';
             f.close();
 

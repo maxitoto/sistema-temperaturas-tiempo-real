@@ -152,7 +152,7 @@ namespace RTOS {
         uint32_t obtenerDesbordes() const { return fallosColaLlena.load(std::memory_order_relaxed); }
     };
 
-    // 4. TAREA SEGURA CON TELEMETRÍA Y RECUPERACIÓN POR BIOS
+    // 4. TAREA SEGURA CON TELEMETRÍA Y LATIDO SEGURO ENTRE NÚCLEOS
     class TareaSegura {
     public:
         using FuncionPaso = void (*)(void* ctx);
@@ -177,10 +177,10 @@ namespace RTOS {
 
         static void puntoEntradaEstatico(void* param) {
             TareaSegura* self = static_cast<TareaSegura*>(param);
-            self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+            self->marcarLatido();
 
             while (self->seguirEjecutando.load(std::memory_order_relaxed)) {
-                self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+                self->marcarLatido();
                 self->enEjecucionPaso.store(true, std::memory_order_relaxed);
 
                 int64_t t0 = esp_timer_get_time();
@@ -190,7 +190,7 @@ namespace RTOS {
                 uint32_t dt = static_cast<uint32_t>(esp_timer_get_time() - t0);
 
                 self->enEjecucionPaso.store(false, std::memory_order_relaxed);
-                self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+                self->marcarLatido();
 
                 uint32_t prevMax = self->maxTiempoEjecucionUs.load(std::memory_order_relaxed);
                 if (dt > prevMax) {
@@ -204,7 +204,7 @@ namespace RTOS {
                     uint32_t paso = (restante > 50) ? 50 : restante;
                     vTaskDelay(pdMS_TO_TICKS(paso));
                     restante -= paso;
-                    self->ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+                    self->marcarLatido();
                 }
             }
             self->enEjecucionPaso.store(false, std::memory_order_relaxed);
@@ -234,7 +234,7 @@ namespace RTOS {
             nucleo              = coreId;
             seguirEjecutando.store(true, std::memory_order_relaxed);
             enEjecucionPaso.store(false, std::memory_order_relaxed);
-            ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
+            marcarLatido();
 
             TaskHandle_t nuevoHandle = nullptr;
             BaseType_t res = xTaskCreatePinnedToCore(
@@ -254,33 +254,23 @@ namespace RTOS {
             return true;
         }
 
-        // Usado exclusivamente por TaskBiosRTOS cuando una tarea queda colgada sin retener mutex críticos
-        bool reiniciarForzadoPorBios() {
-            TaskHandle_t hActual = handle.exchange(nullptr, std::memory_order_relaxed);
-            if (hActual != nullptr) {
-                vTaskDelete(hActual);
-            }
-            enEjecucionPaso.store(false, std::memory_order_relaxed);
-            seguirEjecutando.store(true, std::memory_order_relaxed);
-            ultimoLatidoMs.store(millis(), std::memory_order_relaxed);
-            reiniciosBios.fetch_add(1, std::memory_order_relaxed);
+        // Permite refrescar el latido durante operaciones largas legítimas (ej. SMTP TLS o escaneo 1-Wire)
+        void marcarLatido() {
+            ultimoLatidoMs.store(millis(), std::memory_order_release);
+        }
 
-            TaskHandle_t nuevoHandle = nullptr;
-            BaseType_t res = xTaskCreatePinnedToCore(
-                &TareaSegura::puntoEntradaEstatico,
-                nombre,
-                stackReservadoBytes,
-                this,
-                prioridad,
-                &nuevoHandle,
-                nucleo
-            );
-            if (res != pdPASS) {
-                seguirEjecutando.store(false, std::memory_order_relaxed);
-                return false;
-            }
-            handle.store(nuevoHandle, std::memory_order_relaxed);
-            return true;
+        // Cálculo inmune a underflow entre núcleos: lee el latido primero y compara con signo
+        uint32_t msDesdeUltimoLatido() const {
+            const uint32_t latido = ultimoLatidoMs.load(std::memory_order_acquire);
+            const uint32_t ahora  = millis();
+            const int32_t  diff   = static_cast<int32_t>(ahora - latido);
+            return (diff > 0) ? static_cast<uint32_t>(diff) : 0u;
+        }
+
+        // Conservado solo por compatibilidad de firma; TaskBiosRTOS ya no mata tareas en caliente
+        bool reiniciarForzadoPorBios() {
+            reiniciosBios.fetch_add(1, std::memory_order_relaxed);
+            return false;
         }
 
         bool eliminarTarea() {
@@ -306,7 +296,7 @@ namespace RTOS {
         uint32_t obtenerCiclos() const       { return ciclosEjecutados.load(std::memory_order_relaxed); }
         uint32_t obtenerMaxTiempoUs() const  { return maxTiempoEjecucionUs.load(std::memory_order_relaxed); }
         uint32_t obtenerStackLibreMin() const{ return minStackLibreBytes.load(std::memory_order_relaxed); }
-        uint32_t obtenerUltimoLatidoMs()const{ return ultimoLatidoMs.load(std::memory_order_relaxed); }
+        uint32_t obtenerUltimoLatidoMs()const{ return ultimoLatidoMs.load(std::memory_order_acquire); }
         bool estaEjecutandoPaso() const      { return enEjecucionPaso.load(std::memory_order_relaxed); }
         uint16_t obtenerReiniciosBios() const{ return reiniciosBios.load(std::memory_order_relaxed); }
     };

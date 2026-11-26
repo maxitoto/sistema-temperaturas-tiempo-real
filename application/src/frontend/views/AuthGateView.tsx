@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Usb,
   Wifi,
+  Globe,
   RefreshCw,
   Lock,
   User,
@@ -45,10 +46,16 @@ function leerDatosRecordados(): DatosRecordadosLogin {
     const parsed = JSON.parse(raw) as Partial<DatosRecordadosLogin>;
     return {
       recordar: Boolean(parsed.recordar),
-      usuario: typeof parsed.usuario === "string" && parsed.usuario ? parsed.usuario : "admin",
+      usuario:
+        typeof parsed.usuario === "string" && parsed.usuario
+          ? parsed.usuario
+          : "admin",
       clave: typeof parsed.clave === "string" ? parsed.clave : "",
       tab: parsed.tab === "WIFI" ? "WIFI" : "UARTS",
-      ipWifi: typeof parsed.ipWifi === "string" && parsed.ipWifi ? parsed.ipWifi : "192.168.4.1",
+      ipWifi:
+        typeof parsed.ipWifi === "string" && parsed.ipWifi
+          ? parsed.ipWifi
+          : "192.168.4.1",
     };
   } catch {
     return {
@@ -71,6 +78,52 @@ function guardarDatosRecordados(datos: DatosRecordadosLogin | null) {
   } catch {
     // Ignorar si localStorage no está disponible
   }
+}
+
+function clasificarDestinoWifi(raw: string): {
+  tipo: "SOFTAP" | "LAN" | "INTERNET";
+  etiqueta: string;
+  puertoEfectivo: number;
+} {
+  let limpio = raw.trim().replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+  limpio = limpio.split("/")[0]?.trim() ?? "";
+
+  let host = limpio;
+  let puertoEfectivo = 8443;
+  const idxDosPuntos = limpio.lastIndexOf(":");
+  if (idxDosPuntos > 0 && limpio.indexOf(":") === idxDosPuntos) {
+    host = limpio.slice(0, idxDosPuntos).trim();
+    const p = Number(limpio.slice(idxDosPuntos + 1).trim());
+    if (Number.isInteger(p) && p >= 1 && p <= 65535) {
+      puertoEfectivo = p;
+    }
+  }
+
+  const h = host.toLowerCase();
+  if (h === "192.168.4.1") {
+    return { tipo: "SOFTAP", etiqueta: "SoftAP Directo (ESP32)", puertoEfectivo };
+  }
+  if (!h || h === "localhost" || h.endsWith(".local")) {
+    return { tipo: "LAN", etiqueta: "Red Local (LAN)", puertoEfectivo };
+  }
+
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (
+      a === 10 ||
+      a === 127 ||
+      (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 169 && b === 254)
+    ) {
+      return { tipo: "LAN", etiqueta: "Red Local (STA)", puertoEfectivo };
+    }
+    return { tipo: "INTERNET", etiqueta: "IP Pública (Internet)", puertoEfectivo };
+  }
+
+  return { tipo: "INTERNET", etiqueta: "Dominio Remoto (Internet)", puertoEfectivo };
 }
 
 export function AuthGate() {
@@ -104,6 +157,8 @@ export function AuthGate() {
 
   const [mostrarLogs, setMostrarLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+
+  const destinoInfo = useMemo(() => clasificarDestinoWifi(ipInput), [ipInput]);
 
   const cargarPuertos = async () => {
     const lista = await safeRpc(
@@ -167,10 +222,11 @@ export function AuthGate() {
 
   const handleConectarWifi = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ipInput.trim()) return;
+    const destino = ipInput.trim();
+    if (!destino) return;
     setCargandoConexion(true);
     try {
-      await conectarWifi(ipInput.trim());
+      await conectarWifi(destino);
     } catch {
       // Ya notificado por AuthContext
     } finally {
@@ -275,8 +331,8 @@ export function AuthGate() {
           <div className="rounded-xl border border-border bg-card p-6 text-card-foreground shadow-lg">
             <h1 className="mb-1 text-xl font-bold">Conexión Física L1</h1>
             <p className="mb-4 text-xs text-foreground-secondary">
-              Seleccione el enlace físico hacia el nodo ESP32 antes de
-              autenticarse.
+              Seleccione el enlace hacia el nodo ESP32 (USB, Red Local o
+              Internet) antes de autenticarse.
             </p>
 
             <div className="mb-5 grid grid-cols-2 gap-2 rounded-lg bg-secondary p-1">
@@ -302,7 +358,7 @@ export function AuthGate() {
                 }`}
               >
                 <Wifi className="h-4 w-4" />
-                WiFi (AEAD + UDP)
+                WiFi / Internet (AEAD)
               </button>
             </div>
 
@@ -358,30 +414,54 @@ export function AuthGate() {
             ) : (
               <form onSubmit={handleConectarWifi} className="space-y-4">
                 <div>
-                  <label className="mb-1.5 block text-xs font-semibold">
-                    Dirección IPv4 del Servidor ESP32 (TCP 8443 + UDP 8266)
-                  </label>
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <label className="text-xs font-semibold">
+                      IP o Dominio del Servidor ESP32
+                    </label>
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        destinoInfo.tipo === "INTERNET"
+                          ? "bg-info-light text-info"
+                          : "bg-secondary text-foreground-secondary"
+                      }`}
+                    >
+                      {destinoInfo.tipo === "INTERNET" ? (
+                        <Globe className="h-3 w-3" />
+                      ) : (
+                        <Wifi className="h-3 w-3" />
+                      )}
+                      {destinoInfo.etiqueta} · :{destinoInfo.puertoEfectivo}
+                    </span>
+                  </div>
+
                   <input
                     type="text"
                     value={ipInput}
                     onChange={(e) => setIpInput(e.target.value)}
-                    placeholder="192.168.4.1"
+                    placeholder="192.168.4.1 o dominio:puerto"
                     className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
                   />
-                  <div className="mt-2 flex flex-wrap gap-2">
+
+                  <p className="mt-1.5 text-[11px] text-foreground-secondary">
+                    Admite IP local, IP pública o dominio (ej.{" "}
+                    <code>mi-nodo.a.pinggy.link:41234</code>). Si omite el
+                    puerto usa <code>8443</code>. Cifrado AES-128-GCM activo.
+                  </p>
+
+                  <div className="mt-2.5 flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => setIpInput("192.168.4.1")}
                       className="rounded border border-border bg-secondary px-2.5 py-1 font-mono text-xs hover:bg-hover"
                     >
-                      192.168.4.1 (SoftAP ESP32)
+                      192.168.4.1 (SoftAP)
                     </button>
                     <button
                       type="button"
                       onClick={() => setIpInput("192.168.1.15")}
                       className="rounded border border-border bg-secondary px-2.5 py-1 font-mono text-xs hover:bg-hover"
                     >
-                      192.168.1.15 (Red Local STA)
+                      192.168.1.15 (STA LAN)
                     </button>
                   </div>
                 </div>
@@ -393,10 +473,14 @@ export function AuthGate() {
                 >
                   {cargandoConexion ? (
                     <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : destinoInfo.tipo === "INTERNET" ? (
+                    <Globe className="h-4 w-4" />
                   ) : (
                     <Wifi className="h-4 w-4" />
                   )}
-                  Conectar por WiFi
+                  {destinoInfo.tipo === "INTERNET"
+                    ? "Conectar por Internet (Remoto)"
+                    : "Conectar por WiFi"}
                 </button>
               </form>
             )}
@@ -408,6 +492,8 @@ export function AuthGate() {
               <div className="flex items-center gap-2 font-semibold text-alert-success-icon">
                 {medioActivo === "UART-S" ? (
                   <Usb className="h-4 w-4" />
+                ) : destinoInfo.tipo === "INTERNET" ? (
+                  <Globe className="h-4 w-4" />
                 ) : (
                   <Wifi className="h-4 w-4" />
                 )}

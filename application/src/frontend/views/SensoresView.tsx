@@ -1106,14 +1106,6 @@ export function SensoresView({
   };
 
   // Cálculo del estado vivo actual del sensor seleccionado
-  const alertaAltaVivo =
-    perfil !== null &&
-    lecturaViva !== null &&
-    lecturaViva.temperaturaCorregida >= perfil.umbralSup;
-  const alertaBajaVivo =
-    perfil !== null &&
-    lecturaViva !== null &&
-    lecturaViva.temperaturaCorregida <= perfil.umbralInf;
   const estadoVivo = resolverEstadoLecturaVivo(
     lecturaViva?.temperaturaCorregida,
     perfil?.umbralInf,

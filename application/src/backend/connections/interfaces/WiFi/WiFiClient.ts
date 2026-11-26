@@ -14,6 +14,81 @@ export interface WiFiClientEvents {
     onDebugLog?: (linea: string) => void;
 }
 
+export interface DestinoWiFiParseado {
+    host: string;
+    puerto: number;
+    esRemoto: boolean;
+    etiqueta: string;
+}
+
+function esHostLocalOLan(host: string): boolean {
+    const h = host.trim().toLowerCase();
+    if (!h) return true;
+    if (h === "localhost" || h === "::1" || h.endsWith(".local")) return true;
+
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) {
+        // Dominio público (ej. ngrok, pinggy, duckdns, dominio propio)
+        return false;
+    }
+
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a === 10 || a === 127) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+}
+
+export function parsearDestinoWiFi(
+    destinoCrudo: string,
+    puertoDefecto = WiFiClient.PUERTO_TCP_SERVIDOR
+): DestinoWiFiParseado {
+    let limpio = String(destinoCrudo ?? "").trim();
+    // Elimina esquemas si el usuario copia desde ngrok/pinggy/navegador (ej. tcp://host:12345)
+    limpio = limpio.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+    limpio = limpio.split("/")[0]?.trim() ?? "";
+
+    if (!limpio) {
+        throw new Error("ValueError: ingrese una dirección IP o dominio válido");
+    }
+
+    let host = limpio;
+    let puerto = puertoDefecto;
+
+    // Formato IPv6 con puerto: [::1]:8443
+    if (limpio.startsWith("[")) {
+        const cierre = limpio.indexOf("]");
+        if (cierre < 0) {
+            throw new Error("ValueError: dirección IPv6 mal formada");
+        }
+        host = limpio.slice(1, cierre).trim();
+        const resto = limpio.slice(cierre + 1).trim();
+        if (resto.startsWith(":")) {
+            puerto = Number(resto.slice(1));
+        }
+    } else {
+        const primerDosPuntos = limpio.indexOf(":");
+        const ultimoDosPuntos = limpio.lastIndexOf(":");
+        if (primerDosPuntos > 0 && primerDosPuntos === ultimoDosPuntos) {
+            host = limpio.slice(0, primerDosPuntos).trim();
+            puerto = Number(limpio.slice(primerDosPuntos + 1).trim());
+        }
+    }
+
+    if (!host || /\s/.test(host)) {
+        throw new Error(`ValueError: host inválido "${destinoCrudo}"`);
+    }
+    if (!Number.isInteger(puerto) || puerto < 1 || puerto > 65535) {
+        throw new Error(`ValueError: puerto TCP inválido (${puerto}). Use un valor entre 1 y 65535`);
+    }
+
+    const esRemoto = !esHostLocalOLan(host);
+    const etiqueta = puerto === puertoDefecto ? host : `${host}:${puerto}`;
+    return { host, puerto, esRemoto, etiqueta };
+}
+
 export class WiFiClient {
     public static readonly PUERTO_TCP_SERVIDOR = 8443;
     public static readonly PUERTO_UDP_SERVIDOR = 8266;
@@ -23,6 +98,9 @@ export class WiFiClient {
     private bufferAcumuladoTcp: Buffer = Buffer.alloc(0);
     private conectado = false;
     private puertoUdpLocal = 0;
+
+    private destinoActual: DestinoWiFiParseado | null = null;
+    private ultimoPaqueteUdpMs = 0;
 
     private readonly ccm = new EstadoSesionCcmCliente();
 
@@ -50,9 +128,14 @@ export class WiFiClient {
         }
     }
 
-    async conectar(ipServidor: string, timeoutMs = 5000): Promise<void> {
+    async conectar(destinoServidor: string, timeoutMs?: number): Promise<void> {
+        const destino = parsearDestinoWiFi(destinoServidor);
+        const timeoutEfectivo = timeoutMs ?? (destino.esRemoto ? 10000 : 5000);
+
         await this.cerrar();
         this.ccm.reiniciar();
+        this.destinoActual = destino;
+        this.ultimoPaqueteUdpMs = 0;
 
         await new Promise<void>((resolve, reject) => {
             const socket = new net.Socket();
@@ -62,15 +145,22 @@ export class WiFiClient {
             const timer = setTimeout(() => {
                 socket.removeAllListeners();
                 socket.destroy();
-                reject(new Error(`Tiempo agotado conectando a ${ipServidor}:${WiFiClient.PUERTO_TCP_SERVIDOR}`));
-            }, timeoutMs);
+                reject(
+                    new Error(
+                        `Tiempo agotado conectando a ${destino.host}:${destino.puerto}`
+                    )
+                );
+            }, timeoutEfectivo);
 
-            socket.connect(WiFiClient.PUERTO_TCP_SERVIDOR, ipServidor, () => {
+            socket.connect({ host: destino.host, port: destino.puerto }, () => {
                 clearTimeout(timer);
                 this.socketTcp = socket;
                 this.conectado = true;
+                const ipResuelta = socket.remoteAddress ? ` [${socket.remoteAddress}]` : "";
                 this.eventos.onDebugLog?.(
-                    `[ESTADO WIFI] -> CONECTADO (${ipServidor}:${WiFiClient.PUERTO_TCP_SERVIDOR}) · CCM:${WIFI_CIFRADO_CCM_ACTIVO ? "ON" : "OFF"}`
+                    `[ESTADO WIFI] -> CONECTADO (${destino.host}:${destino.puerto}${ipResuelta} · ${
+                        destino.esRemoto ? "INTERNET" : "LAN"
+                    }) · CCM:${WIFI_CIFRADO_CCM_ACTIVO ? "ON" : "OFF"}`
                 );
                 resolve();
             });
@@ -82,12 +172,28 @@ export class WiFiClient {
                 socket.destroy();
             });
 
-            socket.on("error", (err: Error) => {
+            socket.on("error", (err: NodeJS.ErrnoException) => {
                 clearTimeout(timer);
                 if (this.socketTcp === socket) {
                     this.eventos.onError?.(err);
                 } else {
-                    reject(err);
+                    if (err.code === "ENOTFOUND") {
+                        reject(new Error(`DNSError: no se pudo resolver el dominio "${destino.host}"`));
+                    } else if (err.code === "ECONNREFUSED") {
+                        reject(
+                            new Error(
+                                `ConnectionRefused: ${destino.host}:${destino.puerto} rechazó la conexión (verifique ESP32 o túnel)`
+                            )
+                        );
+                    } else if (err.code === "ETIMEDOUT" || err.code === "EHOSTUNREACH") {
+                        reject(
+                            new Error(
+                                `NetworkError: sin ruta hacia ${destino.host}:${destino.puerto}`
+                            )
+                        );
+                    } else {
+                        reject(err);
+                    }
                 }
             });
 
@@ -96,13 +202,17 @@ export class WiFiClient {
                     this.socketTcp = null;
                     this.conectado = false;
                     this.bufferAcumuladoTcp = Buffer.alloc(0);
+                    this.ultimoPaqueteUdpMs = 0;
                     this.ccm.reiniciar();
                     this.eventos.onDisconnect?.();
                 }
             });
         });
 
-        await this.abrirReceptorUdpLocal();
+        // En red local/SoftAP abrimos receptor UDP para telemetría en vivo; en Internet usa fallback TCP cifrado
+        if (!destino.esRemoto) {
+            await this.abrirReceptorUdpLocal();
+        }
     }
 
     private async abrirReceptorUdpLocal(): Promise<void> {
@@ -113,6 +223,7 @@ export class WiFiClient {
                 if (msg.length < 8) return;
 
                 if (!WIFI_CIFRADO_CCM_ACTIVO) {
+                    this.ultimoPaqueteUdpMs = Date.now();
                     this.registrarLogFrame("RX <", "UDP", msg);
                     this.eventos.onMessage?.(msg);
                     return;
@@ -132,6 +243,7 @@ export class WiFiClient {
                     return;
                 }
 
+                this.ultimoPaqueteUdpMs = Date.now();
                 this.registrarLogFrame("RX <", "UDP", res.framePlanoConLen, ` [CCM SEQ:${res.seq}]`);
                 this.eventos.onMessage?.(res.framePlanoConLen);
             });
@@ -214,6 +326,18 @@ export class WiFiClient {
         return this.puertoUdpLocal;
     }
 
+    obtenerUltimoPaqueteUdpMs(): number {
+        return this.ultimoPaqueteUdpMs;
+    }
+
+    esRemoto(): boolean {
+        return this.destinoActual?.esRemoto ?? false;
+    }
+
+    obtenerDestinoActual(): DestinoWiFiParseado | null {
+        return this.destinoActual;
+    }
+
     estaConectado(): boolean {
         return this.conectado;
     }
@@ -221,6 +345,8 @@ export class WiFiClient {
     async cerrar(): Promise<void> {
         this.conectado = false;
         this.bufferAcumuladoTcp = Buffer.alloc(0);
+        this.ultimoPaqueteUdpMs = 0;
+        this.destinoActual = null;
         this.ccm.reiniciar();
 
         if (this.socketUdp) {
