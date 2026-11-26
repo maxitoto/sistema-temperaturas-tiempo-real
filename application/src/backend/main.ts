@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { startHandlers } from './handles';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = join(__dirname, '../../');
+process.env.APP_ROOT = app.isPackaged
+  ? app.getAppPath()
+  : join(__dirname, '../../');
 
 export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
 
@@ -44,7 +46,9 @@ function createWindow() {
 app.disableHardwareAcceleration();
 
 app.whenReady().then(async () => {
-  
+  console.log('APP_ROOT:', process.env.APP_ROOT);
+  console.log('RENDERER_DIST:', process.env.RENDERER_DIST);
+  console.log('isPackaged:', app.isPackaged);
   startHandlers();
   createWindow();
 });

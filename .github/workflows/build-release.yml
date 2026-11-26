@@ -19,8 +19,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            platform: mac
-            builder_args: --mac
+            platform: mac-x64
+            builder_args: --mac --x64
+          - os: macos-lates 
+            platform: mac-arm64
+            builder_args: --mac --arm64
           - os: ubuntu-latest
             platform: linux
             builder_args: --linux --x64
