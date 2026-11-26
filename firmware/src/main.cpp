@@ -4,6 +4,7 @@
 #include "database/repositories/repoCalibracion.hpp"
 #include "database/repositories/repoServidorNtp.hpp"
 #include "database/repositories/repoConfiguracionSmtp.hpp"
+#include "database/repositories/repoConfiguracionRed.hpp"
 #include "database/repositories/repoAuditoriaSistema.hpp"
 #include "database/repositories/repoUsuario.hpp"
 #include "hardware/driver/tarjetasd/TarjetaSD.hpp"
@@ -17,6 +18,7 @@ UARTSRuntime uartsRuntime(Serial);
 WiFiInicializador wifiInicializador;
 WiFiRuntime wifiRuntime(wifiInicializador);
 WiFiTcpTlsRuntime wifiTcpRuntime;
+WiFiRelayClient wifiRelayClient;
 WiFiUdpPlainRuntime wifiUdpRuntime;
 
 // Instancias globales de los 3 dominios de middlewares (L3, L2 y L1)
@@ -66,6 +68,11 @@ void setup() {
         DbRuntime::Repositories::RepoCalibracion::obtenerOInicializar(cfgCal);
     } catch (...) {}
 
+    DbRuntime::Repositories::ConfiguracionRedDTO cfgRed{};
+    try {
+        DbRuntime::Repositories::RepoConfiguracionRed::obtenerOInicializar(cfgRed);
+    } catch (...) {}
+
     try {
         auto servidoresNtp = DbRuntime::Repositories::RepoServidoresNtp::listarActivosPorPrioridad(3);
         RTOS::RelojSistema::configurarParametrosRed(
@@ -78,8 +85,16 @@ void setup() {
         RTOS::RelojSistema::configurarParametrosRed(cfgSis.zonaHorariaMin);
     }
 
-    // 3. Inicializar comunicaciones serie y red WiFi
+    // 3. Inicializar comunicaciones serie, red WiFi y cliente Reverse TCP Relay
     uartsRuntime.abrirPuertoServidor();
+    wifiTcpRuntime.vincularRelay(&wifiRelayClient);
+    wifiRelayClient.configurar(
+        cfgRed.relay_activa,
+        cfgRed.relay_host.c_str(),
+        static_cast<uint16_t>(cfgRed.relay_puerto),
+        cfgRed.relay_node_id.c_str(),
+        cfgRed.relay_secreto.c_str()
+    );
 
     if (wifiInicializador.iniciarRedDesdeBaseDeDatos()) {
         wifiTcpRuntime.iniciarServidorSeguro();
@@ -102,7 +117,7 @@ void setup() {
     strncpy(regBoot.detalle, "BOOT_SISTEMA_INICIALIZADO", sizeof(regBoot.detalle) - 1);
     RTOS::encolarPersistencia(regBoot);
 
-    // 8. Lanzar las 4 tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED y Comunicaciones)
+    // 6. Lanzar las tareas definitivas de FreeRTOS (Alertas/DB, Sensores, OLED, Comunicaciones y BIOS)
     colaTrabajoRpc.inicializar();
 
     RTOS::GestorRTOS::iniciarSistemaCompleto(

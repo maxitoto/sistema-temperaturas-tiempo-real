@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "../WiFiRelay/WiFiRelayClient.hpp"
 
 struct NuevoClienteAceptado {
     uint8_t slotAsignado;
@@ -15,18 +16,188 @@ struct NuevoClienteAceptado {
 
 class WiFiTcpTlsRuntime {
 public:
-    static constexpr uint16_t PUERTO_SERVIDOR_TLS = 8443;
-    static constexpr uint8_t MAXIMO_CLIENTES_TLS = 4;
+    static constexpr uint16_t PUERTO_SERVIDOR_TLS     = 8443;
+    static constexpr uint8_t  MAXIMO_CLIENTES_TLS     = 4;
     static constexpr uint32_t INTERVALO_MIN_ACCEPT_MS = 50;
+    static constexpr size_t   CAPACIDAD_RX_RELAY_SLOT = 512;
 
 private:
+    struct ColaBytesRelay {
+        uint8_t datos[CAPACIDAD_RX_RELAY_SLOT]{0};
+        size_t  cabeza{0};
+        size_t  cola{0};
+        size_t  cantidad{0};
+
+        void limpiar() {
+            cabeza   = 0;
+            cola     = 0;
+            cantidad = 0;
+        }
+
+        bool escribir(const uint8_t* src, size_t len) {
+            if (!src || len == 0) return true;
+            if (len > (CAPACIDAD_RX_RELAY_SLOT - cantidad)) {
+                return false;
+            }
+            const size_t primerTramo = CAPACIDAD_RX_RELAY_SLOT - cabeza;
+            if (len <= primerTramo) {
+                memcpy(datos + cabeza, src, len);
+                cabeza = (cabeza + len) % CAPACIDAD_RX_RELAY_SLOT;
+            } else {
+                memcpy(datos + cabeza, src, primerTramo);
+                memcpy(datos, src + primerTramo, len - primerTramo);
+                cabeza = len - primerTramo;
+            }
+            cantidad += len;
+            return true;
+        }
+
+        size_t leer(uint8_t* dst, size_t maxLen) {
+            if (!dst || maxLen == 0 || cantidad == 0) return 0;
+            const size_t aLeer = (cantidad < maxLen) ? cantidad : maxLen;
+            const size_t primerTramo = CAPACIDAD_RX_RELAY_SLOT - cola;
+            if (aLeer <= primerTramo) {
+                memcpy(dst, datos + cola, aLeer);
+                cola = (cola + aLeer) % CAPACIDAD_RX_RELAY_SLOT;
+            } else {
+                memcpy(dst, datos + cola, primerTramo);
+                memcpy(dst + primerTramo, datos, aLeer - primerTramo);
+                cola = aLeer - primerTramo;
+            }
+            cantidad -= aLeer;
+            return aLeer;
+        }
+    };
+
     WiFiServer servidorTcp{PUERTO_SERVIDOR_TLS};
     WiFiClient clientesTcp[MAXIMO_CLIENTES_TLS]{};
-    bool slotOcupado[MAXIMO_CLIENTES_TLS]{false};
-    uint32_t ultimoHandshakeMs{0};
+    bool       slotOcupado[MAXIMO_CLIENTES_TLS]{false};
+    uint32_t   ultimoHandshakeMs{0};
+
+    // Estado por slot para clientes remotos multiplexados sobre WiFiRelayClient
+    WiFiRelayClient* refRelay{nullptr};
+    bool             esRelay[MAXIMO_CLIENTES_TLS]{false};
+    bool             pendienteAceptarRelay[MAXIMO_CLIENTES_TLS]{false};
+    bool             caidoRelay[MAXIMO_CLIENTES_TLS]{false};
+    uint8_t          sidRelay[MAXIMO_CLIENTES_TLS]{0};
+    ColaBytesRelay   rxRelay[MAXIMO_CLIENTES_TLS]{};
+
+    int8_t buscarIndicePorSid(uint8_t sid) const {
+        if (sid == 0) return -1;
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (slotOcupado[i] && esRelay[i] && !caidoRelay[i] && sidRelay[i] == sid) {
+                return static_cast<int8_t>(i);
+            }
+        }
+        return -1;
+    }
+
+    // ¿Cómo lo hace?: Asigna el primer slot libre a un cliente remoto entrante o devuelve OP_CLOSE si los 4 slots están llenos.
+    void manejarAbrirClienteRelay(uint8_t sid) {
+        if (sid == 0) return;
+
+        // Si el VPS reutiliza un sid que ya estaba mapeado, se cierra primero para evitar duplicados
+        const int8_t existente = buscarIndicePorSid(sid);
+        if (existente >= 0) {
+            caidoRelay[existente]            = true;
+            pendienteAceptarRelay[existente] = false;
+            sidRelay[existente]              = 0;
+            rxRelay[existente].limpiar();
+        }
+
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (!slotOcupado[i] || (!esRelay[i] && !clientesTcp[i].connected())) {
+                if (!esRelay[i]) {
+                    clientesTcp[i].stop();
+                }
+                slotOcupado[i]           = true;
+                esRelay[i]               = true;
+                pendienteAceptarRelay[i] = true;
+                caidoRelay[i]            = false;
+                sidRelay[i]              = sid;
+                rxRelay[i].limpiar();
+                return;
+            }
+        }
+
+        // Sin cupo disponible en los 4 slots: rechazar limpiamente al cliente remoto
+        if (refRelay) {
+            refRelay->cerrarClienteRemoto(sid);
+        }
+    }
+
+    // ¿Cómo lo hace?: Inserta los bytes cifrados del cliente remoto en su cola circular RX; si desborda, marca el slot caído.
+    void manejarDatosClienteRelay(uint8_t sid, const uint8_t* data, size_t len) {
+        const int8_t idx = buscarIndicePorSid(sid);
+        if (idx < 0) return;
+
+        if (!rxRelay[idx].escribir(data, len)) {
+            if (refRelay) {
+                refRelay->cerrarClienteRemoto(sid);
+            }
+            caidoRelay[idx]            = true;
+            pendienteAceptarRelay[idx] = false;
+            sidRelay[idx]              = 0;
+            rxRelay[idx].limpiar();
+        }
+    }
+
+    void manejarCerrarClienteRelay(uint8_t sid) {
+        const int8_t idx = buscarIndicePorSid(sid);
+        if (idx < 0) return;
+        caidoRelay[idx]            = true;
+        pendienteAceptarRelay[idx] = false;
+        sidRelay[idx]              = 0;
+        rxRelay[idx].limpiar();
+    }
+
+    void manejarTunelRelayCaido() {
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (slotOcupado[i] && esRelay[i]) {
+                caidoRelay[i]            = true;
+                pendienteAceptarRelay[i] = false;
+                sidRelay[i]              = 0;
+                rxRelay[i].limpiar();
+            }
+        }
+    }
+
+    static void cbAbrirRelay(uint8_t sid, void* ctx) {
+        if (ctx) static_cast<WiFiTcpTlsRuntime*>(ctx)->manejarAbrirClienteRelay(sid);
+    }
+    static void cbDatosRelay(uint8_t sid, const uint8_t* data, size_t len, void* ctx) {
+        if (ctx) static_cast<WiFiTcpTlsRuntime*>(ctx)->manejarDatosClienteRelay(sid, data, len);
+    }
+    static void cbCerrarRelay(uint8_t sid, void* ctx) {
+        if (ctx) static_cast<WiFiTcpTlsRuntime*>(ctx)->manejarCerrarClienteRelay(sid);
+    }
+    static void cbTunelCaido(void* ctx) {
+        if (ctx) static_cast<WiFiTcpTlsRuntime*>(ctx)->manejarTunelRelayCaido();
+    }
 
 public:
     WiFiTcpTlsRuntime() = default;
+
+    // ¿Cómo lo hace?: Vincula la instancia global de WiFiRelayClient y registra los 4 callbacks de multiplexación.
+    void vincularRelay(WiFiRelayClient* relay) {
+        refRelay = relay;
+        if (refRelay) {
+            WiFiRelayClient::Callbacks cbs{};
+            cbs.onAbrirCliente  = &WiFiTcpTlsRuntime::cbAbrirRelay;
+            cbs.onDatosCliente  = &WiFiTcpTlsRuntime::cbDatosRelay;
+            cbs.onCerrarCliente = &WiFiTcpTlsRuntime::cbCerrarRelay;
+            cbs.onTunelCaido    = &WiFiTcpTlsRuntime::cbTunelCaido;
+            cbs.ctx             = this;
+            refRelay->vincularCallbacks(cbs);
+        }
+    }
+
+    // ¿Cómo lo hace?: Ejecuta un paso no bloqueante del cliente Reverse TCP Relay en Core 0.
+    void procesarCicloRelay() {
+        if (refRelay) {
+            refRelay->procesarCiclo();
+        }
+    }
 
     // ¿Cómo lo hace?: Inicia el servidor de sockets WiFiServer en el puerto fijo 8443 sobre todas las interfaces activas (AP y STA).
     bool iniciarServidorSeguro(const char* certPem = nullptr, const char* keyPem = nullptr) {
@@ -37,10 +208,22 @@ public:
         return true;
     }
 
-    // ¿Cómo lo hace?: Consulta servidorTcp.available(), aplica control de tasa de aceptación y asigna el primer slot libre (1..4) al cliente entrante.
+    // ¿Cómo lo hace?: Entrega primero cualquier cliente remoto pendiente del Relay y luego acepta conexiones locales TCP en :8443.
     NuevoClienteAceptado aceptarConexionEntrante() {
         NuevoClienteAceptado resultado{0, "", 0};
 
+        // 1. Clientes remotos entrantes desde el Reverse TCP Relay
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (slotOcupado[i] && esRelay[i] && pendienteAceptarRelay[i] && !caidoRelay[i]) {
+                pendienteAceptarRelay[i] = false;
+                resultado.slotAsignado   = static_cast<uint8_t>(i + 1);
+                snprintf(resultado.ip, sizeof(resultado.ip), "RELAY-%u", static_cast<unsigned>(sidRelay[i]));
+                resultado.puerto         = static_cast<uint16_t>(9440u + sidRelay[i]);
+                return resultado;
+            }
+        }
+
+        // 2. Clientes locales SoftAP / STA en :8443 con control de tasa
         const uint32_t ahoraMs = millis();
         if (static_cast<int32_t>(ahoraMs - ultimoHandshakeMs) < static_cast<int32_t>(INTERVALO_MIN_ACCEPT_MS)) {
             return resultado;
@@ -53,16 +236,22 @@ public:
         ultimoHandshakeMs = ahoraMs;
 
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
-            if (!slotOcupado[i] || !clientesTcp[i].connected()) {
-                clientesTcp[i].stop();
-                clientesTcp[i] = entrante;
+            if (!slotOcupado[i] || (!esRelay[i] && !clientesTcp[i].connected())) {
+                if (!esRelay[i]) {
+                    clientesTcp[i].stop();
+                }
+                clientesTcp[i]           = entrante;
                 clientesTcp[i].setNoDelay(true);
-                slotOcupado[i] = true;
+                slotOcupado[i]           = true;
+                esRelay[i]               = false;
+                pendienteAceptarRelay[i] = false;
+                caidoRelay[i]            = false;
+                sidRelay[i]              = 0;
 
                 resultado.slotAsignado = static_cast<uint8_t>(i + 1);
                 IPAddress ipRemota = clientesTcp[i].remoteIP();
                 snprintf(resultado.ip, sizeof(resultado.ip), "%u.%u.%u.%u",
-                        ipRemota[0], ipRemota[1], ipRemota[2], ipRemota[3]);
+                         ipRemota[0], ipRemota[1], ipRemota[2], ipRemota[3]);
                 resultado.puerto = clientesTcp[i].remotePort();
                 return resultado;
             }
@@ -72,14 +261,25 @@ public:
         return resultado;
     }
 
-    // ¿Cómo lo hace?: Escribe el bloque de bytes en el socket activo del slot indicado (1..4) y verifica que se hayan enviado todos.
+    // ¿Cómo lo hace?: Escribe los bytes cifrados en el socket local o los encapsula en OP_DATA si el slot pertenece al Relay.
     bool enviarBytesACliente(uint8_t slotCliente, const uint8_t* datos, size_t longitud) {
         if (slotCliente < 1 || slotCliente > MAXIMO_CLIENTES_TLS || datos == nullptr || longitud == 0) {
             return false;
         }
 
         const uint8_t idx = static_cast<uint8_t>(slotCliente - 1);
-        if (!slotOcupado[idx] || !clientesTcp[idx].connected()) {
+        if (!slotOcupado[idx]) {
+            return false;
+        }
+
+        if (esRelay[idx]) {
+            if (caidoRelay[idx] || !refRelay || sidRelay[idx] == 0) {
+                return false;
+            }
+            return refRelay->enviarDatosACliente(sidRelay[idx], datos, longitud);
+        }
+
+        if (!clientesTcp[idx].connected()) {
             return false;
         }
 
@@ -87,14 +287,22 @@ public:
         return escritos == longitud;
     }
 
-    // ¿Cómo lo hace?: Lee de forma no bloqueante los bytes disponibles en el socket del slot indicado hasta completar capacidadMaxima.
+    // ¿Cómo lo hace?: Lee de forma no bloqueante del socket TCP local o de la cola circular RX si es un cliente Relay.
     size_t recibirBytesDeCliente(uint8_t slotCliente, uint8_t* bufferDestino, size_t capacidadMaxima) {
         if (slotCliente < 1 || slotCliente > MAXIMO_CLIENTES_TLS || bufferDestino == nullptr || capacidadMaxima == 0) {
             return 0;
         }
 
         const uint8_t idx = static_cast<uint8_t>(slotCliente - 1);
-        if (!slotOcupado[idx] || !clientesTcp[idx].connected()) {
+        if (!slotOcupado[idx]) {
+            return 0;
+        }
+
+        if (esRelay[idx]) {
+            return caidoRelay[idx] ? 0 : rxRelay[idx].leer(bufferDestino, capacidadMaxima);
+        }
+
+        if (!clientesTcp[idx].connected()) {
             return 0;
         }
 
@@ -111,7 +319,7 @@ public:
         return (leidos > 0) ? static_cast<size_t>(leidos) : 0;
     }
 
-    // ¿Cómo lo hace?: Recorre los 4 slots y envía el mismo buffer a todos los clientes conectados actualmente.
+    // ¿Cómo lo hace?: Recorre los 4 slots (locales y remotos) y envía el mismo buffer a todos los activos.
     uint8_t difundirBytesATodos(const uint8_t* datos, size_t longitud) {
         if (datos == nullptr || longitud == 0) {
             return 0;
@@ -119,47 +327,89 @@ public:
 
         uint8_t exitosos = 0;
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
-            if (slotOcupado[i] && clientesTcp[i].connected()) {
-                if (clientesTcp[i].write(datos, longitud) == longitud) {
-                    exitosos++;
-                }
+            if (enviarBytesACliente(static_cast<uint8_t>(i + 1), datos, longitud)) {
+                exitosos++;
             }
         }
         return exitosos;
     }
 
-    // ¿Cómo lo hace?: Cierra el socket del slot indicado con stop() y libera la ranura.
+    // ¿Cómo lo hace?: Cierra el socket local o notifica OP_CLOSE al VPS y libera la ranura.
     void desconectarCliente(uint8_t slotCliente) {
         if (slotCliente < 1 || slotCliente > MAXIMO_CLIENTES_TLS) {
             return;
         }
 
         const uint8_t idx = static_cast<uint8_t>(slotCliente - 1);
-        if (slotOcupado[idx]) {
-            clientesTcp[idx].stop();
-            slotOcupado[idx] = false;
+        if (!slotOcupado[idx]) {
+            return;
         }
+
+        if (esRelay[idx]) {
+            if (!caidoRelay[idx] && refRelay && sidRelay[idx] != 0) {
+                refRelay->cerrarClienteRemoto(sidRelay[idx]);
+            }
+            esRelay[idx]               = false;
+            pendienteAceptarRelay[idx] = false;
+            caidoRelay[idx]            = false;
+            sidRelay[idx]              = 0;
+            rxRelay[idx].limpiar();
+        } else {
+            clientesTcp[idx].stop();
+        }
+        slotOcupado[idx] = false;
     }
 
-    // ¿Cómo lo hace?: Detecta qué sockets perdieron conexión física, los cierra y devuelve sus bits encendidos en una máscara.
-    uint16_t limpiarSocketsCaidos() {
+    // ¿Cómo lo hace?: Devuelve y libera al instante solo los slots Relay cerrados desde el VPS (sin esperar el ciclo de 500 ms).
+    uint16_t limpiarSocketsCaidosRelay() {
         uint16_t mascaraCaidos = 0;
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
-            if (slotOcupado[i] && !clientesTcp[i].connected()) {
-                clientesTcp[i].stop();
-                slotOcupado[i] = false;
-                const uint8_t slot = static_cast<uint8_t>(i + 1);
-                mascaraCaidos |= static_cast<uint16_t>(1u << slot);
+            if (slotOcupado[i] && esRelay[i] && caidoRelay[i]) {
+                slotOcupado[i]           = false;
+                esRelay[i]               = false;
+                pendienteAceptarRelay[i] = false;
+                caidoRelay[i]            = false;
+                sidRelay[i]              = 0;
+                rxRelay[i].limpiar();
+                mascaraCaidos |= static_cast<uint16_t>(1u << (i + 1));
             }
         }
         return mascaraCaidos;
     }
 
-    // ¿Cómo lo hace?: Cuenta cuántos slots tienen un socket activo actualmente.
+    // ¿Cómo lo hace?: Detecta qué sockets locales o remotos perdieron conexión física, los libera y devuelve su máscara.
+    uint16_t limpiarSocketsCaidos() {
+        uint16_t mascaraCaidos = limpiarSocketsCaidosRelay();
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (slotOcupado[i] && !esRelay[i] && !clientesTcp[i].connected()) {
+                clientesTcp[i].stop();
+                slotOcupado[i] = false;
+                mascaraCaidos |= static_cast<uint16_t>(1u << (i + 1));
+            }
+        }
+        return mascaraCaidos;
+    }
+
+    bool esClienteViaRelay(uint8_t slotCliente) const {
+        if (slotCliente < 1 || slotCliente > MAXIMO_CLIENTES_TLS) return false;
+        const uint8_t idx = static_cast<uint8_t>(slotCliente - 1);
+        return slotOcupado[idx] && esRelay[idx];
+    }
+
     uint8_t obtenerCantidadClientesConectados() const {
         uint8_t activos = 0;
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
-            if (slotOcupado[i]) {
+            if (slotOcupado[i] && (!esRelay[i] || !caidoRelay[i])) {
+                activos++;
+            }
+        }
+        return activos;
+    }
+
+    uint8_t obtenerCantidadClientesRelayConectados() const {
+        uint8_t activos = 0;
+        for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
+            if (slotOcupado[i] && esRelay[i] && !caidoRelay[i]) {
                 activos++;
             }
         }

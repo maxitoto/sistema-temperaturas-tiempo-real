@@ -173,7 +173,8 @@ private:
             if (idProc == PROC_L1_HANDSHAKE_UARTS && slotOrigen == 0) {
                 uarts.marcarClienteConectado();
             } else if (idProc == PROC_L1_SUSCRIBIR_UDP_WIFI && slotOrigen >= 1 && puertoUdpSolicitado > 0) {
-                if (RPAuth::estaClienteAutenticado(slotOrigen)) {
+                // Los clientes remotos vía Relay usan telemetría por TCP cifrado; se omite UDP para evitar DNS sobre "RELAY-x"
+                if (RPAuth::estaClienteAutenticado(slotOrigen) && !wifiTcp.esClienteViaRelay(slotOrigen)) {
                     const IdentidadPeerWiFi& peer = wifiBase.obtenerIdentidadPeer(slotOrigen);
                     wifiUdp.suscribirClienteAStream(slotOrigen, peer.ip, puertoUdpSolicitado);
                 }
@@ -229,7 +230,7 @@ private:
 
             const bool autenticado = RPAuth::estaClienteAutenticado(slot);
 #if WIFI_CIFRADO_CCM_ACTIVO
-            constexpr size_t minFrame = 4 + WiFiSecurity::CifradorAesCcm::OVERHEAD_INTERNO; // 22 B
+            constexpr size_t minFrame = 4 + WiFiSecurity::CifradorAesCcm::OVERHEAD_INTERNO; // 30 B
             const size_t maxFrame = (autenticado ? MAX_PLAINTEXT_AUTH_TCP : MAX_PLAINTEXT_PRE_AUTH)
                                   + WiFiSecurity::CifradorAesCcm::OVERHEAD_INTERNO;
 #else
@@ -358,9 +359,24 @@ public:
             enrutarPaqueteCompleto(0, bufferEntradaSerie + 4, leidosSerie - 4);
         }
 
-        // 2. Aceptación protegida de nuevas conexiones WiFi TCP
-        NuevoClienteAceptado nuevo = wifiTcp.aceptarConexionEntrante();
-        if (nuevo.slotAsignado >= 1 && nuevo.slotAsignado <= WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS) {
+        // 1.5. Túnel saliente Reverse TCP Relay (Core 0 no bloqueante) + limpieza inmediata de cierres remotos
+        wifiTcp.procesarCicloRelay();
+        const uint16_t caidosRelay = wifiTcp.limpiarSocketsCaidosRelay();
+        if (caidosRelay != 0) {
+            for (uint8_t slot = 1; slot <= WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS; ++slot) {
+                if (caidosRelay & (1u << slot)) {
+                    solicitarLimpiezaSesionDesdeCore0(slot);
+                    cerrarConexionFisicaPorSlot(slot);
+                }
+            }
+        }
+
+        // 2. Aceptación protegida de nuevas conexiones WiFi TCP (locales y remotas vía Relay)
+        for (uint8_t aceptados = 0; aceptados < WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS; ++aceptados) {
+            NuevoClienteAceptado nuevo = wifiTcp.aceptarConexionEntrante();
+            if (nuevo.slotAsignado < 1 || nuevo.slotAsignado > WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS) {
+                break;
+            }
             const uint8_t idx = static_cast<uint8_t>(nuevo.slotAsignado - 1);
             solicitarLimpiezaSesionDesdeCore0(nuevo.slotAsignado);
             wifiUdp.desuscribirClienteDeStream(nuevo.slotAsignado);
@@ -381,7 +397,7 @@ public:
         }
         turnoSlotTcp = static_cast<uint8_t>((turnoSlotTcp + 1) % WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS);
 
-        // 4. Verificación de keepalives y timeouts pre-login (5 s) en Core 0
+        // 4. Verificación de keepalives y timeouts pre-login en Core 0
         const uint32_t ahoraMs = millis();
         if (ahoraMs - ultimaVerificacionInactividadMs >= 500) {
             ultimaVerificacionInactividadMs = ahoraMs;

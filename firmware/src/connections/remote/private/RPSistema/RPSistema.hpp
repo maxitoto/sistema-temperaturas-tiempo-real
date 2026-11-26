@@ -16,6 +16,7 @@
 #include "../../../../hardware/driver/gestorsensores/GestorSensores.hpp"
 #include "../../../../rtos/PrimitivasRTOS.hpp"
 #include "../../../../rtos/tasks/TaskBiosRTOS.hpp"
+#include "../../../middlewares/interfaces/WiFi/WiFiRelay/WiFiRelayClient.hpp"
 
 // ============================================================================
 // 1. DTOs COMPATIBLES EXISTENTES
@@ -56,6 +57,23 @@ struct InfoRedPublicaDTO {
     PgInt      rssiDbm;
     PgUInt8    clientesAutenticados;
 };
+
+struct EstadoRelaySistemaDTO {
+    PgBool        habilitado;           // 0
+    PgBool        conectado;            // 1
+    PgUInt8       estado;               // 2 (EstadoRelay)
+    PgUInt8       ultimoError;          // 3 (ErrorRelay)
+    PgPosInt      uptimeSegundos;       // 4..7
+    PgPosInt      reconexionesTotales;  // 8..11
+    PgPosInt      tramasRxTotales;      // 12..15
+    PgPosInt      tramasTxTotales;      // 16..19
+    PgPosSmallInt puerto;               // 20..21
+    PgUInt8       clientesRelayActivos; // 22
+    PgUInt8       reservado;            // 23
+    PgChar<64>    host;                 // 24..87
+    PgChar<20>    nodeId;               // 88..107
+};
+static_assert(sizeof(EstadoRelaySistemaDTO) == 108, "EstadoRelaySistemaDTO debe medir 108 B");
 
 struct EspacioMicroSdDTO {
     PgPosInt totalKb;
@@ -626,6 +644,31 @@ namespace RPSistema {
             return out;
         },
         RolUsuario::ADMIN
+    );
+
+    // 15. Estado en vivo del túnel saliente Reverse TCP Relay (NO_ADMIN)
+    inline auto obtenerEstadoRelay = llamadoSemantico.alMenosUnaVez<void, EstadoRelaySistemaDTO>(
+        "obtenerEstadoRelay",
+        []() -> EstadoRelaySistemaDTO {
+            EstadoRelaySistemaDTO out{};
+            if (WiFiRelayClient::instanciaActiva != nullptr) {
+                const SnapshotEstadoRelay snap = WiFiRelayClient::instanciaActiva->obtenerSnapshotEstado();
+                out.habilitado           = snap.habilitado;
+                out.conectado            = snap.conectado;
+                out.estado               = static_cast<uint8_t>(snap.estado);
+                out.ultimoError          = static_cast<uint8_t>(snap.ultimoError);
+                out.uptimeSegundos       = snap.uptimeSegundos;
+                out.reconexionesTotales  = snap.reconexionesTotales;
+                out.tramasRxTotales      = snap.tramasRxTotales;
+                out.tramasTxTotales      = snap.tramasTxTotales;
+                out.puerto               = snap.puerto;
+                out.clientesRelayActivos = snap.clientesRelayActivos;
+                out.host                 = snap.host;
+                out.nodeId               = snap.nodeId;
+            }
+            return out;
+        },
+        RolUsuario::NO_ADMIN
     );
 
 } // namespace RPSistema

@@ -10,7 +10,8 @@
 #include "../../../../database/repositories/repoCorreos.hpp"
 #include "../../../../database/repositories/repoServidorNtp.hpp"
 #include "../../../../rtos/RelojSistema.hpp"
-#include "../../../../rtos/EventosYColas.hpp"
+#include "../../../../database/repositories/repoConfiguracionRed.hpp"
+#include "../../../middlewares/interfaces/WiFi/WiFiRelay/WiFiRelayClient.hpp"
 #include "../../../smtp/DespachadorCorreosSmtp.hpp"
 
 struct ActualizarConfigSistemaInputDTO {
@@ -85,6 +86,27 @@ struct ResultadoEnvioSmtpDTO {
 };
 static_assert(sizeof(ResultadoEnvioSmtpDTO) == 134, "ResultadoEnvioSmtpDTO debe medir 134 B");
 
+struct ConfiguracionRelayRpcDTO {
+    PgInt      idConfiguracionRed; // 0..3
+    PgChar<64> hostRelay;          // 4..67
+    PgPosInt   puerto;             // 68..71
+    PgChar<20> nodeId;             // 72..91
+    PgChar<64> secreto;            // 92..155
+    PgBool     activa;             // 156
+    PgDateTime fechaCreacion;      // 157..176
+    PgDateTime fechaModificacion;  // 177..196 (+3 pad = 200)
+};
+static_assert(sizeof(ConfiguracionRelayRpcDTO) == 200, "ConfiguracionRelayRpcDTO debe medir 200 B");
+
+struct ActualizarConfigRelayInputDTO {
+    PgChar<64> hostRelay; // 0..63
+    PgPosInt   puerto;    // 64..67
+    PgChar<20> nodeId;    // 68..87
+    PgChar<64> secreto;   // 88..151
+    PgBool     activa;    // 152 (+3 pad = 156)
+};
+static_assert(sizeof(ActualizarConfigRelayInputDTO) == 156, "ActualizarConfigRelayInputDTO debe medir 156 B");
+
 using ListaCorreosDTO       = PgList<CorreoItemDTO, 12>;
 using ListaServidoresNtpDTO = PgList<ServidorNtpItemDTO, 16>;
 
@@ -93,11 +115,80 @@ namespace RPConfiguracion {
     using DbRuntime::Repositories::RepoConfiguracionSistema;
     using DbRuntime::Repositories::ConfiguracionSistemaDTO;
     using DbRuntime::Repositories::RepoConfiguracionSmtp;
+    using DbRuntime::Repositories::RepoConfiguracionRed;
+    using DbRuntime::Repositories::ConfiguracionRedDTO;
     using DbRuntime::Repositories::ConfiguracionSmtpDTO;
     using DbRuntime::Repositories::RepoCorreos;
     using DbRuntime::Repositories::CorreoDTO;
     using DbRuntime::Repositories::RepoServidoresNtp;
     using DbRuntime::Repositories::ServidorNtpDTO;
+
+    inline ConfiguracionRelayRpcDTO aRelayRpcDTO(const ConfiguracionRedDTO& red) {
+        ConfiguracionRelayRpcDTO out{};
+        out.idConfiguracionRed = red.id_configuracion_red;
+        out.hostRelay          = red.relay_host;
+        out.puerto             = red.relay_puerto;
+        out.nodeId             = red.relay_node_id;
+        out.secreto            = red.relay_secreto;
+        out.activa             = red.relay_activa;
+        out.fechaCreacion      = red.creado_el;
+        out.fechaModificacion  = red.actualizado_el;
+        return out;
+    }
+
+    // 13. Obtener configuración del Reverse TCP Relay desde ConfiguracionRed (ADMIN)
+    inline auto obtenerConfiguracionRelay = llamadoSemantico.alMenosUnaVez<void, ConfiguracionRelayRpcDTO>(
+        "obtenerConfiguracionRelay",
+        []() -> ConfiguracionRelayRpcDTO {
+            ConfiguracionRedDTO red{};
+            if (!RepoConfiguracionRed::obtenerOInicializar(red)) {
+                throw std::runtime_error("IOError: no se pudo leer ConfiguracionRed");
+            }
+            return aRelayRpcDTO(red);
+        },
+        RolUsuario::ADMIN
+    );
+
+    // 14. Guardar configuración del Relay en ConfiguracionRed y aplicar en caliente en Core 0 (ADMIN)
+    inline auto actualizarConfiguracionRelay = llamadoSemantico.exactamenteUnaVez<ActualizarConfigRelayInputDTO, ConfiguracionRelayRpcDTO>(
+        "actualizarConfiguracionRelay",
+        [](const ActualizarConfigRelayInputDTO& in) -> ConfiguracionRelayRpcDTO {
+            ConfiguracionRedDTO act = RepoConfiguracionRed::actualizarRelay(
+                in.hostRelay.c_str(),
+                in.puerto,
+                in.nodeId.c_str(),
+                in.secreto.c_str(),
+                in.activa
+            );
+
+            if (WiFiRelayClient::instanciaActiva != nullptr) {
+                WiFiRelayClient::instanciaActiva->configurar(
+                    act.relay_activa,
+                    act.relay_host.c_str(),
+                    static_cast<uint16_t>(act.relay_puerto),
+                    act.relay_node_id.c_str(),
+                    act.relay_secreto.c_str()
+                );
+            }
+
+            const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
+            int32_t idActor = 0;
+            char nombreActor[20]{};
+            RPAuth::obtenerSnapshotUsuarioSlot(slot, idActor, nombreActor, sizeof(nombreActor));
+            RTOS::encolarAuditoria(
+                RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
+                idActor,
+                nombreActor[0] != '\0' ? nombreActor : "ADMIN",
+                act.relay_host.vacio() ? "RELAY" : act.relay_host.c_str(),
+                act.relay_activa ? "RELAY_ACTIVADO_ACTUALIZADO" : "RELAY_DESACTIVADO",
+                static_cast<uint8_t>(ResultadoAuditoria::EXITO),
+                static_cast<uint8_t>(CriticidadEvento::MEDIA)
+            );
+
+            return aRelayRpcDTO(act);
+        },
+        RolUsuario::ADMIN
+    );
 
     inline CorreoItemDTO aCorreoItem(const CorreoDTO& c) {
         CorreoItemDTO d{};

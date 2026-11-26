@@ -17,6 +17,11 @@ namespace DbRuntime::Repositories {
         PgChar<64> password_sta         = "";
         PgChar<35> ssid_ap              = "ESP32-SecureAP";
         PgChar<64> password_ap          = "ESP32secure1234@";
+        PgChar<64> relay_host           = "";
+        PgPosInt   relay_puerto         = 9443;
+        PgChar<20> relay_node_id        = "ESP32-UNTDF-0001";
+        PgChar<64> relay_secreto        = "";
+        PgBool     relay_activa         = false;
         PgDateTime creado_el            = "";
         PgDateTime actualizado_el       = "";
     };
@@ -33,6 +38,11 @@ namespace DbRuntime::Repositories {
             dto.password_sta         = r.getCStr("password_sta");
             dto.ssid_ap              = r.getCStr("ssid_ap");
             dto.password_ap          = r.getCStr("password_ap");
+            dto.relay_host           = r.getCStr("relay_host");
+            dto.relay_puerto         = r.getUInt32("relay_puerto", 9443);
+            dto.relay_node_id        = r.getCStr("relay_node_id", "ESP32-UNTDF-0001");
+            dto.relay_secreto        = r.getCStr("relay_secreto");
+            dto.relay_activa         = r.getBool("relay_activa", false);
             dto.creado_el            = r.getCStr("creado_el");
             dto.actualizado_el       = r.getCStr("actualizado_el");
             return dto;
@@ -55,10 +65,15 @@ namespace DbRuntime::Repositories {
             if (encontrado) return true;
 
             PgRowBuffer row(schema);
-            row.setText("ssid_sta",     "");
-            row.setText("password_sta", "");
-            row.setText("ssid_ap",      "ESP32-SecureAP");
-            row.setText("password_ap",  "ESP32secure1234@");
+            row.setText("ssid_sta",       "");
+            row.setText("password_sta",   "");
+            row.setText("ssid_ap",        "ESP32-SecureAP");
+            row.setText("password_ap",    "ESP32secure1234@");
+            row.setText("relay_host",     "");
+            row.setUInt32("relay_puerto", 9443);
+            row.setText("relay_node_id",  "ESP32-UNTDF-0001");
+            row.setText("relay_secreto",  "");
+            row.setBool("relay_activa",   false);
 
             if (!st.appendRecord(TABLA, row)) {
                 return false;
@@ -67,7 +82,7 @@ namespace DbRuntime::Repositories {
             return true;
         }
 
-        // Actualización independiente solo de STA (no modifica SoftAP; conserva clave si llega vacía)
+        // Actualización independiente solo de STA (no modifica SoftAP ni Relay; conserva clave si llega vacía)
         static bool actualizarSta(const char* ssidSta, const char* passwordSta, bool conservarClaveSiVacia = true) {
             ConfiguracionRedDTO actual{};
             if (!obtenerOInicializar(actual)) return false;
@@ -95,7 +110,7 @@ namespace DbRuntime::Repositories {
             return n > 0;
         }
 
-        // Actualización independiente solo de SoftAP (no modifica STA; conserva clave si llega vacía)
+        // Actualización independiente solo de SoftAP (no modifica STA ni Relay; conserva clave si llega vacía)
         static bool actualizarAp(const char* ssidAp, const char* passwordAp, bool conservarClaveSiVacia = true) {
             ConfiguracionRedDTO actual{};
             if (!obtenerOInicializar(actual)) return false;
@@ -123,6 +138,58 @@ namespace DbRuntime::Repositories {
                 }
             );
             return n > 0;
+        }
+
+        // Actualización independiente solo del Reverse TCP Relay (no toca WiFi STA/AP; conserva secreto si llega vacío)
+        static ConfiguracionRedDTO actualizarRelay(
+            const char* hostRelay,
+            uint32_t puertoRelay,
+            const char* nodeId,
+            const char* secreto,
+            bool activa
+        ) {
+            if (puertoRelay == 0 || puertoRelay > 65535) {
+                throw std::invalid_argument("ValueError: el puerto Relay debe estar entre 1 y 65535");
+            }
+
+            ConfiguracionRedDTO actual{};
+            if (!obtenerOInicializar(actual)) {
+                throw std::runtime_error("IOError: no se pudo leer ConfiguracionRed");
+            }
+
+            const char* hostFinal   = hostRelay ? hostRelay : "";
+            const char* nodeIdFinal = (nodeId && nodeId[0] != '\0') ? nodeId : "ESP32-UNTDF-0001";
+            const bool  secVacio    = (!secreto || secreto[0] == '\0');
+            const char* secFinal    = (secVacio && !actual.relay_secreto.vacio() && activa)
+                ? actual.relay_secreto.c_str()
+                : (secreto ? secreto : "");
+
+            if (activa && hostFinal[0] == '\0') {
+                throw std::invalid_argument("ValueError: ingrese el host/IP del servidor Relay antes de activarlo");
+            }
+            if (activa && strlen(secFinal) < 16) {
+                throw std::invalid_argument("ValueError: el secreto del Relay debe tener al menos 16 caracteres");
+            }
+
+            PgRowBuffer updated;
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool {
+                    return r.getInt32("id_configuracion_red") == actual.id_configuracion_red;
+                },
+                [&](PgRowBuffer& row) {
+                    row.setText("relay_host",     hostFinal);
+                    row.setUInt32("relay_puerto", puertoRelay);
+                    row.setText("relay_node_id",  nodeIdFinal);
+                    row.setText("relay_secreto",  secFinal);
+                    row.setBool("relay_activa",   activa);
+                },
+                &updated
+            );
+            if (n == 0) {
+                throw std::runtime_error("IOError: no se pudo actualizar ConfiguracionRed (Relay)");
+            }
+            return mapear(updated.view());
         }
 
         // Compatible con el contrato combinado: nunca pisa contraseñas existentes si llegan vacías

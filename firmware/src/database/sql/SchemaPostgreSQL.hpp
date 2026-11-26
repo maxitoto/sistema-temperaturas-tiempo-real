@@ -40,6 +40,7 @@ namespace DbSql::Schema {
     // 2. DEFINICIÓN SQL PURA DE LAS 12 TABLAS DEL SISTEMA
     // ========================================================================
     static constexpr const char* DDL_TABLES_SQL[] = {
+        
         // 1. ConfiguracionRed
         "CREATE TABLE IF NOT EXISTS ConfiguracionRed ("
             "id_configuracion_red SERIAL PRIMARY KEY, "
@@ -47,6 +48,11 @@ namespace DbSql::Schema {
             "password_sta VARCHAR(64) NOT NULL DEFAULT '', "
             "ssid_ap VARCHAR(35) NOT NULL DEFAULT 'ESP32-SecureAP', "
             "password_ap VARCHAR(64) NOT NULL DEFAULT 'ESP32secure1234@', "
+            "relay_host VARCHAR(64) NOT NULL DEFAULT '', "
+            "relay_puerto INTEGER NOT NULL DEFAULT 9443, "
+            "relay_node_id VARCHAR(20) NOT NULL DEFAULT 'ESP32-UNTDF-0001', "
+            "relay_secreto VARCHAR(64) NOT NULL DEFAULT '', "
+            "relay_activa BOOLEAN NOT NULL DEFAULT FALSE, "
             "creado_el TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "actualizado_el TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         ");",
