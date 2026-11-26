@@ -11,6 +11,8 @@ lib/*
 sdcard/*
 !wokwi-project.txt
 
+# Wokwi microSd
+sdcard/*
 
 #para la IA
 migration
