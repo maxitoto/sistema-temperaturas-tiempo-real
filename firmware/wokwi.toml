@@ -1,9 +1,14 @@
 [wokwi]
 version = 1
-firmware = '.pio/build/WokwiSimulator/firmware.bin'
-elf = '.pio/build/WokWiSimulator/firmware.elf'
+firmware = '.pio/build/esp32s_wokwi/firmware.bin'
+elf = '.pio/build/esp32s_wokwi/firmware.elf'
 
 rfc2217ServerPort = 4000
+
+[[sdcard]]
+folder = './sdcard'
+size = '32M'
+writeable = true
 
 [net]
 gateway = "ws://127.0.0.1:9011"

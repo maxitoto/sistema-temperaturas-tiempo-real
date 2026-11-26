@@ -30,7 +30,7 @@ export default defineConfig({
         vite: {
           build: {
             rollupOptions: {
-              external: ['sqlite3', 'serialport', '@prisma/client', '.prisma/client'], 
+              external: ['serialport'], 
             }
           },
           resolve: { alias: aliasConfig } 

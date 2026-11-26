@@ -1,0 +1,15 @@
+{
+  "folders": [
+    { "name": "firmware", "path": "." }
+  ],
+  "settings": {
+  },
+  "extensions": {
+    "recommendations": [
+        "platformio.platformio-ide",
+        "wokwi.wokwi-vscode",
+        "ms-vscode.cpptools",
+        "formulahendry.code-runner"
+    ]
+  }
+}   

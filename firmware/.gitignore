@@ -5,6 +5,11 @@
 .vscode/launch.json
 .vscode/ipch
 .vscode/settings.json
+lib/*
+
+#microSd Wokwi Se llena con las simulaciones de wokwi
+sdcard/*
+!wokwi-project.txt
 
 # Wokwi microSd
 sdcard/*
@@ -12,8 +17,9 @@ sdcard/*
 #para la IA
 migration
 migration/*
+migrarYordenar
+standby_src
 *.sh
 *.log
 *.txt
 
-!wokwi-project.txt

@@ -1,16 +1,15 @@
-// Archivo: ./src/backend/services/clientServices.ts
-import { firmware } from "../stubs/clientExample";
-import { serviciosConectivos } from "../plugins/conectividad/servicosConectivos";
-import { consultasMixtas } from '../database/consultas/consultasMixtas';
-import { auditoriaRepository } from '../database/consultas/repositories/auditoriaRepository';
-import { sensorRepository } from '../database/consultas/repositories/sensorRepository';
-import { conexionFirmwareRepository } from '../database/consultas/repositories/conexionFirmwareRepository';
+import { RPConexion } from "../connections/rpc/domains/RPConexion";
+import { RPAuth } from "../connections/rpc/domains/RPAuth";
+import { RPUsuario } from "../connections/rpc/domains/RPUsuario";
+import { RPSensor } from "../connections/rpc/domains/RPSensor";
+import { RPSistema } from "../connections/rpc/domains/RPSistema";
+import { procedimientosRemotosFirmware } from "../connections/rpc/ProcedimientosRemotosFirmware"
 
 export const clientServices = {
-  ...serviciosConectivos,
-  ...auditoriaRepository,
-  ...consultasMixtas,
-  ...sensorRepository,
-  ...conexionFirmwareRepository,
-  ...firmware,
+    ...RPConexion,
+    ...RPAuth,
+    ...RPUsuario,
+    ...RPSensor,
+    ...RPSistema,
+    ...procedimientosRemotosFirmware,
 };
