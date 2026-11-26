@@ -29,7 +29,12 @@ import {
   formatearDuracionSegundos,
   formatearEpochSegundos,
 } from "../lib/format";
-import { LABEL_ESTADO_SENSOR } from "../lib/labels";
+import {
+  describirEstadoSensor,
+  esTemperaturaFisicaDS18B20,
+  LABEL_ESTADO_SENSOR,
+  resolverEstadoLecturaVivo,
+} from "../lib/labels";
 import {
   DiagnosticoSistemaCliente,
   EspacioMicroSdDTO,
@@ -116,11 +121,17 @@ export function DashboardView({
 
     const horaStr = formatearEpochSegundos(lote[0].timestampMs).slice(-8);
     const punto: ChartPoint = { hora: horaStr };
+    let hayValorValido = false;
     lote.forEach((l) => {
-      punto[l.macHex] = Number(l.temperaturaCorregida.toFixed(2));
+      if (esTemperaturaFisicaDS18B20(l.temperaturaCorregida)) {
+        punto[l.macHex] = Number(l.temperaturaCorregida.toFixed(2));
+        hayValorValido = true;
+      }
     });
 
-    setChartData((prev) => [...prev.slice(-119), punto]);
+    if (hayValorValido) {
+      setChartData((prev) => [...prev.slice(-119), punto]);
+    }
   }, []);
 
   const cargarResumen = useCallback(async (forzarSinCache = false) => {
@@ -404,23 +415,18 @@ export function DashboardView({
             const colorSensor = coloresRef.current[l.macHex] ?? "#10b981";
             const meta = catalogoSensores[macUpper];
             const alarmaFw = alarmasPorMac[macUpper];
-
-            const alertaAltaVivo =
-              meta !== undefined && l.temperaturaCorregida >= meta.umbralSup;
-            const alertaBajaVivo =
-              meta !== undefined && l.temperaturaCorregida <= meta.umbralInf;
-            const estadoMostrar: EstadoSensor =
-              alarmaFw?.estado ??
-              (alertaAltaVivo
-                ? EstadoSensor.ALARMA_SUPERIOR
-                : alertaBajaVivo
-                  ? EstadoSensor.ALARMA_INFERIOR
-                  : EstadoSensor.OK);
+            const estadoMostrar = resolverEstadoLecturaVivo(
+              l.temperaturaCorregida,
+              meta?.umbralInf,
+              meta?.umbralSup,
+              alarmaFw?.estado
+            );
             const enAlerta = estadoMostrar !== EstadoSensor.OK;
             const lecturaValida =
-              estadoMostrar === EstadoSensor.OK ||
-              estadoMostrar === EstadoSensor.ALARMA_SUPERIOR ||
-              estadoMostrar === EstadoSensor.ALARMA_INFERIOR;
+              esTemperaturaFisicaDS18B20(l.temperaturaCorregida) &&
+              (estadoMostrar === EstadoSensor.OK ||
+                estadoMostrar === EstadoSensor.ALARMA_SUPERIOR ||
+                estadoMostrar === EstadoSensor.ALARMA_INFERIOR);
 
             return (
               <button
@@ -484,6 +490,11 @@ export function DashboardView({
                       <AlertTriangle className="h-3 w-3 shrink-0" />
                       {LABEL_ESTADO_SENSOR[estadoMostrar] ?? `E${estadoMostrar}`}
                     </span>
+                  )}
+                  {enAlerta && (
+                    <p className="mt-1.5 line-clamp-2 text-[10px] leading-snug text-alert-err-icon/90">
+                      {describirEstadoSensor(estadoMostrar)}
+                    </p>
                   )}
                 </div>
 

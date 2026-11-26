@@ -32,11 +32,41 @@ namespace SmtpNet {
 
     class ClienteSmtpTls {
     private:
+        static constexpr size_t CHUNK_ESCRITURA_TLS = 256;
+
         static void copiarTexto(char* dst, size_t cap, const char* src) {
             if (!dst || cap == 0) return;
             if (!src) { dst[0] = '\0'; return; }
             strncpy(dst, src, cap - 1);
             dst[cap - 1] = '\0';
+        }
+
+        // Escribe todo el bloque en ráfagas cortas para no saturar el buffer TX de BearSSL (1024 B)
+        static bool escribirTodo(Client& cli, const uint8_t* datos, size_t len, uint32_t timeoutMs = 8000) {
+            if (!datos || len == 0) return true;
+            size_t enviado = 0;
+            uint32_t ultimoProgresoMs = millis();
+
+            while (enviado < len) {
+                if (!cli.connected()) return false;
+                const size_t restante = len - enviado;
+                const size_t lote     = (restante > CHUNK_ESCRITURA_TLS) ? CHUNK_ESCRITURA_TLS : restante;
+                const size_t escritos = cli.write(datos + enviado, lote);
+
+                if (escritos > 0) {
+                    enviado += escritos;
+                    ultimoProgresoMs = millis();
+                } else {
+                    if ((millis() - ultimoProgresoMs) >= timeoutMs) return false;
+                    vTaskDelay(1);
+                }
+            }
+            return true;
+        }
+
+        static bool escribirTexto(Client& cli, const char* txt) {
+            if (!txt || txt[0] == '\0') return true;
+            return escribirTodo(cli, reinterpret_cast<const uint8_t*>(txt), strlen(txt));
         }
 
         // Codifica a Base64 (si quitarEspacios = true, limpia los espacios de las App Passwords de Google)
@@ -69,7 +99,7 @@ namespace SmtpNet {
             uint16_t& codigoOut,
             char* ultimaLineaOut,
             size_t capLinea,
-            uint32_t timeoutMs = 5000
+            uint32_t timeoutMs = 6000
         ) {
             codigoOut = 0;
             if (ultimaLineaOut && capLinea > 0) ultimaLineaOut[0] = '\0';
@@ -117,7 +147,6 @@ namespace SmtpNet {
                         (linea[1] - '0') * 10 +
                         (linea[2] - '0')
                     );
-                    // Guion en posición 3 indica que siguen más líneas de la misma respuesta
                     if (len >= 4 && linea[3] == '-') {
                         continue;
                     }
@@ -137,8 +166,11 @@ namespace SmtpNet {
             size_t capResp
         ) {
             if (comando && comando[0] != '\0') {
-                cli.print(comando);
-                cli.print("\r\n");
+                if (!escribirTexto(cli, comando) || !escribirTexto(cli, "\r\n")) {
+                    copiarTexto(respOut, capResp, "Error escribiendo comando en socket SMTP");
+                    return false;
+                }
+                cli.flush();
             }
             if (!leerRespuesta(cli, codigoOut, respOut, capResp)) {
                 copiarTexto(respOut, capResp, "Timeout esperando respuesta del servidor SMTP");
@@ -163,25 +195,25 @@ namespace SmtpNet {
 
             // 1. Banner inicial (220)
             if (!leerRespuesta(cli, res.codigoSmtp, resp, sizeof(resp)) || res.codigoSmtp != 220) {
-                snprintf(res.detalle, sizeof(res.detalle), "Banner SMTP invalido (%u): %.80s",
+                snprintf(res.detalle, sizeof(res.detalle), "Banner SMTP invalido (%u): %.70s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
 
             // 2. EHLO (250)
             if (!enviarComandoYValidar(cli, "EHLO esp32-untdf.local", 250, 250, res.codigoSmtp, resp, sizeof(resp))) {
-                snprintf(res.detalle, sizeof(res.detalle), "EHLO rechazado (%u): %.80s",
+                snprintf(res.detalle, sizeof(res.detalle), "EHLO rechazado (%u): %.70s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
 
-            // 3. Autenticación AUTH LOGIN (si hay usuario/clave)
+            // 3. Autenticación AUTH LOGIN
             const char* userAuth = (cfg.usuario && cfg.usuario[0] != '\0') ? cfg.usuario : cfg.emailRemitente;
             const char* fromAddr = (cfg.emailRemitente && cfg.emailRemitente[0] != '\0') ? cfg.emailRemitente : userAuth;
 
             if (userAuth && userAuth[0] != '\0' && cfg.password && cfg.password[0] != '\0') {
                 if (!enviarComandoYValidar(cli, "AUTH LOGIN", 334, 334, res.codigoSmtp, resp, sizeof(resp))) {
-                    snprintf(res.detalle, sizeof(res.detalle), "AUTH LOGIN fallo (%u): %.80s",
+                    snprintf(res.detalle, sizeof(res.detalle), "AUTH LOGIN fallo (%u): %.70s",
                              static_cast<unsigned>(res.codigoSmtp), resp);
                     return res;
                 }
@@ -189,12 +221,11 @@ namespace SmtpNet {
                 char b64[224]{};
                 if (!codificarBase64(userAuth, false, b64, sizeof(b64)) ||
                     !enviarComandoYValidar(cli, b64, 334, 334, res.codigoSmtp, resp, sizeof(resp))) {
-                    snprintf(res.detalle, sizeof(res.detalle), "Usuario SMTP rechazado (%u): %.70s",
+                    snprintf(res.detalle, sizeof(res.detalle), "Usuario SMTP rechazado (%u): %.65s",
                              static_cast<unsigned>(res.codigoSmtp), resp);
                     return res;
                 }
 
-                // Quita espacios de la App Password de Google (ej. "abcd efgh ijkl mnop")
                 if (!codificarBase64(cfg.password, true, b64, sizeof(b64)) ||
                     !enviarComandoYValidar(cli, b64, 235, 235, res.codigoSmtp, resp, sizeof(resp))) {
                     snprintf(res.detalle, sizeof(res.detalle), "Auth SMTP fallida (%u): verifique App Password",
@@ -206,7 +237,7 @@ namespace SmtpNet {
             // 4. MAIL FROM
             snprintf(cmd, sizeof(cmd), "MAIL FROM:<%s>", fromAddr ? fromAddr : "");
             if (!enviarComandoYValidar(cli, cmd, 250, 250, res.codigoSmtp, resp, sizeof(resp))) {
-                snprintf(res.detalle, sizeof(res.detalle), "MAIL FROM rechazado (%u): %.70s",
+                snprintf(res.detalle, sizeof(res.detalle), "MAIL FROM rechazado (%u): %.65s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
@@ -227,72 +258,79 @@ namespace SmtpNet {
             }
 
             if (aceptados == 0) {
-                snprintf(res.detalle, sizeof(res.detalle), "Ningun destinatario aceptado (%u): %.64s",
+                snprintf(res.detalle, sizeof(res.detalle), "Ningun destinatario aceptado (%u): %.60s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
 
             // 6. DATA (354)
             if (!enviarComandoYValidar(cli, "DATA", 354, 354, res.codigoSmtp, resp, sizeof(resp))) {
-                snprintf(res.detalle, sizeof(res.detalle), "DATA rechazado (%u): %.80s",
+                snprintf(res.detalle, sizeof(res.detalle), "DATA rechazado (%u): %.70s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
 
-            // 7. Cabeceras RFC 5322 + Cuerpo en texto UTF-8
+            // 7. Cabeceras RFC 5322 + cuerpo UTF-8 con envío garantizado por bloques
             const char* nomRem = (cfg.nombreRemitente && cfg.nombreRemitente[0] != '\0')
                 ? cfg.nombreRemitente
                 : "Laboratorio UNTDF";
 
-            cli.print("From: \"");
-            cli.print(nomRem);
-            cli.print("\" <");
-            cli.print(fromAddr ? fromAddr : "");
-            cli.print(">\r\nTo: ");
+            bool txOk = escribirTexto(cli, "From: \"") &&
+                        escribirTexto(cli, nomRem) &&
+                        escribirTexto(cli, "\" <") &&
+                        escribirTexto(cli, fromAddr ? fromAddr : "") &&
+                        escribirTexto(cli, ">\r\nTo: ");
+
             bool primeroTo = true;
-            for (size_t i = 0; i < cantDestinatarios; ++i) {
+            for (size_t i = 0; i < cantDestinatarios && txOk; ++i) {
                 if (aceptadoPorIndice && !aceptadoPorIndice[i]) continue;
                 if (!destinatarios[i] || destinatarios[i][0] == '\0') continue;
-                if (!primeroTo) cli.print(", ");
-                cli.print(destinatarios[i]);
+                if (!primeroTo) txOk = txOk && escribirTexto(cli, ", ");
+                txOk = txOk && escribirTexto(cli, destinatarios[i]);
                 primeroTo = false;
             }
-            cli.print("\r\nSubject: ");
-            {
+
+            txOk = txOk && escribirTexto(cli, "\r\nSubject: ");
+            if (txOk) {
                 const char* subjRaw = (asunto && asunto[0] != '\0') ? asunto : "[UNTDF ESP32] Notificacion";
                 char subjB64[180]{};
                 if (codificarBase64(subjRaw, false, subjB64, sizeof(subjB64))) {
-                    cli.print("=?UTF-8?B?");
-                    cli.print(subjB64);
-                    cli.print("?=");
+                    txOk = escribirTexto(cli, "=?UTF-8?B?") &&
+                           escribirTexto(cli, subjB64) &&
+                           escribirTexto(cli, "?=");
                 } else {
-                    cli.print(subjRaw);
+                    txOk = escribirTexto(cli, subjRaw);
                 }
             }
-            cli.print(esHtml
-                ? "\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n"
-                : "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n");
 
-            // Envío por líneas con dot-stuffing RFC 5321 (mucho más rápido sobre TLS que byte a byte)
-            if (cuerpo) {
+            txOk = txOk && escribirTexto(
+                cli,
+                esHtml
+                    ? "\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                    : "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+            );
+
+            // Envío línea por línea con dot-stuffing RFC 5321 (garantiza que no se trunque en BearSSL)
+            if (txOk && cuerpo) {
                 const char* p = cuerpo;
-                while (*p) {
+                while (*p && txOk) {
                     const char* fin = p;
                     while (*fin && *fin != '\n' && *fin != '\r') {
                         ++fin;
                     }
                     if (*p == '.') {
-                        cli.write('.');
+                        txOk = escribirTexto(cli, ".");
                     }
                     const size_t lenLinea = static_cast<size_t>(fin - p);
-                    if (lenLinea > 0) {
-                        cli.write(reinterpret_cast<const uint8_t*>(p), lenLinea);
+                    if (txOk && lenLinea > 0) {
+                        txOk = escribirTodo(cli, reinterpret_cast<const uint8_t*>(p), lenLinea);
+                    }
+                    if (txOk) {
+                        txOk = escribirTexto(cli, "\r\n");
                     }
                     if (*fin == '\r' && *(fin + 1) == '\n') {
-                        cli.print("\r\n");
                         p = fin + 2;
                     } else if (*fin == '\n' || *fin == '\r') {
-                        cli.print("\r\n");
                         p = fin + 1;
                     } else {
                         p = fin;
@@ -300,9 +338,15 @@ namespace SmtpNet {
                 }
             }
 
+            if (!txOk) {
+                copiarTexto(res.detalle, sizeof(res.detalle), "Conexion interrumpida mientras se enviaba el cuerpo del correo");
+                return res;
+            }
+            cli.flush();
+
             // Cierre del mensaje DATA (<CRLF>.<CRLF>) -> esperar 250
             if (!enviarComandoYValidar(cli, "\r\n.", 250, 250, res.codigoSmtp, resp, sizeof(resp))) {
-                snprintf(res.detalle, sizeof(res.detalle), "Envio DATA rechazado (%u): %.75s",
+                snprintf(res.detalle, sizeof(res.detalle), "Envio DATA rechazado (%u): %.68s",
                          static_cast<unsigned>(res.codigoSmtp), resp);
                 return res;
             }
@@ -313,7 +357,7 @@ namespace SmtpNet {
 
             res.exito                  = true;
             res.destinatariosAceptados = aceptados;
-            snprintf(res.detalle, sizeof(res.detalle), "SMTP 250 OK · enviado a %u destinatario(s)",
+            snprintf(res.detalle, sizeof(res.detalle), "SMTP 250 OK - enviado a %u destinatario(s)",
                      static_cast<unsigned>(aceptados));
             return res;
         }
@@ -349,7 +393,6 @@ namespace SmtpNet {
                 return res;
             }
 
-            // 1. Verificar DNS antes de abrir TLS para separar fallos de red/router de fallos SSL
             IPAddress ipDestino;
             if (!WiFi.hostByName(cfg.host, ipDestino)) {
                 snprintf(res.detalle, sizeof(res.detalle),
@@ -377,19 +420,15 @@ namespace SmtpNet {
                 ESP_SSLClient ssl;
                 ssl.setClient(&tcpBase);
                 ssl.setInsecure();
-                // Buffers compactos: ~3 KB totales en vez de ~20+ KB fijos de mbedTLS
                 ssl.setBufferSizes(2048, 1024);
-                // Nivel 0 obligatorio para no escribir texto en UART0 (compartido con UART-S)
                 ssl.setDebugLevel(0);
 
                 if (!ssl.connect(cfg.host, cfg.puerto)) {
                     snprintf(res.detalle, sizeof(res.detalle),
-                             "BearSSL fallo al conectar a %s (%s):%u | H:%u/%u",
+                             "BearSSL fallo al conectar a %.24s (%s):%u",
                              cfg.host,
                              ipDestino.toString().c_str(),
-                             static_cast<unsigned>(cfg.puerto),
-                             static_cast<unsigned>(ESP.getFreeHeap()),
-                             static_cast<unsigned>(ESP.getMaxAllocHeap()));
+                             static_cast<unsigned>(cfg.puerto));
                     ssl.stop();
                     tcpBase.stop();
                     return res;
@@ -402,13 +441,10 @@ namespace SmtpNet {
             }
 
             WiFiClient plain;
-            plain.setTimeout(5);
-            if (plain.getTimeout() < 1000) {
-                plain.setTimeout(5000);
-            }
+            plain.setTimeout(5000);
             if (!plain.connect(cfg.host, cfg.puerto)) {
                 snprintf(res.detalle, sizeof(res.detalle),
-                         "No se pudo conectar por TCP a %s (%s):%u",
+                         "No se pudo conectar por TCP a %.24s (%s):%u",
                          cfg.host, ipDestino.toString().c_str(), static_cast<unsigned>(cfg.puerto));
                 return res;
             }

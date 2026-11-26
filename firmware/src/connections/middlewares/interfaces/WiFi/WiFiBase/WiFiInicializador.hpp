@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <stdint.h>
 #include <string.h>
 #include "../../../../../database/repositories/repoConfiguracionRed.hpp"
@@ -16,7 +18,7 @@ struct EstadoRedWiFi {
 
 class WiFiInicializador {
 public:
-    static constexpr uint32_t TIMEOUT_CONEXION_STA_MS = 8000;
+    static constexpr uint32_t TIMEOUT_CONEXION_STA_MS = 6000;
     inline static WiFiInicializador* instanciaActiva = nullptr;
 
 private:
@@ -46,19 +48,24 @@ private:
 
         idConfiguracionActiva = cfg.id_configuracion_red;
         strncpy(ssidStaCache,  cfg.ssid_sta.c_str(),     sizeof(ssidStaCache) - 1);
+        ssidStaCache[sizeof(ssidStaCache) - 1] = '\0';
         strncpy(claveStaCache, cfg.password_sta.c_str(), sizeof(claveStaCache) - 1);
+        claveStaCache[sizeof(claveStaCache) - 1] = '\0';
+
         if (!cfg.ssid_ap.vacio()) {
             strncpy(ssidApCache, cfg.ssid_ap.c_str(), sizeof(ssidApCache) - 1);
+            ssidApCache[sizeof(ssidApCache) - 1] = '\0';
         }
         strncpy(claveApCache, cfg.password_ap.c_str(), sizeof(claveApCache) - 1);
+        claveApCache[sizeof(claveApCache) - 1] = '\0';
         return true;
     }
 
-    bool aplicarConfiguracionWiFi() {
+    bool aplicarSoloSoftAP() {
         WiFi.mode(WIFI_AP_STA);
         WiFi.setSleep(false);
 
-        bool apLevantado = (strlen(claveApCache) >= 8)
+        const bool apLevantado = (strlen(claveApCache) >= 8)
             ? WiFi.softAP(ssidApCache, claveApCache)
             : WiFi.softAP(ssidApCache);
 
@@ -70,10 +77,17 @@ private:
         } else {
             estadoActual.ipPuntoAcceso[0] = '\0';
         }
+        return apLevantado;
+    }
+
+    bool aplicarConfiguracionWiFi() {
+        aplicarSoloSoftAP();
 
         if (strlen(ssidStaCache) > 0) {
             reconectarEstacionRouter();
         } else {
+            WiFi.disconnect(false, false);
+            WiFi.setAutoReconnect(false);
             estadoActual.conectadoARouter = false;
             estadoActual.ipEstacionLAN[0] = '\0';
         }
@@ -92,17 +106,50 @@ public:
         return aplicarConfiguracionWiFi();
     }
 
+    // Actualiza únicamente WiFi STA (conserva clave previa si llega vacía) sin reiniciar SoftAP
+    bool actualizarSoloSta(const char* nuevoSsidSta, const char* nuevaClaveSta, bool limpiarSta = false) {
+        using DbRuntime::Repositories::RepoConfiguracionRed;
+
+        const char* ssidGuardar  = limpiarSta ? "" : (nuevoSsidSta ? nuevoSsidSta : "");
+        const char* claveGuardar = limpiarSta ? "" : (nuevaClaveSta ? nuevaClaveSta : "");
+
+        if (!RepoConfiguracionRed::actualizarSta(ssidGuardar, claveGuardar, !limpiarSta)) {
+            Serial.println("[WiFi][DB] Error al guardar config STA en SD:");
+            Serial.println(RepoConfiguracionRed::ultimoError());
+            return false;
+        }
+
+        cargarConfiguracionDesdeDB();
+        reconectarEstacionRouter();
+        return true;
+    }
+
+    // Actualiza únicamente SoftAP (conserva clave previa si llega vacía) sin desconectar STA
+    bool actualizarSoloAp(const char* nuevoSsidAp, const char* nuevaClaveAp) {
+        using DbRuntime::Repositories::RepoConfiguracionRed;
+
+        if (!RepoConfiguracionRed::actualizarAp(nuevoSsidAp, nuevaClaveAp, true)) {
+            Serial.println("[WiFi][DB] Error al guardar config AP en SD:");
+            Serial.println(RepoConfiguracionRed::ultimoError());
+            return false;
+        }
+
+        cargarConfiguracionDesdeDB();
+        return aplicarSoloSoftAP();
+    }
+
+    // Actualización combinada retrocompatible: nunca pisa contraseñas existentes si llegan vacías
     bool actualizarCredencialesYReconectar(
         const char* nuevoSsidSta,
         const char* nuevaClaveSta,
         const char* nuevoSsidAp,
         const char* nuevaClaveAp
     ) {
-        if (nuevoSsidSta != nullptr) {
+        if (nuevoSsidSta != nullptr && nuevoSsidSta[0] != '\0') {
             strncpy(ssidStaCache, nuevoSsidSta, sizeof(ssidStaCache) - 1);
             ssidStaCache[sizeof(ssidStaCache) - 1] = '\0';
         }
-        if (nuevaClaveSta != nullptr) {
+        if (nuevaClaveSta != nullptr && nuevaClaveSta[0] != '\0') {
             strncpy(claveStaCache, nuevaClaveSta, sizeof(claveStaCache) - 1);
             claveStaCache[sizeof(claveStaCache) - 1] = '\0';
         }
@@ -110,29 +157,31 @@ public:
             strncpy(ssidApCache, nuevoSsidAp, sizeof(ssidApCache) - 1);
             ssidApCache[sizeof(ssidApCache) - 1] = '\0';
         }
-        if (nuevaClaveAp != nullptr && (strlen(nuevaClaveAp) >= 8 || nuevaClaveAp[0] == '\0')) {
+        if (nuevaClaveAp != nullptr && strlen(nuevaClaveAp) >= 8) {
             strncpy(claveApCache, nuevaClaveAp, sizeof(claveApCache) - 1);
             claveApCache[sizeof(claveApCache) - 1] = '\0';
         }
 
-        if (idConfiguracionActiva > 0) {
-            DbRuntime::Repositories::ConfiguracionRedDTO dto{};
-            dto.id_configuracion_red = idConfiguracionActiva;
-            dto.ssid_sta             = ssidStaCache;
-            dto.password_sta         = claveStaCache;
-            dto.ssid_ap              = ssidApCache;
-            dto.password_ap          = claveApCache;
+        DbRuntime::Repositories::ConfiguracionRedDTO dto{};
+        dto.id_configuracion_red = idConfiguracionActiva;
+        dto.ssid_sta             = ssidStaCache;
+        dto.password_sta         = claveStaCache;
+        dto.ssid_ap              = ssidApCache;
+        dto.password_ap          = claveApCache;
 
-            if (!DbRuntime::Repositories::RepoConfiguracionRed::actualizarTodo(dto)) {
-                Serial.println("[WiFi][DB] Advertencia: no se pudo guardar la nueva config en SD:");
-                Serial.println(DbRuntime::Repositories::RepoConfiguracionRed::ultimoError());
-            }
+        if (!DbRuntime::Repositories::RepoConfiguracionRed::actualizarTodo(dto)) {
+            Serial.println("[WiFi][DB] Advertencia: no se pudo guardar la nueva config en SD:");
+            Serial.println(DbRuntime::Repositories::RepoConfiguracionRed::ultimoError());
         }
 
+        cargarConfiguracionDesdeDB();
         return aplicarConfiguracionWiFi();
     }
 
+    // Reintenta conectar al router usando lo último guardado en MicroSD sin tocar el SoftAP
     bool reconectarEstacionRouter() {
+        cargarConfiguracionDesdeDB();
+
         if (strlen(ssidStaCache) == 0) {
             WiFi.disconnect(false, false);
             WiFi.setAutoReconnect(false);
@@ -141,12 +190,17 @@ public:
             return false;
         }
 
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.setSleep(false);
+        WiFi.disconnect(false, false);
+        vTaskDelay(pdMS_TO_TICKS(80));
+
         WiFi.setAutoReconnect(true);
         WiFi.begin(ssidStaCache, claveStaCache);
         const uint32_t inicioMs = millis();
 
         while (WiFi.status() != WL_CONNECTED && (millis() - inicioMs) < TIMEOUT_CONEXION_STA_MS) {
-            delay(100);
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
 
         if (WiFi.status() == WL_CONNECTED) {
@@ -157,7 +211,7 @@ public:
             return true;
         }
 
-        // Si el router no está disponible, detiene el escaneo STA para no tumbar el canal del SoftAP
+        // Si el router no responde, detiene el escaneo STA para no degradar el SoftAP
         WiFi.disconnect(false, false);
         WiFi.setAutoReconnect(false);
         estadoActual.conectadoARouter = false;

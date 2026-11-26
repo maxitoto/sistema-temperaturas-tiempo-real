@@ -15,6 +15,9 @@ import {
   CheckCircle2,
   XCircle,
   FileSpreadsheet,
+  HelpCircle,
+  RotateCw,
+  Unlink,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { useAuth } from "../contexts/AuthContext";
@@ -24,6 +27,7 @@ import { LABEL_ESTADO_ENVIO, LABEL_TIPO_RECEPCION } from "../lib/labels";
 import { sufijoFechaArchivo } from "../lib/exportCsv";
 import { exportarTablaExcel } from "../lib/exportExcel";
 import { NumericInput } from "../components/ui/NumericInput";
+import { PasswordInput } from "../components/ui/PasswordInput";
 import {
   CalibracionAmbienteDTO,
   ConfiguracionSistemaDTO,
@@ -48,6 +52,43 @@ export type TabConfiguracion =
   | "WIFI"
   | "CORREOS"
   | "NTP";
+
+function ParamHelpTooltip({
+  titulo,
+  texto,
+}: {
+  titulo: string;
+  texto: string;
+}) {
+  const [abierto, setAbierto] = useState(false);
+
+  return (
+    <span
+      className="relative inline-flex items-center"
+      onMouseEnter={() => setAbierto(true)}
+      onMouseLeave={() => setAbierto(false)}
+    >
+      <button
+        type="button"
+        onClick={() => setAbierto((v) => !v)}
+        onBlur={() => setAbierto(false)}
+        aria-label={`Ayuda sobre ${titulo}`}
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full text-foreground-secondary transition-colors hover:bg-secondary hover:text-primary"
+      >
+        <HelpCircle className="h-3.5 w-3.5" />
+      </button>
+      {abierto && (
+        <div
+          role="tooltip"
+          className="absolute bottom-full left-0 z-40 mb-1.5 w-64 rounded-lg border border-border bg-card p-2.5 text-[11px] leading-relaxed font-normal text-card-foreground shadow-lg"
+        >
+          <div className="mb-0.5 font-semibold text-primary">{titulo}</div>
+          <p className="text-foreground-secondary">{texto}</p>
+        </div>
+      )}
+    </span>
+  );
+}
 
 export function ConfiguracionView({
   tabInicial = "SISTEMA",
@@ -88,16 +129,21 @@ export function ConfiguracionView({
     activa: true,
   });
 
-  // --- Pestaña 3: WiFi STA + SoftAP (Solo ADMIN) ---
+  // --- Pestaña 3: WiFi STA + SoftAP separados (Solo ADMIN) ---
   const [wifiInfo, setWifiInfo] = useState<ConfiguracionWiFiCliente | null>(
     null
   );
-  const [formWifi, setFormWifi] = useState({
+  const [formWifiSta, setFormWifiSta] = useState({
     ssidSta: "",
     claveSta: "",
+  });
+  const [formWifiAp, setFormWifiAp] = useState({
     ssidAp: "",
     claveAp: "",
   });
+  const [accionWifi, setAccionWifi] = useState<
+    null | "RECONECTAR" | "STA" | "AP" | "LIMPIAR_STA"
+  >(null);
 
   // --- Pestaña 4: SMTP y Destinatarios de Correo ---
   const [correos, setCorreos] = useState<CorreoItemDTO[]>([]);
@@ -174,23 +220,28 @@ export function ConfiguracionView({
     }
   }, []);
 
-  const cargarWifi = useCallback(async () => {
-    if (!esAdmin) return;
-    setCargando(true);
-    const w = await safeRpc(
-      () => client.obtenerConfiguracionWiFi(),
-      "obtenerConfiguracionWiFi"
-    );
-    setCargando(false);
-    if (w) {
-      setWifiInfo(w);
-      setFormWifi((prev) => ({
-        ...prev,
-        ssidSta: w.ssidSta,
-        ssidAp: w.ssidAp,
-      }));
-    }
-  }, [esAdmin]);
+  const cargarWifi = useCallback(
+    async (forzarSinCache = false) => {
+      if (!esAdmin) return;
+      setCargando(true);
+      if (forzarSinCache) {
+        await safeRpc(() => client.invalidarCache(), "invalidarCache", {
+          silent: true,
+        });
+      }
+      const w = await safeRpc(
+        () => client.obtenerConfiguracionWiFi(),
+        "obtenerConfiguracionWiFi"
+      );
+      setCargando(false);
+      if (w) {
+        setWifiInfo(w);
+        setFormWifiSta((prev) => ({ ...prev, ssidSta: w.ssidSta }));
+        setFormWifiAp((prev) => ({ ...prev, ssidAp: w.ssidAp }));
+      }
+    },
+    [esAdmin]
+  );
 
   const cargarCorreosYSmtp = useCallback(async () => {
     setCargando(true);
@@ -233,7 +284,7 @@ export function ConfiguracionView({
   useEffect(() => {
     if (tab === "SISTEMA") void cargarSistema();
     if (tab === "AMBIENTE") void cargarAmbiente();
-    if (tab === "WIFI") void cargarWifi();
+    if (tab === "WIFI") void cargarWifi(false);
     if (tab === "CORREOS") void cargarCorreosYSmtp();
     if (tab === "NTP") void cargarNtp();
   }, [
@@ -301,32 +352,112 @@ export function ConfiguracionView({
     setFormAmbiente((prev) => ({ ...prev, tempEbullicionRef: tEbull }));
   };
 
-  const guardarWifi = async (e: React.FormEvent) => {
+  // --- Handlers WiFi desacoplados (STA / SoftAP / Reconectar STA) ---
+  const reconectarWifiSta = async () => {
+    setAccionWifi("RECONECTAR");
+    const res = await safeRpc(
+      () => client.actualizarConfiguracionWiFi("", "", "", ""),
+      "reconectarWifiSta"
+    );
+    setAccionWifi(null);
+    if (res) {
+      setWifiInfo(res);
+      if (res.conectadoARouter) {
+        toast.success(`Conectado al router (${res.ssidSta} · IP ${res.ipSta}).`);
+      } else {
+        toast.warning(
+          res.ssidSta
+            ? `El ESP32 no logró conectarse a "${res.ssidSta}". Verificá alcance o contraseña.`
+            : "No hay una red WiFi STA configurada todavía."
+        );
+      }
+    }
+  };
+
+  const guardarWifiSta = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (formWifi.claveSta.length > 0 && formWifi.claveSta.length < 8) {
-      window.alert(
-        "La clave WiFi STA debe tener al menos 8 caracteres (WPA2)."
+    const ssid = formWifiSta.ssidSta.trim();
+    if (!ssid) {
+      toast.warning("Ingresá el SSID de la red local (router) para STA.");
+      return;
+    }
+    if (formWifiSta.claveSta.length > 0 && formWifiSta.claveSta.length < 8) {
+      toast.warning(
+        "La clave WiFi STA debe tener al menos 8 caracteres (WPA2), o dejala vacía para conservar la actual."
       );
       return;
     }
-    if (formWifi.claveAp.length < 8) {
-      window.alert(
-        "La clave del SoftAP debe tener al menos 8 caracteres (WPA2)."
-      );
-      return;
-    }
+
+    setAccionWifi("STA");
     const res = await safeRpc(
       () =>
-        client.actualizarConfiguracionWiFi(
-          formWifi.ssidSta.trim(),
-          formWifi.claveSta,
-          formWifi.ssidAp.trim(),
-          formWifi.claveAp
-        ),
-      "actualizarConfiguracionWiFi",
-      { mensajeExito: "Parámetros WiFi STA/SoftAP actualizados." }
+        client.actualizarConfiguracionWiFi(ssid, formWifiSta.claveSta, "", ""),
+      "actualizarWifiSta"
     );
-    if (res) setWifiInfo(res);
+    setAccionWifi(null);
+    if (res) {
+      setWifiInfo(res);
+      setFormWifiSta({ ssidSta: res.ssidSta, claveSta: "" });
+      if (res.conectadoARouter) {
+        toast.success(`WiFi STA guardado y conectado (IP ${res.ipSta}).`);
+      } else {
+        toast.info(
+          "Credenciales STA guardadas (el SoftAP no fue modificado), pero el router no respondió en este intento."
+        );
+      }
+    }
+  };
+
+  const desvincularWifiSta = async () => {
+    if (
+      !window.confirm(
+        "¿Olvidar las credenciales del router (STA) y desconectar? El Punto de Acceso (SoftAP) seguirá activo."
+      )
+    ) {
+      return;
+    }
+    setAccionWifi("LIMPIAR_STA");
+    const res = await safeRpc(
+      () => client.actualizarConfiguracionWiFi("__CLEAR__", "", "", ""),
+      "desvincularWifiSta",
+      { mensajeExito: "Red WiFi STA desvinculada. SoftAP sigue activo." }
+    );
+    setAccionWifi(null);
+    if (res) {
+      setWifiInfo(res);
+      setFormWifiSta({ ssidSta: "", claveSta: "" });
+    }
+  };
+
+  const guardarWifiAp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const ssid = formWifiAp.ssidAp.trim();
+    if (!ssid) {
+      toast.warning("El SSID del Punto de Acceso (SoftAP) no puede estar vacío.");
+      return;
+    }
+    if (formWifiAp.claveAp.length > 0 && formWifiAp.claveAp.length < 8) {
+      toast.warning(
+        "La clave del SoftAP debe tener al menos 8 caracteres (WPA2), o dejala vacía para conservar la actual."
+      );
+      return;
+    }
+
+    setAccionWifi("AP");
+    const res = await safeRpc(
+      () =>
+        client.actualizarConfiguracionWiFi("", "", ssid, formWifiAp.claveAp),
+      "actualizarWifiAp",
+      {
+        mensajeExito:
+          "Punto de Acceso (SoftAP) actualizado sin modificar la red STA.",
+      }
+    );
+    setAccionWifi(null);
+    if (res) {
+      setWifiInfo(res);
+      setFormWifiAp({ ssidAp: res.ssidAp, claveAp: "" });
+    }
   };
 
   const guardarSmtp = async (e: React.FormEvent) => {
@@ -626,8 +757,12 @@ export function ConfiguracionView({
 
           <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
             <div>
-              <label className="mb-1 block font-medium">
-                Zona Horaria (minutos UTC, ej. -180 = UTC-3)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Zona Horaria (minutos UTC)</span>
+                <ParamHelpTooltip
+                  titulo="Desplazamiento horario respecto de UTC"
+                  texto="Cantidad de minutos que el reloj del ESP32 suma o resta a la hora UTC recibida por NTP. Para Argentina (UTC-3) corresponde -180. Se aplica a las fechas de auditorías y correos."
+                />
               </label>
               <NumericInput
                 value={formSistema.zonaHorariaMin}
@@ -643,8 +778,12 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Retención Tabla Censo (días)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Retención Tabla Censo (días)</span>
+                <ParamHelpTooltip
+                  titulo="Antigüedad máxima de lecturas térmicas"
+                  texto="Cantidad de días que se conservan las mediciones en la tabla Censo. Cuando la purga automática está activa, los registros más antiguos que este plazo se eliminan y compactan en la MicroSD."
+                />
               </label>
               <NumericInput
                 value={formSistema.retencionCensoDias}
@@ -660,8 +799,12 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Retención Eventos Sensores (días)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Retención Eventos Sensores (días)</span>
+                <ParamHelpTooltip
+                  titulo="Historial de alarmas y transiciones DS18B20"
+                  texto="Plazo en días durante el cual se guardan los eventos de AuditoriaSensores (alarmas de temperatura, desconexiones y errores de bus) antes de ser purgados automáticamente."
+                />
               </label>
               <NumericInput
                 value={formSistema.retencionEventosDias}
@@ -677,8 +820,12 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Retención Auditoría Auth/Sistema (días)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Retención Auditoría Auth/Sistema (días)</span>
+                <ParamHelpTooltip
+                  titulo="Trazabilidad de seguridad y BIOS"
+                  texto="Días de retención para AuditoriaAuth (logins, cambios de rol y cadena HMAC-64) y AuditoriaSistema (arranques, heap y salud de MicroSD). Se recomienda un valor mayor al de Censo."
+                />
               </label>
               <NumericInput
                 value={formSistema.retencionAuditoriaDias}
@@ -694,8 +841,12 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Espacio Libre Mínimo MicroSD (KB)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Espacio Libre Mínimo MicroSD (KB)</span>
+                <ParamHelpTooltip
+                  titulo="Reserva de seguridad en tarjeta MicroSD"
+                  texto="Umbral mínimo de espacio libre (en KB, 1024 KB = 1 MB). Si la MicroSD baja de este margen, el sistema alerta y prioriza liberar registros antiguos para evitar quedarse sin almacenamiento."
+                />
               </label>
               <NumericInput
                 value={formSistema.sdLibreMinimoKb}
@@ -711,8 +862,12 @@ export function ConfiguracionView({
             </div>
 
             <div>
-              <label className="mb-1 block font-medium">
-                Cooldown Envío de Correos (segundos)
+              <label className="mb-1 flex items-center gap-1.5 font-medium">
+                <span>Cooldown Envío de Correos (segundos)</span>
+                <ParamHelpTooltip
+                  titulo="Intervalo mínimo entre envíos SMTP automáticos"
+                  texto="Tiempo de espera (en segundos) que el ESP32 respeta antes de volver a despachar un nuevo lote de correos de alerta o reintentar avisos fallidos. Evita saturar Gmail si una alarma oscila (ej. 300 s = 5 min; 0 = sin espera)."
+                />
               </label>
               <NumericInput
                 value={formSistema.correoCooldownS}
@@ -728,17 +883,23 @@ export function ConfiguracionView({
             </div>
           </div>
 
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              disabled={!esAdmin}
-              checked={formSistema.activa}
-              onChange={(e) =>
-                setFormSistema({ ...formSistema, activa: e.target.checked })
-              }
+          <div className="flex items-center gap-2 text-xs">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!esAdmin}
+                checked={formSistema.activa}
+                onChange={(e) =>
+                  setFormSistema({ ...formSistema, activa: e.target.checked })
+                }
+              />
+              Purga automática y políticas de retención activas
+            </label>
+            <ParamHelpTooltip
+              titulo="Mantenimiento automático de MicroSD"
+              texto="Si está activado, el ESP32 ejecuta periódicamente la limpieza de registros vencidos según los días de retención configurados arriba. Si se desactiva, solo se eliminan datos de forma manual."
             />
-            Purga automática y políticas de retención activas
-          </label>
+          </div>
 
           {esAdmin && (
             <button
@@ -903,135 +1064,260 @@ export function ConfiguracionView({
         </form>
       )}
 
-      {/* PESTAÑA 3: WIFI STA + SOFTAP (Solo ADMIN) */}
+      {/* PESTAÑA 3: WIFI STA + SOFTAP SEPARADOS (Solo ADMIN) */}
       {tab === "WIFI" && esAdmin && (
         <div className="space-y-4">
-          {wifiInfo && (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="rounded-xl border border-border bg-card p-4 text-xs shadow-xs">
-                <div className="font-semibold text-foreground-secondary">
-                  Modo Estación (STA · Router)
+          {/* Tarjetas de estado en vivo con botones de refrescar y reconectar STA */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-border bg-card p-4 text-xs shadow-xs">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-foreground-secondary">
+                    Modo Estación (STA · Router)
+                  </div>
+                  <div className="mt-1 font-mono text-base font-bold">
+                    {wifiInfo?.ssidSta || "Sin configurar"} · IP{" "}
+                    {wifiInfo?.ipSta || "0.0.0.0"}
+                  </div>
+                  <div className="mt-1">
+                    Estado:{" "}
+                    <strong
+                      className={
+                        wifiInfo?.conectadoARouter
+                          ? "text-success"
+                          : "text-warning"
+                      }
+                    >
+                      {wifiInfo?.conectadoARouter
+                        ? "Conectado al Router"
+                        : "Desconectado"}
+                    </strong>
+                  </div>
                 </div>
-                <div className="mt-1 font-mono text-base font-bold">
-                  {wifiInfo.ssidSta || "Sin configurar"} · IP{" "}
-                  {wifiInfo.ipSta || "0.0.0.0"}
-                </div>
-                <div className="mt-1">
-                  Estado:{" "}
-                  <strong
-                    className={
-                      wifiInfo.conectadoARouter ? "text-success" : "text-warning"
-                    }
-                  >
-                    {wifiInfo.conectadoARouter
-                      ? "Conectado al Router"
-                      : "Desconectado"}
-                  </strong>
-                </div>
-              </div>
 
-              <div className="rounded-xl border border-border bg-card p-4 text-xs shadow-xs">
-                <div className="font-semibold text-foreground-secondary">
-                  Punto de Acceso Local (SoftAP)
-                </div>
-                <div className="mt-1 font-mono text-base font-bold">
-                  {wifiInfo.ssidAp || "ESP32-UNTDF"} · IP{" "}
-                  {wifiInfo.ipAp || "192.168.4.1"}
-                </div>
-                <div className="mt-1">
-                  Estado:{" "}
-                  <strong
-                    className={
-                      wifiInfo.puntoAccesoActivo
-                        ? "text-success"
-                        : "text-foreground-secondary"
-                    }
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    disabled={cargando || accionWifi !== null}
+                    onClick={() => void cargarWifi(true)}
+                    className="btn btn-outline px-2 py-1 text-xs"
+                    title="Consultar estado actual de WiFi sin caché"
                   >
-                    {wifiInfo.puntoAccesoActivo ? "Activo" : "Inactivo"}
-                  </strong>
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 ${cargando ? "animate-spin" : ""}`}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      accionWifi !== null || !wifiInfo?.ssidSta
+                    }
+                    onClick={() => void reconectarWifiSta()}
+                    className={`btn px-2.5 py-1 text-xs font-semibold ${
+                      wifiInfo?.conectadoARouter
+                        ? "btn-outline"
+                        : "btn-solid btn-warning"
+                    }`}
+                    title="Reintentar conexión con el router usando las credenciales guardadas"
+                  >
+                    {accionWifi === "RECONECTAR" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCw className="h-3.5 w-3.5" />
+                    )}
+                    Reconectar STA
+                  </button>
                 </div>
               </div>
             </div>
-          )}
 
-          <form
-            onSubmit={guardarWifi}
-            className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
-          >
-            <h2 className="text-sm font-bold">
-              Credenciales Inalámbricas WPA2 (Estación + SoftAP)
-            </h2>
-            <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block font-medium">
-                  SSID Red Local (STA)
-                </label>
-                <input
-                  type="text"
-                  maxLength={31}
-                  value={formWifi.ssidSta}
-                  onChange={(e) =>
-                    setFormWifi({ ...formWifi, ssidSta: e.target.value })
-                  }
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
-                />
+            <div className="rounded-xl border border-border bg-card p-4 text-xs shadow-xs">
+              <div className="font-semibold text-foreground-secondary">
+                Punto de Acceso Local (SoftAP)
               </div>
-              <div>
-                <label className="mb-1 block font-medium">
-                  Clave WiFi STA (mín. 8 chars WPA2)
-                </label>
-                <input
-                  type="password"
-                  maxLength={63}
-                  value={formWifi.claveSta}
-                  onChange={(e) =>
-                    setFormWifi({ ...formWifi, claveSta: e.target.value })
-                  }
-                  placeholder="••••••••"
-                  className="w-full rounded border border-border bg-background px-3 py-1.5"
-                />
+              <div className="mt-1 font-mono text-base font-bold">
+                {wifiInfo?.ssidAp || "ESP32-SecureAP"} · IP{" "}
+                {wifiInfo?.ipAp || "192.168.4.1"}
               </div>
-              <div>
-                <label className="mb-1 block font-medium">
-                  SSID Punto de Acceso (SoftAP)
-                </label>
-                <input
-                  type="text"
-                  maxLength={31}
-                  required
-                  value={formWifi.ssidAp}
-                  onChange={(e) =>
-                    setFormWifi({ ...formWifi, ssidAp: e.target.value })
+              <div className="mt-1">
+                Estado:{" "}
+                <strong
+                  className={
+                    wifiInfo?.puntoAccesoActivo
+                      ? "text-success"
+                      : "text-foreground-secondary"
                   }
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block font-medium">
-                  Clave SoftAP (mín. 8 chars WPA2)
-                </label>
-                <input
-                  type="password"
-                  maxLength={63}
-                  required
-                  value={formWifi.claveAp}
-                  onChange={(e) =>
-                    setFormWifi({ ...formWifi, claveAp: e.target.value })
-                  }
-                  placeholder="••••••••"
-                  className="w-full rounded border border-border bg-background px-3 py-1.5"
-                />
+                >
+                  {wifiInfo?.puntoAccesoActivo ? "Activo" : "Inactivo"}
+                </strong>
               </div>
             </div>
+          </div>
 
-            <button
-              type="submit"
-              className="btn btn-solid btn-info px-4 py-2 text-xs font-bold"
+          {/* Dos formularios independientes para no pisar la otra interfaz */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {/* Tarjeta 1: Solo WiFi STA (Router) */}
+            <form
+              onSubmit={guardarWifiSta}
+              className="flex flex-col justify-between space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
             >
-              <Save className="h-4 w-4" />
-              Guardar Configuración WiFi
-            </button>
-          </form>
+              <div className="space-y-3">
+                <div>
+                  <h2 className="text-sm font-bold">
+                    Red Local / Router (Modo STA)
+                  </h2>
+                  <p className="text-[11px] text-foreground-secondary">
+                    Actualiza solo la conexión al router sin reiniciar el Punto
+                    de Acceso (SoftAP). Dejá la contraseña vacía para mantener
+                    la guardada.
+                  </p>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="mb-1 block font-medium">
+                      SSID Red Local (STA)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={31}
+                      value={formWifiSta.ssidSta}
+                      onChange={(e) =>
+                        setFormWifiSta({
+                          ...formWifiSta,
+                          ssidSta: e.target.value,
+                        })
+                      }
+                      placeholder="Nombre de tu red WiFi"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block font-medium">
+                      Clave WiFi STA (mín. 8 chars WPA2)
+                    </label>
+                    <PasswordInput
+                      maxLength={63}
+                      value={formWifiSta.claveSta}
+                      onChange={(e) =>
+                        setFormWifiSta({
+                          ...formWifiSta,
+                          claveSta: e.target.value,
+                        })
+                      }
+                      placeholder="Vacío = conservar clave actual"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={accionWifi !== null}
+                  className="btn btn-solid btn-info px-4 py-2 text-xs font-bold"
+                >
+                  {accionWifi === "STA" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4" />
+                  )}
+                  Guardar y Conectar STA
+                </button>
+
+                {wifiInfo?.ssidSta && (
+                  <button
+                    type="button"
+                    disabled={accionWifi !== null}
+                    onClick={() => void desvincularWifiSta()}
+                    className="btn btn-outline btn-error px-3 py-2 text-xs"
+                    title="Borrar credenciales del router y desconectar STA"
+                  >
+                    {accionWifi === "LIMPIAR_STA" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Unlink className="h-3.5 w-3.5" />
+                    )}
+                    Olvidar STA
+                  </button>
+                )}
+              </div>
+            </form>
+
+            {/* Tarjeta 2: Solo Punto de Acceso (SoftAP) */}
+            <form
+              onSubmit={guardarWifiAp}
+              className="flex flex-col justify-between space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+            >
+              <div className="space-y-3">
+                <div>
+                  <h2 className="text-sm font-bold">
+                    Punto de Acceso Directo (SoftAP)
+                  </h2>
+                  <p className="text-[11px] text-foreground-secondary">
+                    Actualiza solo la red propia del ESP32 sin desconectar ni
+                    alterar la contraseña del router (STA). Dejá la contraseña
+                    vacía para mantener la actual.
+                  </p>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="mb-1 block font-medium">
+                      SSID Punto de Acceso (SoftAP)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={31}
+                      required
+                      value={formWifiAp.ssidAp}
+                      onChange={(e) =>
+                        setFormWifiAp({
+                          ...formWifiAp,
+                          ssidAp: e.target.value,
+                        })
+                      }
+                      placeholder="ESP32-SecureAP"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block font-medium">
+                      Clave SoftAP (mín. 8 chars WPA2)
+                    </label>
+                    <PasswordInput
+                      maxLength={63}
+                      value={formWifiAp.claveAp}
+                      onChange={(e) =>
+                        setFormWifiAp({
+                          ...formWifiAp,
+                          claveAp: e.target.value,
+                        })
+                      }
+                      placeholder="Vacío = conservar clave actual"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <button
+                  type="submit"
+                  disabled={accionWifi !== null}
+                  className="btn btn-solid btn-primary px-4 py-2 text-xs font-bold"
+                >
+                  {accionWifi === "AP" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4" />
+                  )}
+                  Guardar SoftAP
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
@@ -1098,8 +1384,7 @@ export function ConfiguracionView({
                   <label className="mb-1 block">
                     Contraseña / App Password
                   </label>
-                  <input
-                    type="password"
+                  <PasswordInput
                     maxLength={159}
                     value={formSmtp.passwordCifrado}
                     onChange={(e) =>

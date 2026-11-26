@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <string.h>
 #include <stdexcept>
 #include "../common/PgDtoTypes.hpp"
 #include "RepositorioBase.hpp"
@@ -66,9 +67,73 @@ namespace DbRuntime::Repositories {
             return true;
         }
 
+        // Actualización independiente solo de STA (no modifica SoftAP; conserva clave si llega vacía)
+        static bool actualizarSta(const char* ssidSta, const char* passwordSta, bool conservarClaveSiVacia = true) {
+            ConfiguracionRedDTO actual{};
+            if (!obtenerOInicializar(actual)) return false;
+
+            const char* ssidFinal = ssidSta ? ssidSta : "";
+            const bool claveVacia = (!passwordSta || passwordSta[0] == '\0');
+            if (!claveVacia && strlen(passwordSta) < 8) {
+                throw std::invalid_argument("ValueError: la clave WiFi STA debe tener al menos 8 caracteres (WPA2)");
+            }
+
+            const char* claveFinal = (claveVacia && conservarClaveSiVacia && ssidFinal[0] != '\0')
+                ? actual.password_sta.c_str()
+                : (passwordSta ? passwordSta : "");
+
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool {
+                    return r.getInt32("id_configuracion_red") == actual.id_configuracion_red;
+                },
+                [&](PgRowBuffer& row) {
+                    row.setText("ssid_sta",     ssidFinal);
+                    row.setText("password_sta", claveFinal);
+                }
+            );
+            return n > 0;
+        }
+
+        // Actualización independiente solo de SoftAP (no modifica STA; conserva clave si llega vacía)
+        static bool actualizarAp(const char* ssidAp, const char* passwordAp, bool conservarClaveSiVacia = true) {
+            ConfiguracionRedDTO actual{};
+            if (!obtenerOInicializar(actual)) return false;
+
+            if (!ssidAp || ssidAp[0] == '\0') {
+                throw std::invalid_argument("ValueError: el SSID del SoftAP no puede estar vacio");
+            }
+            const bool claveVacia = (!passwordAp || passwordAp[0] == '\0');
+            if (!claveVacia && strlen(passwordAp) < 8) {
+                throw std::invalid_argument("ValueError: la clave del SoftAP debe tener al menos 8 caracteres (WPA2)");
+            }
+
+            const char* claveFinal = (claveVacia && conservarClaveSiVacia)
+                ? actual.password_ap.c_str()
+                : (passwordAp ? passwordAp : "");
+
+            const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
+                TABLA,
+                [&](const PgRowView& r) -> bool {
+                    return r.getInt32("id_configuracion_red") == actual.id_configuracion_red;
+                },
+                [&](PgRowBuffer& row) {
+                    row.setText("ssid_ap",     ssidAp);
+                    row.setText("password_ap", claveFinal);
+                }
+            );
+            return n > 0;
+        }
+
+        // Compatible con el contrato combinado: nunca pisa contraseñas existentes si llegan vacías
         static bool actualizarTodo(const ConfiguracionRedDTO& dto) {
             ConfiguracionRedDTO actual{};
             if (!obtenerOInicializar(actual)) return false;
+
+            const char* ssidStaFinal = dto.ssid_sta.vacio() ? actual.ssid_sta.c_str() : dto.ssid_sta.c_str();
+            const char* passStaFinal = dto.password_sta.vacio() ? actual.password_sta.c_str() : dto.password_sta.c_str();
+            const char* ssidApFinal  = dto.ssid_ap.vacio() ? actual.ssid_ap.c_str() : dto.ssid_ap.c_str();
+            const char* passApFinal  = dto.password_ap.vacio() ? actual.password_ap.c_str() : dto.password_ap.c_str();
 
             const int32_t idTarget = (dto.id_configuracion_red > 0) ? dto.id_configuracion_red : actual.id_configuracion_red;
             const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
@@ -77,10 +142,10 @@ namespace DbRuntime::Repositories {
                     return r.getInt32("id_configuracion_red") == idTarget;
                 },
                 [&](PgRowBuffer& row) {
-                    row.setText("ssid_sta",     dto.ssid_sta.c_str());
-                    row.setText("password_sta", dto.password_sta.c_str());
-                    row.setText("ssid_ap",      dto.ssid_ap.c_str());
-                    row.setText("password_ap",  dto.password_ap.c_str());
+                    row.setText("ssid_sta",     ssidStaFinal);
+                    row.setText("password_sta", passStaFinal);
+                    row.setText("ssid_ap",      ssidApFinal);
+                    row.setText("password_ap",  passApFinal);
                 }
             );
             return n > 0;

@@ -17,7 +17,61 @@ import {
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { client, safeRpc } from "../lib/service";
+import { PasswordInput } from "../components/ui/PasswordInput";
 import { RolUsuario } from "#types/rpc.types";
+
+const STORAGE_KEY_REMEMBER = "untdf_auth_remember_v1";
+
+interface DatosRecordadosLogin {
+  recordar: boolean;
+  usuario: string;
+  clave: string;
+  tab: "UARTS" | "WIFI";
+  ipWifi: string;
+}
+
+function leerDatosRecordados(): DatosRecordadosLogin {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY_REMEMBER);
+    if (!raw) {
+      return {
+        recordar: false,
+        usuario: "admin",
+        clave: "",
+        tab: "UARTS",
+        ipWifi: "192.168.4.1",
+      };
+    }
+    const parsed = JSON.parse(raw) as Partial<DatosRecordadosLogin>;
+    return {
+      recordar: Boolean(parsed.recordar),
+      usuario: typeof parsed.usuario === "string" && parsed.usuario ? parsed.usuario : "admin",
+      clave: typeof parsed.clave === "string" ? parsed.clave : "",
+      tab: parsed.tab === "WIFI" ? "WIFI" : "UARTS",
+      ipWifi: typeof parsed.ipWifi === "string" && parsed.ipWifi ? parsed.ipWifi : "192.168.4.1",
+    };
+  } catch {
+    return {
+      recordar: false,
+      usuario: "admin",
+      clave: "",
+      tab: "UARTS",
+      ipWifi: "192.168.4.1",
+    };
+  }
+}
+
+function guardarDatosRecordados(datos: DatosRecordadosLogin | null) {
+  try {
+    if (!datos || !datos.recordar) {
+      window.localStorage.removeItem(STORAGE_KEY_REMEMBER);
+      return;
+    }
+    window.localStorage.setItem(STORAGE_KEY_REMEMBER, JSON.stringify(datos));
+  } catch {
+    // Ignorar si localStorage no está disponible
+  }
+}
 
 export function AuthGate() {
   const {
@@ -35,14 +89,17 @@ export function AuthGate() {
   } = useAuth();
   const { theme, toggleTheme } = useTheme();
 
-  const [tab, setTab] = useState<"UARTS" | "WIFI">("UARTS");
+  const inicial = leerDatosRecordados();
+
+  const [tab, setTab] = useState<"UARTS" | "WIFI">(inicial.tab);
   const [puertos, setPuertos] = useState<string[]>([]);
   const [puertoSeleccionado, setPuertoSeleccionado] = useState("");
-  const [ipInput, setIpInput] = useState("192.168.4.1");
+  const [ipInput, setIpInput] = useState(inicial.ipWifi);
   const [cargandoConexion, setCargandoConexion] = useState(false);
 
-  const [userInput, setUserInput] = useState("admin");
-  const [passInput, setPassInput] = useState("");
+  const [userInput, setUserInput] = useState(inicial.usuario);
+  const [passInput, setPassInput] = useState(inicial.clave);
+  const [recordarLogin, setRecordarLogin] = useState(inicial.recordar);
   const [cargandoLogin, setCargandoLogin] = useState(false);
 
   const [mostrarLogs, setMostrarLogs] = useState(false);
@@ -69,7 +126,7 @@ export function AuthGate() {
 
   useEffect(() => {
     if (!conectado) {
-      cargarPuertos();
+      void cargarPuertos();
     }
   }, [conectado]);
 
@@ -83,10 +140,17 @@ export function AuthGate() {
       );
       if (res) setLogs(res);
     };
-    cargar();
-    const id = window.setInterval(cargar, 1000);
+    void cargar();
+    const id = window.setInterval(() => void cargar(), 1000);
     return () => window.clearInterval(id);
   }, [mostrarLogs]);
+
+  const handleToggleRecordar = (checked: boolean) => {
+    setRecordarLogin(checked);
+    if (!checked) {
+      guardarDatosRecordados(null);
+    }
+  };
 
   const handleConectarSerie = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -120,6 +184,17 @@ export function AuthGate() {
     setCargandoLogin(true);
     try {
       await login(userInput.trim(), passInput);
+      if (recordarLogin) {
+        guardarDatosRecordados({
+          recordar: true,
+          usuario: userInput.trim(),
+          clave: passInput,
+          tab,
+          ipWifi: ipInput.trim() || "192.168.4.1",
+        });
+      } else {
+        guardarDatosRecordados(null);
+      }
     } catch {
       // Ya notificado por AuthContext
     } finally {
@@ -227,7 +302,7 @@ export function AuthGate() {
                 }`}
               >
                 <Wifi className="h-4 w-4" />
-                WiFi (TLS + UDP)
+                WiFi (AEAD + UDP)
               </button>
             </div>
 
@@ -240,7 +315,7 @@ export function AuthGate() {
                     </label>
                     <button
                       type="button"
-                      onClick={cargarPuertos}
+                      onClick={() => void cargarPuertos()}
                       className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
                     >
                       <RefreshCw className="h-3 w-3" />
@@ -384,19 +459,28 @@ export function AuthGate() {
                 <label className="mb-1 block text-xs font-semibold">
                   Contraseña
                 </label>
-                <div className="relative">
-                  <Lock className="pointer-events-none absolute top-2.5 left-3 h-4 w-4 text-foreground-secondary" />
-                  <input
-                    type="password"
-                    maxLength={31}
-                    value={passInput}
-                    onChange={(e) => setPassInput(e.target.value)}
-                    className="w-full rounded-md border border-border bg-background py-2 pr-3 pl-9 text-sm"
-                    placeholder="••••••••"
-                    required
-                  />
-                </div>
+                <PasswordInput
+                  leftIcon={<Lock className="h-4 w-4" />}
+                  maxLength={31}
+                  value={passInput}
+                  onChange={(e) => setPassInput(e.target.value)}
+                  className="w-full rounded-md border border-border bg-background py-2 pl-9 text-sm"
+                  placeholder="••••••••"
+                  required
+                />
               </div>
+
+              <label className="flex cursor-pointer items-center justify-between gap-2 text-xs text-foreground-secondary">
+                <span className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={recordarLogin}
+                    onChange={(e) => handleToggleRecordar(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  Recordar usuario y contraseña en este equipo
+                </span>
+              </label>
 
               <button
                 type="submit"

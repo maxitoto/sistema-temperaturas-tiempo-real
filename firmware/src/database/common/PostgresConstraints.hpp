@@ -76,7 +76,9 @@ namespace DbCommon::Standard {
             return true;
         }
     };
+    #ifndef __INTELLISENSE__
     static_assert(sizeof(PgBinHeader) == 32, "PgBinHeader debe medir exactamente 32 bytes");
+    #endif
 
     // Calcula el tamaño binario fijo en disco de una columna según su PgDataType
     inline uint16_t computeBinaryColumnSize(PgDataType dt, uint16_t maxLength) {

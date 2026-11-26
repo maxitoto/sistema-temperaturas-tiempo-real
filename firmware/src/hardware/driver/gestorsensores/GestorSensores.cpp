@@ -3,7 +3,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
-#include <math.h>
+
 
 GestorSensores::GestorSensores()
     : bus(Pin::PIN_SENSOR_1WIRE) {
@@ -21,8 +21,8 @@ bool GestorSensores::esFamiliaValida(uint8_t fam) {
 
 int8_t GestorSensores::clampToInt8(float val) {
     float r = roundf(val);
-    if (r > Sensor::TEMP_MAX_C) return Sensor::TEMP_MAX_C;
-    if (r < Sensor::TEMP_MIN_C) return Sensor::TEMP_MIN_C;
+    if (r > Sensor::TEMP_MAX_C) return static_cast<int8_t>(Sensor::TEMP_MAX_C);
+    if (r < Sensor::TEMP_MIN_C) return static_cast<int8_t>(Sensor::TEMP_MIN_C);
     return static_cast<int8_t>(r);
 }
 
@@ -40,7 +40,6 @@ int8_t GestorSensores::buscarSlotPorMACInterno(const char* macHex) const {
     size_t len = strlen(macHex);
     for (uint8_t i = 0; i < MAX_SENSORES; i++) {
         if (!sensores[i].estaActivo()) continue;
-        // Permite buscar tanto por MAC completa (16 chars) como por sufijo corto (mac3 o mac2)
         if (len == 3 && strncasecmp(sensores[i].obtenerMAC3(), macHex, 3) == 0) {
             return static_cast<int8_t>(i);
         }
@@ -68,7 +67,18 @@ void GestorSensores::reevaluarAlarmaSlotInterno(Sensor& s) {
     if (!estadoTieneLecturaValida(s.obtenerEstado())) {
         return;
     }
-    float t = s.obtenerTempCelsius();
+
+    const float tCruda = s.obtenerTempCruda();
+    const float t      = s.obtenerTempCelsius();
+    if (!esTemperaturaCrudaDS18B20Valida(tCruda) || !isfinite(t) || t <= -100.0f) {
+        s.setTempRaw(DEVICE_DISCONNECTED_RAW);
+        s.setTempCruda(DEVICE_DISCONNECTED_C);
+        s.setTempCelsius(DEVICE_DISCONNECTED_C);
+        s.setEstado(EstadoSensor::DESCONECTADO);
+        s.setEnAlarma(true);
+        return;
+    }
+
     if (t >= s.obtenerUmbralSuperior()) {
         s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
         s.setEnAlarma(true);
@@ -197,7 +207,7 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
         anteriores[s] = sensores[s];
         sensores[s].limpiar(s);
     }
-    
+
     totalAsignados = 0;
     modoParasitoGlobal = false;
     uint8_t tope = (totalDetectadosBus > MAX_SENSORES) ? MAX_SENSORES : totalDetectadosBus;
@@ -253,12 +263,21 @@ uint8_t GestorSensores::escanearYAsignarSensores(uint8_t resolucionGlobal, bool 
             s.setResolucionBits(resolucionGlobal);
         }
 
-        s.setEstado(EstadoSensor::OK);
+        // Nunca deja un sensor nuevo en OK con temp = -127 antes de su primera lectura real
+        if (!yaExistia) {
+            s.setEstado(EstadoSensor::CONVERSION_PENDIENTE);
+        }
         totalAsignados++;
     }
 
     if (solicitarConversionInicial && totalAsignados > 0) {
-        solicitarConversionGlobal(true);
+        if (solicitarConversionGlobal(true)) {
+            for (uint8_t i = 0; i < MAX_SENSORES; i++) {
+                if (sensores[i].estaActivo()) {
+                    actualizarLecturaSlot(i);
+                }
+            }
+        }
     }
 
     if (ultimoEvento == EventoGestor::NINGUNO) {
@@ -404,6 +423,7 @@ EstadoSensor GestorSensores::evaluarFalloScratchpad(const uint8_t* pad) const {
         return EstadoSensor::ERROR_CRC_SCRATCHPAD;
     }
 
+    // Reglas del driver Linux DS18B20: Power-On Reset (85.0 °C + count_remain=0x0C) y fallo de potencia (0x07FF)
     int16_t raw16 = static_cast<int16_t>((static_cast<uint16_t>(pad[1]) << 8) | pad[0]);
     if (raw16 == 0x0550 && pad[6] == 0x0C) {
         return EstadoSensor::REINICIO_ENERGIA_85C;
@@ -457,23 +477,45 @@ EstadoSensor GestorSensores::actualizarLecturaSlot(uint8_t slot) {
     }
 
     if (estadoEvaluado != EstadoSensor::OK) {
-        float codigoComoTemp = temperaturaCentinelaDeEstado(estadoEvaluado);
-        s.setTempCruda(codigoComoTemp);
-        s.setTempCelsius(codigoComoTemp);
+        const float codigoCentinela = temperaturaCentinelaDeEstado(estadoEvaluado);
+        s.setTempRaw(DEVICE_DISCONNECTED_RAW);
+        s.setTempCruda(codigoCentinela);
+        s.setTempCelsius(codigoCentinela);
         s.setEstado(estadoEvaluado);
         s.setEnAlarma(true);
         return s.obtenerEstado();
     }
 
     int32_t raw = 0;
-    float tempCruda = convertirScratchpadACelsius(s.obtenerROM(), pad, raw);
-    float tempCorregida = s.aplicarCalibracion(tempCruda);
+    const float tempCruda = convertirScratchpadACelsius(s.obtenerROM(), pad, raw);
 
+    // Frontera física del DS18B20 (-55 °C a +125 °C): jamás clasificar un valor fuera de silicio como ALARMA_INFERIOR/SUPERIOR
+    if (!esTemperaturaCrudaDS18B20Valida(tempCruda)) {
+        s.setTempRaw(DEVICE_DISCONNECTED_RAW);
+        s.setTempCruda(DEVICE_DISCONNECTED_C);
+        s.setTempCelsius(DEVICE_DISCONNECTED_C);
+        s.setEstado(EstadoSensor::DESCONECTADO);
+        s.setEnAlarma(true);
+        return s.obtenerEstado();
+    }
+
+    const float tempCorregida = s.aplicarCalibracion(tempCruda);
     s.setTempRaw(raw);
     s.setTempCruda(tempCruda);
     s.setTempCelsius(tempCorregida);
 
-    reevaluarAlarmaSlotInterno(s);
+    // Evalúa directamente los umbrales (permite recuperar DESCONECTADO / CONVERSION_PENDIENTE -> OK al instante)
+    if (tempCorregida >= s.obtenerUmbralSuperior()) {
+        s.setEstado(EstadoSensor::ALARMA_SUPERIOR);
+        s.setEnAlarma(true);
+    } else if (tempCorregida <= s.obtenerUmbralInferior()) {
+        s.setEstado(EstadoSensor::ALARMA_INFERIOR);
+        s.setEnAlarma(true);
+    } else {
+        s.setEstado(EstadoSensor::OK);
+        s.setEnAlarma(false);
+    }
+
     return s.obtenerEstado();
 }
 

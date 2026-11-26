@@ -857,6 +857,58 @@ namespace DbRuntime::Storage {
             f.close();
         }
 
+        // Escaneo hacia adelante usando un buffer externo propio (seguro para JOIN anidados)
+        template <typename CallbackFn>
+        void scanForwardWithBuf(const char* tableName, uint8_t* extBuf, size_t extCap, CallbackFn fn) {
+            auto lk = lockEngine();
+            flushBatchLocked();
+
+            const TablePhysicalSchema* schema = PhysicalSchemaCatalog::getInstance().getTable(tableName);
+            char path[64]{};
+            if (!ensureFileLocked(schema, path, sizeof(path))) return;
+            if (!extBuf || extCap < schema->recordSize) return;
+
+            File f = SD.open(path, FILE_READ);
+            if (!f) return;
+
+            PgBinHeader hdr{};
+            if (!readHeader(f, hdr, schema->recordSize) || hdr.totalSlots == 0) {
+                f.close();
+                return;
+            }
+
+            const uint16_t recSize       = hdr.recordSize;
+            const uint32_t slotsPerChunk = (extCap / recSize) > 0 ? static_cast<uint32_t>(extCap / recSize) : 1u;
+
+            uint32_t slotActual = 0;
+            uint16_t yieldCtr   = 0;
+            bool stop           = false;
+
+            while (slotActual < hdr.totalSlots && !stop) {
+                const uint32_t rem    = hdr.totalSlots - slotActual;
+                const uint32_t nSlots = (rem > slotsPerChunk) ? slotsPerChunk : rem;
+                const size_t bytesReq = static_cast<size_t>(nSlots) * recSize;
+
+                const int got = f.read(extBuf, bytesReq);
+                if (got < static_cast<int>(recSize)) break;
+
+                const uint32_t gotSlots = static_cast<uint32_t>(got / recSize);
+                for (uint32_t i = 0; i < gotSlots; ++i) {
+                    const uint8_t* ptr = extBuf + (static_cast<size_t>(i) * recSize);
+                    if ((ptr[0] & SLOT_FLAG_ACTIVE) != 0) {
+                        PgRowView view(schema, ptr);
+                        if (!fn(view, slotActual + i)) {
+                            stop = true;
+                            break;
+                        }
+                    }
+                    if ((++yieldCtr & 127u) == 0) vTaskDelay(1);
+                }
+                slotActual += gotSlots;
+            }
+            f.close();
+        }
+
         // --- Escaneo inverso (slot N-1 -> 0) en bloques de 1 KB: paginación DESC en < 5 ms ---
         template <typename CallbackFn>
         void scanBackward(const char* tableName, CallbackFn fn) {

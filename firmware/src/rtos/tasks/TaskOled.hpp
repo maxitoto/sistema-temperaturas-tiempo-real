@@ -368,8 +368,8 @@ static void dibujarDetalleSensor(
 
     // Buffers dimensionados para el peor caso.
     char fila1[32] = {};
-    char fila2[22] = {};
-    char fila3[22] = {};
+    char fila2[28] = {};
+    char fila3[28] = {};
     char fila4[48] = {};
 
     char tempCorregida[8] = {};

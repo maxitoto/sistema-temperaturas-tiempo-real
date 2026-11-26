@@ -20,6 +20,7 @@ import { formatearEpochSegundos } from "../lib/format";
 import { LABEL_ROL } from "../lib/labels";
 import { sufijoFechaArchivo } from "../lib/exportCsv";
 import { exportarTablaExcel } from "../lib/exportExcel";
+import { PasswordInput } from "../components/ui/PasswordInput";
 import {
   EstadisticasUsuariosCliente,
   PerfilUsuarioCliente,
@@ -160,7 +161,7 @@ export function UsuariosView() {
     e.preventDefault();
     if (!usuarioActual || !claveNueva) return;
     if (claveNueva !== claveConfirm) {
-      window.alert("La nueva contraseña y su confirmación no coinciden.");
+      toast.warning("La nueva contraseña y su confirmación no coinciden.");
       return;
     }
     setCambiandoClave(true);
@@ -355,8 +356,7 @@ export function UsuariosView() {
           <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
             <div>
               <label className="mb-1 block">Clave Actual</label>
-              <input
-                type="password"
+              <PasswordInput
                 maxLength={27}
                 value={claveActual}
                 onChange={(e) => setClaveActual(e.target.value)}
@@ -367,8 +367,7 @@ export function UsuariosView() {
             </div>
             <div>
               <label className="mb-1 block">Nueva Contraseña</label>
-              <input
-                type="password"
+              <PasswordInput
                 maxLength={27}
                 value={claveNueva}
                 onChange={(e) => setClaveNueva(e.target.value)}
@@ -379,8 +378,7 @@ export function UsuariosView() {
             </div>
             <div>
               <label className="mb-1 block">Confirmar Nueva</label>
-              <input
-                type="password"
+              <PasswordInput
                 maxLength={27}
                 value={claveConfirm}
                 onChange={(e) => setClaveConfirm(e.target.value)}
@@ -462,14 +460,13 @@ export function UsuariosView() {
             </div>
             <div>
               <label className="mb-1 block">Contraseña Inicial</label>
-              <input
-                type="password"
+              <PasswordInput
                 maxLength={27}
                 value={nuevaClaveUsuario}
                 onChange={(e) => setNuevaClaveUsuario(e.target.value)}
                 placeholder="••••••••"
                 required
-                className="rounded border border-border bg-background px-2.5 py-1.5"
+                className="w-44 rounded border border-border bg-background px-2.5 py-1.5"
               />
             </div>
             <div>
@@ -513,14 +510,13 @@ export function UsuariosView() {
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <input
-                  type="password"
+                <PasswordInput
                   maxLength={27}
                   value={claveResetAdmin}
                   onChange={(e) => setClaveResetAdmin(e.target.value)}
                   placeholder="Nueva contraseña..."
                   required
-                  className="rounded border border-border bg-background px-2.5 py-1"
+                  className="w-48 rounded border border-border bg-background px-2.5 py-1"
                 />
                 <button
                   type="submit"

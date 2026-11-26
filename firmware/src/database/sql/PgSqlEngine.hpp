@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <strings.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -17,6 +18,8 @@
 #include "../DB_DDL/standard/PostgresReservedWords.hpp"
 #include "../DB_DQL_DML/standard/PostgresDmlDqlKeywords.hpp"
 #include "../storage/PgBinaryStorage.hpp"
+#include "PgVirtualCatalog.hpp"
+#include "PgSqlDqlEngine.hpp"
 
 namespace DbSql {
 
@@ -31,11 +34,8 @@ namespace DbSql {
     using DbCommon::Standard::PgBinHeader;
     using DbCommon::Standard::PgDataType;
     using DbCommon::Standard::ReferentialAction;
-    using DbCommon::Standard::SortDirection;
     using DbCommon::Standard::SqlState;
     using DbNotRuntime::Standard::PostgresLexicalValidator;
-    using DbRuntime::Standard::FilterOp;
-    using DbRuntime::Standard::LogicConnector;
     using DbRuntime::Storage::PgBinaryStorage;
     using DbRuntime::Storage::PgRowBuffer;
     using DbRuntime::Storage::PgRowView;
@@ -52,24 +52,6 @@ namespace DbSql {
 
     class PgSqlEngine {
     private:
-        struct SimplePred {
-            int8_t         colIdx    = -1;
-            FilterOp       op        = FilterOp::EQ;
-            LogicConnector connector = LogicConnector::AND_OP;
-            char           val[64]{};
-        };
-
-        struct SlotSortKey {
-            uint32_t slotIdx = 0;
-            uint8_t  kind    = 0; // 0=NULL, 1=INT64, 2=DOUBLE, 3=TEXT
-            union {
-                int64_t i64;
-                double  f64;
-            } num{};
-            char txt[20]{};
-        };
-
-        // Buffer de salida persistente en la instancia: elimina >5 KB de stack en execute()
         SqlExecResult resBuf{};
         bool deferCatalogFlush = false;
 
@@ -136,38 +118,18 @@ namespace DbSql {
             return out;
         }
 
-        static bool matchLike(const char* str, const char* pat, bool caseInsensitive) {
-            while (*pat) {
-                if (*pat == '%') {
-                    while (*pat == '%') pat++;
-                    if (!*pat) return true;
-                    while (*str) {
-                        if (matchLike(str, pat, caseInsensitive)) return true;
-                        str++;
-                    }
-                    return false;
-                }
-                if (!*str) return false;
-                if (*pat != '_') {
-                    char a = caseInsensitive ? static_cast<char>(tolower(*str)) : *str;
-                    char b = caseInsensitive ? static_cast<char>(tolower(*pat)) : *pat;
-                    if (a != b) return false;
-                }
-                str++;
-                pat++;
-            }
-            return *str == '\0';
-        }
-
         static int findKeywordOutsideQuotes(const String& src, const char* kwUpper, int fromIdx = 0) {
             const size_t kwLen = strlen(kwUpper);
             bool inS = false, inD = false;
+            int par = 0;
             for (int i = fromIdx; i + static_cast<int>(kwLen) <= static_cast<int>(src.length()); ++i) {
                 char c = src[i];
                 if (c == '\'' && !inD) inS = !inS;
                 else if (c == '"' && !inS) inD = !inD;
-                if (!inS && !inD) {
-                    if (strncasecmp(src.c_str() + i, kwUpper, kwLen) == 0) {
+                else if (!inS && !inD) {
+                    if (c == '(') par++;
+                    else if (c == ')' && par > 0) par--;
+                    if (par == 0 && strncasecmp(src.c_str() + i, kwUpper, kwLen) == 0) {
                         return i;
                     }
                 }
@@ -242,118 +204,35 @@ namespace DbSql {
             return s.substring(start, cursor);
         }
 
-        static bool parseWhereClause(
-            const TablePhysicalSchema& schema,
+        static bool parseSingleTableWhere(
+            const TablePhysicalSchema* schema,
             const String& whereStr,
-            std::vector<SimplePred>& outPreds,
+            std::vector<BoundTable>& tablesOut,
+            std::vector<ExprNode>& nodesOut,
+            int16_t& rootOut,
             const char* cmd,
             SqlExecResult& errRes
         ) {
+            tablesOut.clear();
+            BoundTable bt{};
+            bt.isVirtual = false;
+            bt.schema    = schema;
+            bt.fullName  = schema->tableName;
+            bt.shortName = schema->tableName;
+            bt.alias     = schema->tableName;
+            tablesOut.push_back(bt);
+
             String w = whereStr;
             w.trim();
-            if (w.isEmpty()) return true;
+            if (w.isEmpty()) { rootOut = -1; return true; }
 
-            int pos = 0;
-            LogicConnector nextConn = LogicConnector::AND_OP;
-
-            while (pos < static_cast<int>(w.length())) {
-                int pAnd = findKeywordOutsideQuotes(w, " AND ", pos);
-                int pOr  = findKeywordOutsideQuotes(w, " OR ",  pos);
-                int cut  = w.length();
-                LogicConnector afterConn = LogicConnector::AND_OP;
-                int skipLen = 0;
-
-                if (pAnd >= 0 && pAnd < cut) { cut = pAnd; afterConn = LogicConnector::AND_OP; skipLen = 5; }
-                if (pOr  >= 0 && pOr  < cut) { cut = pOr;  afterConn = LogicConnector::OR_OP;  skipLen = 4; }
-
-                String part = w.substring(pos, cut);
-                part.trim();
-                pos = (skipLen > 0) ? (cut + skipLen) : static_cast<int>(w.length());
-
-                if (part.isEmpty()) {
-                    nextConn = afterConn;
-                    continue;
-                }
-
-                SimplePred pred{};
-                pred.connector = nextConn;
-                nextConn = afterConn;
-
-                String partUp = part;
-                partUp.toUpperCase();
-
-                int idxNull = partUp.indexOf(" IS NOT NULL");
-                if (idxNull > 0) {
-                    String col = stripQuotes(part.substring(0, idxNull));
-                    pred.colIdx = schema.findColumnIndex(col);
-                    pred.op     = FilterOp::IS_NOT_NULL;
-                } else if ((idxNull = partUp.indexOf(" IS NULL")) > 0) {
-                    String col = stripQuotes(part.substring(0, idxNull));
-                    pred.colIdx = schema.findColumnIndex(col);
-                    pred.op     = FilterOp::IS_NULL;
-                } else {
-                    const char* ops[]  = { ">=", "<=", "<>", "!=", "=", ">", "<", " ILIKE ", " LIKE " };
-                    FilterOp    fOps[] = { FilterOp::GTE, FilterOp::LTE, FilterOp::NEQ, FilterOp::NEQ,
-                                           FilterOp::EQ,  FilterOp::GT,  FilterOp::LT,  FilterOp::ILIKE, FilterOp::LIKE };
-                    bool matched = false;
-                    for (size_t k = 0; k < 9; ++k) {
-                        int opPos = findKeywordOutsideQuotes(part, ops[k], 0);
-                        if (opPos > 0) {
-                            String col = stripQuotes(part.substring(0, opPos));
-                            String val = stripQuotes(part.substring(opPos + static_cast<int>(strlen(ops[k]))));
-                            pred.colIdx = schema.findColumnIndex(col);
-                            pred.op     = fOps[k];
-                            copyStr(pred.val, sizeof(pred.val), val.c_str());
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if (!matched) {
-                        return fail(errRes, SqlState::SYNTAX_ERROR, cmd, schema.tableName, "",
-                                    "syntax error in WHERE condition: \"" + part + "\"");
-                    }
-                }
-
-                if (pred.colIdx < 0) {
-                    return fail(errRes, SqlState::UNDEFINED_COLUMN, cmd, schema.tableName, "",
-                                "column referenced in WHERE clause does not exist: \"" + part + "\"");
-                }
-                outPreds.push_back(pred);
+            auto toks = tokenizeSql(w);
+            SqlExprParser p(toks, tablesOut, nodesOut, nullptr);
+            rootOut = p.parseExpr();
+            if (rootOut < 0) {
+                return fail(errRes, p.errorState, cmd, schema->tableName, "", p.errorMsg);
             }
             return true;
-        }
-
-        static bool evalPreds(const PgRowView& row, const std::vector<SimplePred>& preds) {
-            if (preds.empty()) return true;
-            bool acc = true;
-            for (size_t i = 0; i < preds.size(); ++i) {
-                const auto& p = preds[i];
-                bool cur = false;
-                const bool isN = row.isNullIdx(p.colIdx);
-
-                if (p.op == FilterOp::IS_NULL) {
-                    cur = isN;
-                } else if (p.op == FilterOp::IS_NOT_NULL) {
-                    cur = !isN;
-                } else if (!isN) {
-                    switch (p.op) {
-                        case FilterOp::EQ:    cur = (row.compareCellWithLiteral(p.colIdx, p.val) == 0); break;
-                        case FilterOp::NEQ:   cur = (row.compareCellWithLiteral(p.colIdx, p.val) != 0); break;
-                        case FilterOp::GT:    cur = (row.compareCellWithLiteral(p.colIdx, p.val) > 0);  break;
-                        case FilterOp::GTE:   cur = (row.compareCellWithLiteral(p.colIdx, p.val) >= 0); break;
-                        case FilterOp::LT:    cur = (row.compareCellWithLiteral(p.colIdx, p.val) < 0);  break;
-                        case FilterOp::LTE:   cur = (row.compareCellWithLiteral(p.colIdx, p.val) <= 0); break;
-                        case FilterOp::LIKE:  cur = matchLike(row.getCStrIdx(p.colIdx), p.val, false);  break;
-                        case FilterOp::ILIKE: cur = matchLike(row.getCStrIdx(p.colIdx), p.val, true);   break;
-                        default: cur = false; break;
-                    }
-                }
-
-                if (i == 0) acc = cur;
-                else if (p.connector == LogicConnector::OR_OP) acc = acc || cur;
-                else acc = acc && cur;
-            }
-            return acc;
         }
 
         __attribute__((noinline))
@@ -607,7 +486,70 @@ namespace DbSql {
             return true;
         }
 
-        // --- A. CREATE TYPE [IF NOT EXISTS] <nombre> AS ENUM (...) ---
+        // Normaliza SQL multi-línea: elimina comentarios (-- y /* */) y colapsa saltos/tabs/espacios fuera de comillas
+        static String normalizarSql(const char* rawSql) {
+            String out = "";
+            if (!rawSql) return out;
+            const size_t n = strlen(rawSql);
+            out.reserve(n + 1);
+
+            bool inSingle = false;
+            bool inDouble = false;
+            bool prevSpace = true;
+
+            for (size_t i = 0; i < n; ++i) {
+                const char c    = rawSql[i];
+                const char next = (i + 1 < n) ? rawSql[i + 1] : '\0';
+
+                if (!inSingle && !inDouble) {
+                    if (c == '-' && next == '-') {
+                        i += 2;
+                        while (i < n && rawSql[i] != '\n') ++i;
+                        if (!prevSpace) { out += ' '; prevSpace = true; }
+                        continue;
+                    }
+                    if (c == '/' && next == '*') {
+                        i += 2;
+                        while (i + 1 < n && !(rawSql[i] == '*' && rawSql[i + 1] == '/')) ++i;
+                        if (i + 1 < n) ++i;
+                        if (!prevSpace) { out += ' '; prevSpace = true; }
+                        continue;
+                    }
+                    if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+                        if (!prevSpace) {
+                            out += ' ';
+                            prevSpace = true;
+                        }
+                        continue;
+                    }
+                    if (c == '\'') inSingle = true;
+                    else if (c == '"') inDouble = true;
+                    out += c;
+                    prevSpace = false;
+                } else {
+                    out += c;
+                    if (inSingle && c == '\'') {
+                        if (next == '\'') {
+                            out += next;
+                            ++i;
+                        } else {
+                            inSingle = false;
+                        }
+                    } else if (inDouble && c == '"') {
+                        inDouble = false;
+                    }
+                }
+            }
+
+            out.trim();
+            while (out.endsWith(";")) {
+                out.remove(out.length() - 1);
+                out.trim();
+            }
+            return out;
+        }
+
+        // --- A. CREATE / ALTER / DROP TYPE (ENUM) ---
         __attribute__((noinline))
         void execCreateType(const String& sql, const String& upper) {
             int posAsEnum = upper.indexOf(" AS ENUM");
@@ -663,6 +605,101 @@ namespace DbSql {
             cat.registerEnum(def);
             flushCatalogIfAllowed();
             okResult(resBuf, "CREATE TYPE", 0, "CREATE TYPE");
+        }
+
+        __attribute__((noinline))
+        void execAlterType(const String& sql, const String& upper) {
+            int posAdd = upper.indexOf(" ADD VALUE ");
+            if (posAdd < 0) {
+                fail(resBuf, SqlState::FEATURE_NOT_SUPPORTED, "ALTER TYPE", "", "",
+                     "only ALTER TYPE <enum> ADD VALUE [IF NOT EXISTS] '<label>' is supported");
+                return;
+            }
+
+            String typeName = stripQuotes(sql.substring(11, posAdd));
+            String valRest  = sql.substring(posAdd + 11);
+            valRest.trim();
+
+            bool ifNotExists = false;
+            String vUp = valRest; vUp.toUpperCase();
+            if (vUp.startsWith("IF NOT EXISTS ")) {
+                ifNotExists = true;
+                valRest = valRest.substring(14);
+                valRest.trim();
+            }
+
+            String newLabel = stripQuotes(valRest);
+            if (newLabel.isEmpty()) {
+                fail(resBuf, SqlState::SYNTAX_ERROR, "ALTER TYPE", "", "", "empty enum label in ADD VALUE");
+                return;
+            }
+
+            auto& cat = PhysicalSchemaCatalog::getInstance();
+            const auto* existing = cat.getEnum(typeName);
+            if (!existing) {
+                fail(resBuf, SqlState::UNDEFINED_OBJECT, "ALTER TYPE", "", "",
+                     "type \"" + typeName + "\" does not exist");
+                return;
+            }
+
+            if (existing->containsLabel(newLabel)) {
+                if (ifNotExists) {
+                    okResult(resBuf, "ALTER TYPE", 0, "ALTER TYPE (label already exists, skipping)");
+                    return;
+                }
+                fail(resBuf, SqlState::DUPLICATE_OBJECT, "ALTER TYPE", "", "",
+                     "enum label \"" + newLabel + "\" already exists");
+                return;
+            }
+
+            if (existing->labels.size() >= 254) {
+                fail(resBuf, SqlState::INVALID_OBJECT_DEFINITION, "ALTER TYPE", "", "",
+                     "enum reached maximum 254 labels in 1-byte binary encoding");
+                return;
+            }
+
+            EnumTypeDefinition updated = *existing;
+            updated.labels.push_back(newLabel);
+            cat.registerEnum(updated);
+            flushCatalogIfAllowed();
+            okResult(resBuf, "ALTER TYPE", 0, "ALTER TYPE");
+        }
+
+        __attribute__((noinline))
+        void execDropType(const String& sql) {
+            String rest = sql.substring(10); rest.trim();
+            String rUp  = rest; rUp.toUpperCase();
+            bool ifExists = false;
+            if (rUp.startsWith("IF EXISTS ")) {
+                ifExists = true;
+                rest = rest.substring(10); rest.trim();
+            }
+            String typeName = stripQuotes(rest);
+
+            auto& cat = PhysicalSchemaCatalog::getInstance();
+            if (!cat.hasEnum(typeName)) {
+                if (ifExists) {
+                    okResult(resBuf, "DROP TYPE", 0, "DROP TYPE (does not exist, skipping)");
+                    return;
+                }
+                fail(resBuf, SqlState::UNDEFINED_OBJECT, "DROP TYPE", "", "",
+                     "type \"" + typeName + "\" does not exist");
+                return;
+            }
+
+            for (const auto& kv : cat.getAllTables()) {
+                for (const auto& col : kv.second.columns) {
+                    if (col.dataType == PgDataType::ENUM && col.customTypeName.equalsIgnoreCase(typeName)) {
+                        fail(resBuf, SqlState::DEPENDENT_OBJECTS_STILL_EXIST, "DROP TYPE", kv.second.tableName, col.columnName,
+                             "cannot drop type \"" + typeName + "\" because column \"" + col.columnName + "\" depends on it");
+                        return;
+                    }
+                }
+            }
+
+            cat.removeEnum(typeName);
+            flushCatalogIfAllowed();
+            okResult(resBuf, "DROP TYPE", 0, "DROP TYPE");
         }
 
         // --- B. CREATE TABLE [IF NOT EXISTS] <tabla> (...) ---
@@ -743,7 +780,7 @@ namespace DbSql {
             okResult(resBuf, "CREATE TABLE", 0, msg);
         }
 
-        // --- C. CREATE [UNIQUE] INDEX [IF NOT EXISTS] <idx> ON <tabla> (c1, c2) ---
+        // --- C. CREATE / DROP INDEX ---
         __attribute__((noinline))
         void execCreateIndex(const String& sql, const String& upper) {
             bool isUnique = upper.startsWith("CREATE UNIQUE INDEX ");
@@ -809,7 +846,34 @@ namespace DbSql {
             okResult(resBuf, "CREATE INDEX", 0, "CREATE INDEX");
         }
 
-        // --- D. SHOW TABLES / \dt / \d <tabla> ---
+        __attribute__((noinline))
+        void execDropIndex(const String& sql) {
+            String rest = sql.substring(11); rest.trim();
+            String rUp  = rest; rUp.toUpperCase();
+            bool ifExists = false;
+            if (rUp.startsWith("IF EXISTS ")) {
+                ifExists = true;
+                rest = rest.substring(10); rest.trim();
+            }
+            String idxName = stripQuotes(rest);
+            auto& cat = PhysicalSchemaCatalog::getInstance();
+
+            if (!cat.hasIndex(idxName)) {
+                if (ifExists) {
+                    okResult(resBuf, "DROP INDEX", 0, "DROP INDEX (does not exist, skipping)");
+                    return;
+                }
+                fail(resBuf, SqlState::UNDEFINED_OBJECT, "DROP INDEX", "", "",
+                     "index \"" + idxName + "\" does not exist");
+                return;
+            }
+
+            cat.removeIndex(idxName);
+            flushCatalogIfAllowed();
+            okResult(resBuf, "DROP INDEX", 0, "DROP INDEX");
+        }
+
+        // --- D. META-COMANDOS PSQL (\dt, \d, \dT+, \di, \du, \dn, \?) ---
         __attribute__((noinline))
         void execShowTables() {
             auto& cat = PhysicalSchemaCatalog::getInstance();
@@ -884,260 +948,144 @@ namespace DbSql {
             copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "DESCRIBE");
         }
 
-        // --- E. SELECT ... FROM ... [WHERE ...] [ORDER BY ...] [LIMIT ...] [OFFSET ...] ---
         __attribute__((noinline))
-        void execSelect(const String& sql) {
-            int posFrom = findKeywordOutsideQuotes(sql, " FROM ", 7);
-            if (posFrom < 0) {
-                fail(resBuf, SqlState::SYNTAX_ERROR, "SELECT", "", "", "missing FROM-clause entry for SELECT");
-                return;
-            }
+        void execDescribeTypes(const String& filtroNombre, bool mostrarElementos) {
+            auto& cat = PhysicalSchemaCatalog::getInstance();
+            String filtro = stripQuotes(filtroNombre);
+            size_t pos = 0;
+            uint16_t count = 0;
 
-            String colsPart = sql.substring(7, posFrom);
-            colsPart.trim();
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos,
+                      mostrarElementos
+                        ? " List of data types (ENUM)\n Name | Elements\n------+---------\n"
+                        : " List of data types (ENUM)\n Schema | Name | Values\n--------+------+-------\n");
 
-            String tail = sql.substring(posFrom + 6);
-            int posWhere  = findKeywordOutsideQuotes(tail, " WHERE ", 0);
-            int posOrder  = findKeywordOutsideQuotes(tail, " ORDER BY ", 0);
-            int posLimit  = findKeywordOutsideQuotes(tail, " LIMIT ", 0);
-            int posOffset = findKeywordOutsideQuotes(tail, " OFFSET ", 0);
+            for (const auto& kv : cat.getAllEnums()) {
+                const auto& e = kv.second;
+                if (!filtro.isEmpty() && !e.typeName.equalsIgnoreCase(filtro)) continue;
 
-            int endTable = tail.length();
-            if (posWhere  >= 0 && posWhere  < endTable) endTable = posWhere;
-            if (posOrder  >= 0 && posOrder  < endTable) endTable = posOrder;
-            if (posLimit  >= 0 && posLimit  < endTable) endTable = posLimit;
-            if (posOffset >= 0 && posOffset < endTable) endTable = posOffset;
-
-            String tableName = stripQuotes(tail.substring(0, endTable));
-            const TablePhysicalSchema* schema = PhysicalSchemaCatalog::getInstance().getTable(tableName);
-            if (!schema) {
-                fail(resBuf, SqlState::UNDEFINED_TABLE, "SELECT", tableName, "",
-                     "relation \"" + tableName + "\" does not exist");
-                return;
-            }
-
-            std::vector<SimplePred> preds;
-            if (posWhere >= 0) {
-                int endW = tail.length();
-                if (posOrder  > posWhere && posOrder  < endW) endW = posOrder;
-                if (posLimit  > posWhere && posLimit  < endW) endW = posLimit;
-                if (posOffset > posWhere && posOffset < endW) endW = posOffset;
-                if (!parseWhereClause(*schema, tail.substring(posWhere + 7, endW), preds, "SELECT", resBuf)) {
-                    return;
-                }
-            }
-
-            auto& st = PgBinaryStorage::getInstance();
-
-            String colsUp = colsPart; colsUp.toUpperCase();
-            if (colsUp == "COUNT(*)") {
-                uint32_t total = 0;
-                if (preds.empty()) {
-                    PgBinHeader hdr{};
-                    if (st.getTableHeader(schema->tableName.c_str(), hdr)) total = hdr.activeRows;
+                if (mostrarElementos) {
+                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, " ");
+                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, e.typeName.c_str());
+                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, " | ");
+                    for (size_t i = 0; i < e.labels.size(); ++i) {
+                        if (i > 0) appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, ", ");
+                        appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, e.labels[i].c_str());
+                    }
+                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, "\n");
                 } else {
-                    st.scanForward(schema->tableName.c_str(), [&](const PgRowView& r, uint32_t) -> bool {
-                        if (evalPreds(r, preds)) total++;
-                        return true;
-                    });
+                    char line[96]{};
+                    snprintf(line, sizeof(line), " public | %-26s | %u\n",
+                             e.typeName.c_str(), static_cast<unsigned>(e.labels.size()));
+                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, line);
                 }
-                char outBuf[96]{};
-                snprintf(outBuf, sizeof(outBuf), " count \n-------\n %lu\n(1 row)", static_cast<unsigned long>(total));
-                okResult(resBuf, "SELECT", 1, outBuf);
-                return;
+                count++;
             }
 
-            int8_t projIdx[TablePhysicalSchema::MAX_COLUMNS]{};
-            uint8_t nProj = 0;
-            if (colsPart == "*") {
-                for (size_t i = 0; i < schema->columns.size() && nProj < TablePhysicalSchema::MAX_COLUMNS; ++i) {
-                    projIdx[nProj++] = static_cast<int8_t>(i);
-                }
-            } else {
-                auto reqCols = splitTopLevel(colsPart, ',');
-                for (const auto& rc : reqCols) {
-                    String clean = stripQuotes(rc);
-                    int8_t idx = schema->findColumnIndex(clean);
-                    if (idx < 0) {
-                        fail(resBuf, SqlState::UNDEFINED_COLUMN, "SELECT", schema->tableName, clean,
-                             "column \"" + clean + "\" does not exist");
-                        return;
-                    }
-                    if (nProj < TablePhysicalSchema::MAX_COLUMNS) projIdx[nProj++] = idx;
-                }
-            }
-
-            int8_t orderColIdx = -1;
-            SortDirection orderDir = SortDirection::ASC;
-            if (posOrder >= 0) {
-                int endO = tail.length();
-                if (posLimit  > posOrder && posLimit  < endO) endO = posLimit;
-                if (posOffset > posOrder && posOffset < endO) endO = posOffset;
-                String obRaw = tail.substring(posOrder + 10, endO);
-                obRaw.trim();
-                String obUp = obRaw; obUp.toUpperCase();
-                if (obUp.endsWith(" DESC")) {
-                    orderDir = SortDirection::DESC;
-                    obRaw = obRaw.substring(0, obRaw.length() - 5);
-                } else if (obUp.endsWith(" ASC")) {
-                    orderDir = SortDirection::ASC;
-                    obRaw = obRaw.substring(0, obRaw.length() - 4);
-                }
-                String obCol = stripQuotes(obRaw);
-                orderColIdx = schema->findColumnIndex(obCol);
-                if (orderColIdx < 0) {
-                    fail(resBuf, SqlState::UNDEFINED_COLUMN, "SELECT", schema->tableName, obCol,
-                         "column \"" + obCol + "\" in ORDER BY does not exist");
-                    return;
-                }
-            }
-
-            uint16_t limitRows = 16;
-            if (posLimit >= 0) {
-                int lim = tail.substring(posLimit + 7).toInt();
-                if (lim > 0 && lim <= 32) limitRows = static_cast<uint16_t>(lim);
-            }
-            uint32_t offsetRows = 0;
-            if (posOffset >= 0) {
-                long off = tail.substring(posOffset + 8).toInt();
-                if (off > 0) offsetRows = static_cast<uint32_t>(off);
-            }
-
-            size_t outPos = 0;
-            bool headerPrinted = false;
-            bool truncated     = false;
-            uint16_t shownRows = 0;
-
-            auto emitRow = [&](const PgRowView& r) -> bool {
-                if (!headerPrinted) {
-                    for (uint8_t c = 0; c < nProj; ++c) {
-                        if (c > 0) appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos, " | ");
-                        appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos,
-                                  schema->columns[static_cast<size_t>(projIdx[c])].columnName.c_str());
-                    }
-                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos,
-                              "\n------------------------------------------------\n");
-                    headerPrinted = true;
-                }
-
-                if (outPos > 900) {
-                    if (!truncated) {
-                        appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos,
-                                  "... (truncated to fit 1KB terminal buffer)\n");
-                        truncated = true;
-                    }
-                    return false;
-                }
-
-                char cellBuf[96]{};
-                for (uint8_t c = 0; c < nProj; ++c) {
-                    if (c > 0) appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos, " | ");
-                    r.formatCellToBuf(projIdx[c], cellBuf, sizeof(cellBuf));
-                    appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos, cellBuf);
-                }
-                appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos, "\n");
-                shownRows++;
-                return true;
-            };
-
-            const bool esOrdenNatural = (orderColIdx < 0) ||
-                                        (orderColIdx == schema->identityColIndex) ||
-                                        (orderColIdx == schema->pkColIndex);
-
-            if (esOrdenNatural) {
-                uint32_t matched = 0;
-                auto visitor = [&](const PgRowView& r, uint32_t) -> bool {
-                    if (!evalPreds(r, preds)) return true;
-                    if (matched >= offsetRows) {
-                        if (!emitRow(r)) return false;
-                        if (shownRows >= limitRows) return false;
-                    }
-                    matched++;
-                    return true;
-                };
-                if (orderColIdx >= 0 && orderDir == SortDirection::DESC) {
-                    st.scanBackward(schema->tableName.c_str(), visitor);
-                } else {
-                    st.scanForward(schema->tableName.c_str(), visitor);
-                }
-            } else {
-                const size_t maxKeep = std::min<size_t>(static_cast<size_t>(offsetRows + limitRows), 64u);
-                std::vector<SlotSortKey> keys;
-                keys.reserve(std::min<size_t>(maxKeep, 32u));
-
-                const auto& oCol = schema->columns[static_cast<size_t>(orderColIdx)];
-                auto keyBefore = [&](const SlotSortKey& a, const SlotSortKey& b) -> bool {
-                    if (a.kind == 0 && b.kind == 0) return a.slotIdx < b.slotIdx;
-                    if (a.kind == 0) return false;
-                    if (b.kind == 0) return true;
-                    int cmp = 0;
-                    if (a.kind == 1 && b.kind == 1) cmp = (a.num.i64 < b.num.i64) ? -1 : ((a.num.i64 > b.num.i64) ? 1 : 0);
-                    else if (a.kind == 2 && b.kind == 2) cmp = (fabs(a.num.f64 - b.num.f64) < 0.00001) ? 0 : ((a.num.f64 < b.num.f64) ? -1 : 1);
-                    else cmp = strcmp(a.txt, b.txt);
-                    if (cmp != 0) return (orderDir == SortDirection::ASC) ? (cmp < 0) : (cmp > 0);
-                    return a.slotIdx < b.slotIdx;
-                };
-
-                st.scanForward(schema->tableName.c_str(), [&](const PgRowView& r, uint32_t slotIdx) -> bool {
-                    if (!evalPreds(r, preds)) return true;
-                    SlotSortKey k{};
-                    k.slotIdx = slotIdx;
-                    if (!r.isNullIdx(orderColIdx)) {
-                        if (DataTypeUtils::isIntegerType(oCol.dataType)) {
-                            k.kind = 1; k.num.i64 = r.getInt64Idx(orderColIdx);
-                        } else if (DataTypeUtils::isFloatingOrDecimalType(oCol.dataType)) {
-                            k.kind = 2; k.num.f64 = r.getDoubleIdx(orderColIdx);
-                        } else if (oCol.dataType == PgDataType::BOOLEAN || oCol.dataType == PgDataType::ENUM) {
-                            k.kind = 1; k.num.i64 = r.getEnumU8Idx(orderColIdx);
-                        } else {
-                            k.kind = 3; copyStr(k.txt, sizeof(k.txt), r.getCStrIdx(orderColIdx));
-                        }
-                    }
-                    if (keys.size() == maxKeep && !keyBefore(k, keys.back())) return true;
-                    auto posIt = std::lower_bound(keys.begin(), keys.end(), k, keyBefore);
-                    if (keys.size() < maxKeep) {
-                        keys.insert(posIt, k);
-                    } else if (posIt != keys.end()) {
-                        keys.pop_back();
-                        keys.insert(posIt, k);
-                    }
-                    return true;
-                });
-
-                PgRowBuffer rowBuf;
-                for (size_t i = offsetRows; i < keys.size() && shownRows < limitRows; ++i) {
-                    if (st.readSlot(schema->tableName.c_str(), keys[i].slotIdx, rowBuf)) {
-                        if (!emitRow(rowBuf.view())) break;
-                    }
-                }
-            }
-
-            char foot[32]{};
-            snprintf(foot, sizeof(foot), "(%u rows)", static_cast<unsigned>(shownRows));
-            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), outPos, foot);
+            char tail[32]{};
+            snprintf(tail, sizeof(tail), "(%u rows)", static_cast<unsigned>(count));
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, tail);
 
             resBuf.exito          = true;
-            resBuf.filasAfectadas = shownRows;
+            resBuf.filasAfectadas = count;
             copyStr(resBuf.sqlState, sizeof(resBuf.sqlState), SqlState::SUCCESSFUL_COMPLETION);
-            copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "SELECT");
+            copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "DESCRIBE TYPES");
         }
 
-        // --- F. INSERT INTO <tabla> (cols) VALUES (vals) ---
+        __attribute__((noinline))
+        void execShowIndexes() {
+            auto& cat = PhysicalSchemaCatalog::getInstance();
+            size_t pos = 0;
+            uint16_t count = 0;
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos,
+                      " List of indexes\n Name | Table | Unique | Columns\n------+-------+--------+--------\n");
+
+            for (const auto& kv : cat.getAllIndexes()) {
+                const auto& idx = kv.second;
+                char line[128]{};
+                String cols = "";
+                for (size_t i = 0; i < idx.keyColumns.size(); ++i) {
+                    if (i > 0) cols += ",";
+                    cols += idx.keyColumns[i];
+                }
+                snprintf(line, sizeof(line), " %-24s | %-18s | %-3s | %s\n",
+                         idx.indexName.c_str(),
+                         idx.tableName.c_str(),
+                         idx.isUnique ? "YES" : "NO",
+                         cols.c_str());
+                appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, line);
+                count++;
+            }
+
+            char tail[32]{};
+            snprintf(tail, sizeof(tail), "(%u rows)", static_cast<unsigned>(count));
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, tail);
+
+            resBuf.exito          = true;
+            resBuf.filasAfectadas = count;
+            copyStr(resBuf.sqlState, sizeof(resBuf.sqlState), SqlState::SUCCESSFUL_COMPLETION);
+            copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "SHOW INDEXES");
+        }
+
+        __attribute__((noinline))
+        void execShowUsers() {
+            auto& st = PgBinaryStorage::getInstance();
+            size_t pos = 0;
+            uint16_t count = 0;
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos,
+                      " List of roles (Usuario)\n ID | Username | Role | Active | Locked\n----+----------+------+--------+-------\n");
+
+            st.scanForward("Usuario", [&](const PgRowView& r, uint32_t) -> bool {
+                char rolBuf[20]{};
+                int8_t idxRol = r.getSchema()->findColumnIndex("rol");
+                r.formatCellToBuf(idxRol, rolBuf, sizeof(rolBuf));
+                char line[96]{};
+                snprintf(line, sizeof(line), " %2ld | %-14s | %-8s | %-5s | %-5s\n",
+                         static_cast<long>(r.getInt32("id_usuario")),
+                         r.getCStr("usuario"),
+                         rolBuf,
+                         r.getBool("activa", true) ? "TRUE" : "FALSE",
+                         r.getBool("bloqueado", false) ? "TRUE" : "FALSE");
+                appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, line);
+                count++;
+                return pos < 920;
+            });
+
+            char tail[32]{};
+            snprintf(tail, sizeof(tail), "(%u rows)", static_cast<unsigned>(count));
+            appendFmt(resBuf.salidaPsql, sizeof(resBuf.salidaPsql), pos, tail);
+
+            resBuf.exito          = true;
+            resBuf.filasAfectadas = count;
+            copyStr(resBuf.sqlState, sizeof(resBuf.sqlState), SqlState::SUCCESSFUL_COMPLETION);
+            copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "SHOW ROLES");
+        }
+
+        // --- F. INSERT INTO <tabla> [(cols)] VALUES (v1, ...)[, (v2, ...)] ---
         __attribute__((noinline))
         void execInsert(const String& sql, const String& upper) {
-            int posValues = upper.indexOf(" VALUES");
-            int p1Open    = sql.indexOf('(');
-            int p1Close   = sql.indexOf(')');
-            int p2Open    = (posValues > 0) ? sql.indexOf('(', posValues) : -1;
-            int p2Close   = (p2Open > 0)    ? sql.lastIndexOf(')')        : -1;
-
-            if (posValues < 0 || p1Open < 0 || p1Close < p1Open || p2Open < 0 || p2Close < p2Open) {
+            int posValues = findKeywordOutsideQuotes(upper, " VALUES", 12);
+            if (posValues < 0) {
                 fail(resBuf, SqlState::SYNTAX_ERROR, "INSERT", "", "",
-                     "syntax error in INSERT INTO (expected: INSERT INTO table (c1, c2) VALUES (v1, v2))");
+                     "syntax error in INSERT INTO (missing VALUES)");
                 return;
             }
 
-            String tableName = stripQuotes(sql.substring(12, p1Open));
+            String targetPart = sql.substring(12, posValues);
+            targetPart.trim();
+
+            String tableName = "";
+            std::vector<String> cols;
+            int p1Open  = targetPart.indexOf('(');
+            int p1Close = targetPart.lastIndexOf(')');
+
+            if (p1Open > 0 && p1Close > p1Open) {
+                tableName = stripQuotes(targetPart.substring(0, p1Open));
+                cols      = splitTopLevel(targetPart.substring(p1Open + 1, p1Close), ',');
+            } else {
+                tableName = stripQuotes(targetPart);
+            }
+
             const TablePhysicalSchema* schema = PhysicalSchemaCatalog::getInstance().getTable(tableName);
             if (!schema) {
                 fail(resBuf, SqlState::UNDEFINED_TABLE, "INSERT", tableName, "",
@@ -1145,95 +1093,131 @@ namespace DbSql {
                 return;
             }
 
-            auto cols = splitTopLevel(sql.substring(p1Open + 1, p1Close), ',');
-            auto vals = splitTopLevel(sql.substring(p2Open + 1, p2Close), ',');
-            if (cols.empty() || cols.size() != vals.size()) {
+            std::vector<int8_t> colIndices;
+            if (cols.empty()) {
+                for (size_t i = 0; i < schema->columns.size(); ++i) {
+                    colIndices.push_back(static_cast<int8_t>(i));
+                }
+            } else {
+                for (const auto& c : cols) {
+                    String cName = stripQuotes(c);
+                    int8_t idx = schema->findColumnIndex(cName);
+                    if (idx < 0) {
+                        fail(resBuf, SqlState::UNDEFINED_COLUMN, "INSERT", schema->tableName, cName,
+                             "column \"" + cName + "\" of relation \"" + schema->tableName + "\" does not exist");
+                        return;
+                    }
+                    colIndices.push_back(idx);
+                }
+            }
+
+            String valuesTail = sql.substring(posValues + 7);
+            valuesTail.trim();
+            auto tuples = splitTopLevel(valuesTail, ',');
+            if (tuples.empty()) {
                 fail(resBuf, SqlState::SYNTAX_ERROR, "INSERT", schema->tableName, "",
-                     "INSERT has more target columns than expressions or vice versa");
+                     "empty VALUES list in INSERT INTO");
                 return;
             }
 
-            PgRowBuffer row(schema);
-            for (size_t i = 0; i < cols.size(); ++i) {
-                String cName = stripQuotes(cols[i]);
-                int8_t idx = schema->findColumnIndex(cName);
-                if (idx < 0) {
-                    fail(resBuf, SqlState::UNDEFINED_COLUMN, "INSERT", schema->tableName, cName,
-                         "column \"" + cName + "\" of relation \"" + schema->tableName + "\" does not exist");
-                    return;
-                }
-                String vLit = stripQuotes(vals[i]);
-                String stErr, msgErr;
-                if (!row.setFromLiteralIdx(idx, vLit.c_str(), &stErr, &msgErr)) {
-                    fail(resBuf, stErr.c_str(), "INSERT", schema->tableName, cName, msgErr);
-                    return;
-                }
-            }
-
-            row.applySchemaDefaults(true);
-
             auto& st = PgBinaryStorage::getInstance();
-            PgRowView rv = row.view();
-            for (size_t i = 0; i < schema->columns.size(); ++i) {
-                const auto& col = schema->columns[i];
-                const int idx = static_cast<int>(i);
-                if (col.identityMode != IdentityGeneration::NONE && !row.wasProvidedIdx(idx)) {
-                    continue;
-                }
-                if (col.isNotNull && rv.isNullIdx(idx)) {
-                    fail(resBuf, SqlState::NOT_NULL_VIOLATION, "INSERT", schema->tableName, col.columnName,
-                         "null value in column \"" + col.columnName + "\" violates not-null constraint");
+            uint16_t inserted = 0;
+
+            for (const auto& tupRaw : tuples) {
+                String t = tupRaw;
+                t.trim();
+                if (!t.startsWith("(") || !t.endsWith(")")) {
+                    fail(resBuf, SqlState::SYNTAX_ERROR, "INSERT", schema->tableName, "",
+                         "invalid tuple in VALUES: \"" + t + "\"");
                     return;
                 }
-                if ((col.isUnique || col.isPrimaryKey) && !rv.isNullIdx(idx)) {
-                    char valBuf[96]{};
-                    rv.formatCellToBuf(idx, valBuf, sizeof(valBuf));
-                    bool dup = false;
-                    st.scanForward(schema->tableName.c_str(), [&](const PgRowView& existing, uint32_t) -> bool {
-                        if (!existing.isNullIdx(idx) && existing.compareCellWithLiteral(idx, valBuf) == 0) {
-                            dup = true;
-                            return false;
-                        }
-                        return true;
-                    });
-                    if (dup) {
-                        fail(resBuf, SqlState::UNIQUE_VIOLATION, "INSERT", schema->tableName, col.columnName,
-                             "duplicate key value violates unique constraint on \"" + col.columnName + "\"");
+                auto vals = splitTopLevel(t.substring(1, t.length() - 1), ',');
+                if (vals.size() != colIndices.size()) {
+                    fail(resBuf, SqlState::SYNTAX_ERROR, "INSERT", schema->tableName, "",
+                         "INSERT has more target columns than expressions or vice versa");
+                    return;
+                }
+
+                PgRowBuffer row(schema);
+                for (size_t i = 0; i < vals.size(); ++i) {
+                    const int8_t idx = colIndices[i];
+                    String vLit = stripQuotes(vals[i]);
+                    if (vLit.equalsIgnoreCase("DEFAULT")) continue;
+                    String stErr, msgErr;
+                    if (!row.setFromLiteralIdx(idx, vLit.c_str(), &stErr, &msgErr)) {
+                        fail(resBuf, stErr.c_str(), "INSERT", schema->tableName,
+                             schema->columns[static_cast<size_t>(idx)].columnName, msgErr);
                         return;
                     }
                 }
-                if (col.isForeignKey && !rv.isNullIdx(idx)) {
-                    const TablePhysicalSchema* pSchema = PhysicalSchemaCatalog::getInstance().getTable(col.referencedTable);
-                    const int8_t pIdx = pSchema ? pSchema->findColumnIndex(col.referencedColumn) : -1;
-                    if (pSchema && pIdx >= 0) {
-                        char valBuf[64]{};
+
+                row.applySchemaDefaults(true);
+                PgRowView rv = row.view();
+
+                for (size_t i = 0; i < schema->columns.size(); ++i) {
+                    const auto& col = schema->columns[i];
+                    const int idx = static_cast<int>(i);
+                    if (col.identityMode != IdentityGeneration::NONE && !row.wasProvidedIdx(idx)) {
+                        continue;
+                    }
+                    if (col.isNotNull && rv.isNullIdx(idx)) {
+                        fail(resBuf, SqlState::NOT_NULL_VIOLATION, "INSERT", schema->tableName, col.columnName,
+                             "null value in column \"" + col.columnName + "\" violates not-null constraint");
+                        return;
+                    }
+                    if ((col.isUnique || col.isPrimaryKey) && !rv.isNullIdx(idx)) {
+                        char valBuf[96]{};
                         rv.formatCellToBuf(idx, valBuf, sizeof(valBuf));
-                        bool foundParent = false;
-                        st.scanForward(pSchema->tableName.c_str(), [&](const PgRowView& pr, uint32_t) -> bool {
-                            if (!pr.isNullIdx(pIdx) && pr.compareCellWithLiteral(pIdx, valBuf) == 0) {
-                                foundParent = true;
+                        bool dup = false;
+                        st.scanForward(schema->tableName.c_str(), [&](const PgRowView& existing, uint32_t) -> bool {
+                            if (!existing.isNullIdx(idx) && existing.compareCellWithLiteral(idx, valBuf) == 0) {
+                                dup = true;
                                 return false;
                             }
                             return true;
                         });
-                        if (!foundParent) {
-                            fail(resBuf, SqlState::FOREIGN_KEY_VIOLATION, "INSERT", schema->tableName, col.columnName,
-                                 "insert on table \"" + schema->tableName + "\" violates foreign key constraint \"" + col.fkConstraintName + "\"");
+                        if (dup) {
+                            fail(resBuf, SqlState::UNIQUE_VIOLATION, "INSERT", schema->tableName, col.columnName,
+                                 "duplicate key value violates unique constraint on \"" + col.columnName + "\"");
                             return;
                         }
                     }
+                    if (col.isForeignKey && !rv.isNullIdx(idx)) {
+                        const TablePhysicalSchema* pSchema = PhysicalSchemaCatalog::getInstance().getTable(col.referencedTable);
+                        const int8_t pIdx = pSchema ? pSchema->findColumnIndex(col.referencedColumn) : -1;
+                        if (pSchema && pIdx >= 0) {
+                            char valBuf[64]{};
+                            rv.formatCellToBuf(idx, valBuf, sizeof(valBuf));
+                            bool foundParent = false;
+                            st.scanForward(pSchema->tableName.c_str(), [&](const PgRowView& pr, uint32_t) -> bool {
+                                if (!pr.isNullIdx(pIdx) && pr.compareCellWithLiteral(pIdx, valBuf) == 0) {
+                                    foundParent = true;
+                                    return false;
+                                }
+                                return true;
+                            });
+                            if (!foundParent) {
+                                fail(resBuf, SqlState::FOREIGN_KEY_VIOLATION, "INSERT", schema->tableName, col.columnName,
+                                     "insert on table \"" + schema->tableName + "\" violates foreign key constraint \"" + col.fkConstraintName + "\"");
+                                return;
+                            }
+                        }
+                    }
                 }
+
+                if (!st.appendRecord(schema->tableName.c_str(), row)) {
+                    fail(resBuf, SqlState::IO_ERROR, "INSERT", schema->tableName, "", "could not append binary record to MicroSD");
+                    return;
+                }
+                inserted++;
             }
 
-            if (!st.appendRecord(schema->tableName.c_str(), row)) {
-                fail(resBuf, SqlState::IO_ERROR, "INSERT", schema->tableName, "", "could not append binary record to MicroSD");
-                return;
-            }
-
-            okResult(resBuf, "INSERT", 1, "INSERT 0 1");
+            char msg[32]{};
+            snprintf(msg, sizeof(msg), "INSERT 0 %u", static_cast<unsigned>(inserted));
+            okResult(resBuf, "INSERT", inserted, msg);
         }
 
-        // --- G. UPDATE <tabla> SET col=val, ... [WHERE ...] ---
+        // --- G. UPDATE <tabla> SET col=expr, ... [WHERE ...] ---
         __attribute__((noinline))
         void execUpdate(const String& sql) {
             int posSet = findKeywordOutsideQuotes(sql, " SET ", 7);
@@ -1254,8 +1238,16 @@ namespace DbSql {
             String setPart   = (posWhere > 0) ? sql.substring(posSet + 5, posWhere) : sql.substring(posSet + 5);
             String wherePart = (posWhere > 0) ? sql.substring(posWhere + 7) : "";
 
-            struct Assign { int8_t idx; String val; };
+            struct Assign {
+                int8_t idx = -1;
+                String rawExpr = "";
+                bool   esArit = false;
+                int8_t lhsCol = -1;
+                char   op     = 0;
+                double rhsNum = 0.0;
+            };
             std::vector<Assign> assigns;
+
             for (const auto& item : splitTopLevel(setPart, ',')) {
                 int eq = item.indexOf('=');
                 if (eq <= 0) {
@@ -1270,20 +1262,91 @@ namespace DbSql {
                          "column \"" + cName + "\" does not exist");
                     return;
                 }
-                assigns.push_back({ idx, stripQuotes(item.substring(eq + 1)) });
+
+                String rhs = item.substring(eq + 1);
+                rhs.trim();
+
+                Assign a{};
+                a.idx     = idx;
+                a.rawExpr = stripQuotes(rhs);
+
+                // Soporte para expresiones aritméticas simples (ej. SET umbral_sup = umbral_sup + 1.5)
+                if (!rhs.startsWith("'") && !rhs.startsWith("\"")) {
+                    const char ops[4] = { '+', '-', '*', '/' };
+                    for (char op : ops) {
+                        int p = rhs.indexOf(op, 1);
+                        if (p > 0) {
+                            String leftTok  = stripQuotes(rhs.substring(0, p));
+                            String rightTok = rhs.substring(p + 1);
+                            rightTok.trim();
+                            int8_t lIdx = schema->findColumnIndex(leftTok);
+                            if (lIdx >= 0 && !rightTok.isEmpty()) {
+                                char* endP = nullptr;
+                                double num = strtod(rightTok.c_str(), &endP);
+                                if (endP != rightTok.c_str() && *endP == '\0') {
+                                    a.esArit = true;
+                                    a.lhsCol = lIdx;
+                                    a.op     = op;
+                                    a.rhsNum = num;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                assigns.push_back(std::move(a));
             }
 
-            std::vector<SimplePred> preds;
-            if (!parseWhereClause(*schema, wherePart, preds, "UPDATE", resBuf)) {
+            std::vector<BoundTable> whereTables;
+            std::vector<ExprNode>   whereNodes;
+            int16_t                 whereRoot = -1;
+            if (!parseSingleTableWhere(schema, wherePart, whereTables, whereNodes, whereRoot, "UPDATE", resBuf)) {
                 return;
+            }
+
+            // Pre-validación de literales (ENUM, NOT NULL, tipos)
+            for (const auto& a : assigns) {
+                if (a.esArit) continue;
+                PgRowBuffer probe(schema);
+                String stErr, msgErr;
+                if (!probe.setFromLiteralIdx(a.idx, a.rawExpr.c_str(), &stErr, &msgErr)) {
+                    fail(resBuf, stErr.c_str(), "UPDATE", schema->tableName,
+                         schema->columns[static_cast<size_t>(a.idx)].columnName, msgErr);
+                    return;
+                }
             }
 
             const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
                 schema->tableName.c_str(),
-                [&](const PgRowView& r) -> bool { return evalPreds(r, preds); },
+                [&](const PgRowView& r) -> bool {
+                    if (whereRoot < 0) return true;
+                    RowBinding rb{};
+                    rb.physRow = &r;
+                    return evalExprNode(whereRoot, whereNodes, whereTables, &rb).toBool();
+                },
                 [&](PgRowBuffer& row) {
+                    PgRowView cur = row.view();
                     for (const auto& a : assigns) {
-                        row.setFromLiteralIdx(a.idx, a.val.c_str());
+                        if (a.esArit) {
+                            const auto& col = schema->columns[static_cast<size_t>(a.idx)];
+                            double base = DataTypeUtils::isIntegerType(schema->columns[static_cast<size_t>(a.lhsCol)].dataType)
+                                ? static_cast<double>(cur.getInt64Idx(a.lhsCol))
+                                : cur.getDoubleIdx(a.lhsCol);
+                            double resVal = base;
+                            if (a.op == '+') resVal = base + a.rhsNum;
+                            else if (a.op == '-') resVal = base - a.rhsNum;
+                            else if (a.op == '*') resVal = base * a.rhsNum;
+                            else if (a.op == '/' && fabs(a.rhsNum) > 1e-12) resVal = base / a.rhsNum;
+
+                            if (DataTypeUtils::isIntegerType(col.dataType)) {
+                                row.setInt64Idx(a.idx, static_cast<int64_t>(llround(resVal)));
+                            } else {
+                                row.setDoubleIdx(a.idx, resVal);
+                            }
+                        } else {
+                            row.setFromLiteralIdx(a.idx, a.rawExpr.c_str());
+                        }
                     }
                 }
             );
@@ -1307,14 +1370,21 @@ namespace DbSql {
                 return;
             }
 
-            std::vector<SimplePred> preds;
-            if (!parseWhereClause(*schema, wherePart, preds, "DELETE", resBuf)) {
+            std::vector<BoundTable> whereTables;
+            std::vector<ExprNode>   whereNodes;
+            int16_t                 whereRoot = -1;
+            if (!parseSingleTableWhere(schema, wherePart, whereTables, whereNodes, whereRoot, "DELETE", resBuf)) {
                 return;
             }
 
             const uint16_t n = PgBinaryStorage::getInstance().deleteWhere(
                 schema->tableName.c_str(),
-                [&](const PgRowView& r) -> bool { return evalPreds(r, preds); },
+                [&](const PgRowView& r) -> bool {
+                    if (whereRoot < 0) return true;
+                    RowBinding rb{};
+                    rb.physRow = &r;
+                    return evalExprNode(whereRoot, whereNodes, whereTables, &rb).toBool();
+                },
                 true
             );
 
@@ -1510,6 +1580,34 @@ namespace DbSql {
                 return;
             }
 
+            if (opUp.startsWith("RENAME COLUMN ")) {
+                String rem = opRest.substring(14); rem.trim();
+                String remUp = rem; remUp.toUpperCase();
+                int posTo = remUp.indexOf(" TO ");
+                if (posTo <= 0) {
+                    fail(resBuf, SqlState::SYNTAX_ERROR, "ALTER TABLE", tableName, "",
+                         "expected: ALTER TABLE t RENAME COLUMN old_col TO new_col");
+                    return;
+                }
+                String oldCol = stripQuotes(rem.substring(0, posTo));
+                String newCol = stripQuotes(rem.substring(posTo + 4));
+                int8_t idx = tb->findColumnIndex(oldCol);
+                if (idx < 0) {
+                    fail(resBuf, SqlState::UNDEFINED_COLUMN, "ALTER TABLE", tableName, oldCol,
+                         "column \"" + oldCol + "\" does not exist");
+                    return;
+                }
+                if (tb->findColumnIndex(newCol) >= 0) {
+                    fail(resBuf, SqlState::DUPLICATE_COLUMN, "ALTER TABLE", tableName, newCol,
+                         "column \"" + newCol + "\" already exists");
+                    return;
+                }
+                tb->columns[static_cast<size_t>(idx)].columnName = newCol;
+                flushCatalogIfAllowed();
+                okResult(resBuf, "ALTER TABLE", 0, "ALTER TABLE");
+                return;
+            }
+
             if (opUp.startsWith("RENAME TO ")) {
                 String newName = stripQuotes(opRest.substring(10));
                 if (cat.hasTable(newName)) {
@@ -1534,7 +1632,7 @@ namespace DbSql {
             }
 
             fail(resBuf, SqlState::FEATURE_NOT_SUPPORTED, "ALTER TABLE", tableName, "",
-                 "ALTER TABLE clause not supported yet (use ADD COLUMN, DROP COLUMN, RENAME TO)");
+                 "ALTER TABLE clause not supported (use ADD COLUMN, DROP COLUMN, RENAME COLUMN, RENAME TO)");
         }
 
     public:
@@ -1550,34 +1648,55 @@ namespace DbSql {
             resBuf = SqlExecResult{};
             const int64_t t0 = esp_timer_get_time();
 
-            String sql = rawSql ? String(rawSql) : String("");
-            sql.trim();
-            while (sql.endsWith(";")) {
-                sql.remove(sql.length() - 1);
-                sql.trim();
-            }
-
+            String sql = normalizarSql(rawSql);
             if (sql.isEmpty()) {
                 fail(resBuf, SqlState::SYNTAX_ERROR, "EMPTY", "", "", "empty query string");
                 resBuf.tiempoEjecucionUs = static_cast<uint32_t>(esp_timer_get_time() - t0);
                 return resBuf;
             }
 
-            for (size_t i = 0; i < sql.length(); ++i) {
-                if (sql[i] == '\n' || sql[i] == '\r' || sql[i] == '\t') {
-                    sql.setCharAt(i, ' ');
-                }
-            }
-
             String upper = sql;
             upper.toUpperCase();
 
-            if (upper == "SHOW TABLES" || upper == "\\DT") {
+            if (upper == "SHOW TABLES" || sql == "\\dt") {
                 execShowTables();
+            } else if (sql.startsWith("\\dT+")) {
+                execDescribeTypes(sql.substring(4), true);
+            } else if (sql == "\\dT" || sql.startsWith("\\dT ")) {
+                execDescribeTypes(sql.substring(3), false);
+            } else if (upper == "\\DI") {
+                execShowIndexes();
+            } else if (upper == "\\DU") {
+                execShowUsers();
+            } else if (upper == "\\DN") {
+                okResult(resBuf, "SCHEMAS", 3,
+                         " List of schemas\n Name\n--------------------\n public\n pg_catalog\n information_schema\n(3 rows)");
+            } else if (upper == "\\?") {
+                okResult(resBuf, "HELP", 0,
+                         "Meta: \\dt (tables), \\d <tbl>, \\dT[+] [enum], \\di (indexes), \\du (roles), \\dn (schemas)\n"
+                         "DQL:  SELECT [DISTINCT] ... [FROM t [JOIN ...]] [WHERE ...] [GROUP BY ...] [HAVING ...] [ORDER BY ...] [LIMIT n OFFSET m]\n"
+                         "DML:  INSERT INTO ... VALUES (...), (...); UPDATE ... SET c=expr; DELETE FROM ...\n"
+                         "DDL:  CREATE/ALTER/DROP TYPE, CREATE/ALTER/DROP TABLE, CREATE/DROP INDEX, TRUNCATE, VACUUM");
             } else if (upper.startsWith("\\D ")) {
                 execDescribeTable(sql.substring(3));
             } else if (upper.startsWith("SELECT ")) {
-                execSelect(sql);
+                uint16_t filas = 0;
+                const bool ok = PgSqlDqlEngine::executeSelect(
+                    sql,
+                    resBuf.salidaPsql,
+                    sizeof(resBuf.salidaPsql),
+                    filas,
+                    [&](const char* st, const char* cmd, const String& tbl, const String& col, const String& msg) {
+                        fail(resBuf, st, cmd, tbl, col, msg);
+                    },
+                    &appendFmt
+                );
+                if (ok) {
+                    resBuf.exito          = true;
+                    resBuf.filasAfectadas = filas;
+                    copyStr(resBuf.sqlState, sizeof(resBuf.sqlState), SqlState::SUCCESSFUL_COMPLETION);
+                    copyStr(resBuf.comandoEjecutado, sizeof(resBuf.comandoEjecutado), "SELECT");
+                }
             } else if (upper.startsWith("INSERT INTO ")) {
                 execInsert(sql, upper);
             } else if (upper.startsWith("UPDATE ")) {
@@ -1586,10 +1705,16 @@ namespace DbSql {
                 execDelete(sql);
             } else if (upper.startsWith("CREATE TYPE ")) {
                 execCreateType(sql, upper);
+            } else if (upper.startsWith("ALTER TYPE ")) {
+                execAlterType(sql, upper);
+            } else if (upper.startsWith("DROP TYPE ")) {
+                execDropType(sql);
             } else if (upper.startsWith("CREATE TABLE ")) {
                 execCreateTable(sql);
             } else if (upper.startsWith("CREATE INDEX ") || upper.startsWith("CREATE UNIQUE INDEX ")) {
                 execCreateIndex(sql, upper);
+            } else if (upper.startsWith("DROP INDEX ")) {
+                execDropIndex(sql);
             } else if (upper.startsWith("DROP TABLE ")) {
                 execDropTable(sql);
             } else if (upper.startsWith("TRUNCATE ")) {
@@ -1601,7 +1726,7 @@ namespace DbSql {
             } else {
                 fail(resBuf, SqlState::FEATURE_NOT_SUPPORTED, "SQL", "", "",
                      "comando SQL no soportado",
-                     "Activos: SELECT, INSERT INTO, UPDATE, DELETE FROM, CREATE TYPE, CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP TABLE, TRUNCATE, VACUUM, SHOW TABLES, \\d <tabla>.");
+                     "Use \\? para listar comandos SQL y meta-comandos psql activos.");
             }
 
             resBuf.tiempoEjecucionUs = static_cast<uint32_t>(esp_timer_get_time() - t0);

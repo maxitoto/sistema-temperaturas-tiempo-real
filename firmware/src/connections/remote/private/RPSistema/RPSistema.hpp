@@ -163,6 +163,48 @@ struct ResApagadoSeguroDTO {
 
 namespace RPSistema {
 
+    inline void auditarAccionSistema(
+        const char* accion,
+        const char* origen,
+        CriticidadEvento criticidad = CriticidadEvento::MEDIA
+    ) {
+        const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
+        int32_t idActor = 0;
+        char nombreActor[20]{};
+        RPAuth::obtenerSnapshotUsuarioSlot(slot, idActor, nombreActor, sizeof(nombreActor));
+
+        RTOS::encolarAuditoria(
+            RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
+            idActor,
+            nombreActor[0] != '\0' ? nombreActor : "SISTEMA",
+            origen ? origen : "SISTEMA",
+            accion,
+            static_cast<uint8_t>(ResultadoAuditoria::EXITO),
+            static_cast<uint8_t>(criticidad)
+        );
+    }
+
+    inline ResConfiguracionWiFiDTO construirRespuestaWiFi() {
+        DbRuntime::Repositories::ConfiguracionRedDTO cfgDb{};
+        if (!DbRuntime::Repositories::RepoConfiguracionRed::obtenerOInicializar(cfgDb)) {
+            throw std::runtime_error("RuntimeError: no se pudo leer ConfiguracionRed desde la base de datos");
+        }
+
+        ResConfiguracionWiFiDTO salida{};
+        strncpy(salida.ssidSta, cfgDb.ssid_sta.c_str(), sizeof(salida.ssidSta) - 1);
+        strncpy(salida.ssidAp,  cfgDb.ssid_ap.c_str(),  sizeof(salida.ssidAp) - 1);
+
+        if (WiFiInicializador::instanciaActiva != nullptr) {
+            WiFiInicializador::instanciaActiva->actualizarEstadoEnCaliente(WiFi.status() == WL_CONNECTED);
+            const EstadoRedWiFi& estado = WiFiInicializador::instanciaActiva->obtenerEstadoRed();
+            strncpy(salida.ipSta, estado.ipEstacionLAN, sizeof(salida.ipSta) - 1);
+            strncpy(salida.ipAp,  estado.ipPuntoAcceso, sizeof(salida.ipAp) - 1);
+            salida.conectadoARouter  = estado.conectadoARouter ? 1 : 0;
+            salida.puntoAccesoActivo = estado.puntoAccesoActivo ? 1 : 0;
+        }
+        return salida;
+    }
+
     inline const char* obtenerTextoMotivoReset() {
         switch (esp_reset_reason()) {
             case ESP_RST_POWERON:   return "POWERON_RESET";
@@ -217,6 +259,7 @@ namespace RPSistema {
         []() -> InfoRedPublicaDTO {
             InfoRedPublicaDTO out{};
             if (WiFiInicializador::instanciaActiva != nullptr) {
+                WiFiInicializador::instanciaActiva->actualizarEstadoEnCaliente(WiFi.status() == WL_CONNECTED);
                 const EstadoRedWiFi& est = WiFiInicializador::instanciaActiva->obtenerEstadoRed();
                 out.ipSta             = est.ipEstacionLAN;
                 out.ipAp              = est.ipPuntoAcceso;
@@ -304,14 +347,7 @@ namespace RPSistema {
         "silenciarAlarmaActiva",
         []() -> EstadoHardwareDirectoDTO {
             buzz.silenciarAlarmaActiva();
-            const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
-            RTOS::encolarAuditoria(
-                RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
-                RPAuth::obtenerIdUsuarioSlot(slot),
-                RPAuth::obtenerNombreUsuarioSlot(slot),
-                "HARDWARE",
-                "MUTE_ALARMA_ACTIVA"
-            );
+            auditarAccionSistema("MUTE_ALARMA_ACTIVA", "HARDWARE", CriticidadEvento::BAJA);
             return construirEstadoHardware();
         },
         RolUsuario::ADMIN
@@ -452,6 +488,7 @@ namespace RPSistema {
     inline auto reiniciarHardware = llamadoSemantico.exactamenteUnaVez<void, void>(
         "reiniciarHardware",
         []() {
+            auditarAccionSistema("REINICIAR_HARDWARE", "SISTEMA", CriticidadEvento::ALTA);
             xTaskCreate([](void*) {
                 vTaskDelay(pdMS_TO_TICKS(250));
                 ESP.restart();
@@ -460,143 +497,120 @@ namespace RPSistema {
         RolUsuario::ADMIN
     );
 
-    // 12. Actualizar credenciales WiFi STA/AP y reconectar (ADMIN)
+    // 12. Actualizar WiFi STA, SoftAP o Reconectar STA sin pisar la otra interfaz (ADMIN)
     inline auto actualizarConfiguracionWiFi = llamadoSemantico.exactamenteUnaVez<ConfiguracionWiFiDTO, ResConfiguracionWiFiDTO>(
         "actualizarConfiguracionWiFi",
-        [](const ConfiguracionWiFiDTO& nuevaConfig) -> ResConfiguracionWiFiDTO {
-            if (nuevaConfig.ssidAp[0] == '\0') {
-                throw std::invalid_argument("ValueError: el SSID del Punto de Acceso no puede estar vacio");
-            }
-            const size_t lenClaveAp = strnlen(nuevaConfig.claveAp, sizeof(nuevaConfig.claveAp));
-            if (lenClaveAp > 0 && lenClaveAp < 8) {
-                throw std::invalid_argument("ValueError: la clave WPA2 del AP requiere al menos 8 caracteres");
+        [](const ConfiguracionWiFiDTO& in) -> ResConfiguracionWiFiDTO {
+            if (WiFiInicializador::instanciaActiva == nullptr) {
+                throw std::runtime_error("RuntimeError: gestor WiFi no inicializado");
             }
 
-            if (WiFiInicializador::instanciaActiva == nullptr ||
-                !WiFiInicializador::instanciaActiva->actualizarCredencialesYReconectar(
-                    nuevaConfig.ssidSta, nuevaConfig.claveSta, nuevaConfig.ssidAp, nuevaConfig.claveAp)) {
+            const size_t lenSsidSta  = strnlen(in.ssidSta,  sizeof(in.ssidSta));
+            const size_t lenClaveSta = strnlen(in.claveSta, sizeof(in.claveSta));
+            const size_t lenSsidAp   = strnlen(in.ssidAp,   sizeof(in.ssidAp));
+            const size_t lenClaveAp  = strnlen(in.claveAp,  sizeof(in.claveAp));
+
+            if (lenClaveSta > 0 && lenClaveSta < 8) {
+                throw std::invalid_argument("ValueError: la clave WiFi STA requiere al menos 8 caracteres (WPA2)");
+            }
+            if (lenClaveAp > 0 && lenClaveAp < 8) {
+                throw std::invalid_argument("ValueError: la clave del SoftAP requiere al menos 8 caracteres (WPA2)");
+            }
+
+            const bool tieneSta = (lenSsidSta > 0 || lenClaveSta > 0);
+            const bool tieneAp  = (lenSsidAp  > 0 || lenClaveAp  > 0);
+
+            if (!tieneSta && !tieneAp) {
+                // Modo 1: los 4 campos vacíos -> reintentar conexión STA con las credenciales guardadas
+                WiFiInicializador::instanciaActiva->reconectarEstacionRouter();
+                auditarAccionSistema("WIFI_RECONECTAR_STA", "WIFI", CriticidadEvento::BAJA);
+                return construirRespuestaWiFi();
+            }
+
+            if (tieneSta && !tieneAp) {
+                // Modo 2: solo STA (o "__CLEAR__" para olvidar el router sin tocar SoftAP)
+                const bool limpiar = (strcmp(in.ssidSta, "__CLEAR__") == 0);
+                if (!WiFiInicializador::instanciaActiva->actualizarSoloSta(in.ssidSta, in.claveSta, limpiar)) {
+                    throw std::runtime_error("RuntimeError: no se pudo guardar la configuracion WiFi STA");
+                }
+                auditarAccionSistema(
+                    limpiar ? "WIFI_DESACTIVAR_STA" : "WIFI_ACTUALIZAR_STA",
+                    limpiar ? "WIFI" : in.ssidSta,
+                    CriticidadEvento::ALTA
+                );
+                return construirRespuestaWiFi();
+            }
+
+            if (!tieneSta && tieneAp) {
+                // Modo 3: solo SoftAP (no toca STA ni borra su contraseña)
+                if (lenSsidAp == 0) {
+                    throw std::invalid_argument("ValueError: el SSID del SoftAP no puede estar vacio");
+                }
+                if (!WiFiInicializador::instanciaActiva->actualizarSoloAp(in.ssidAp, in.claveAp)) {
+                    throw std::runtime_error("RuntimeError: no se pudo reiniciar el SoftAP con las nuevas credenciales");
+                }
+                auditarAccionSistema("WIFI_ACTUALIZAR_AP", in.ssidAp, CriticidadEvento::ALTA);
+                return construirRespuestaWiFi();
+            }
+
+            // Modo 4: actualización combinada (conserva cualquier clave que llegue vacía)
+            if (lenSsidAp == 0) {
+                throw std::invalid_argument("ValueError: el SSID del SoftAP no puede estar vacio");
+            }
+            if (!WiFiInicializador::instanciaActiva->actualizarCredencialesYReconectar(
+                    in.ssidSta, in.claveSta, in.ssidAp, in.claveAp)) {
                 throw std::runtime_error("RuntimeError: fallo al reiniciar la interfaz WiFi con las nuevas credenciales");
             }
-
-            DbRuntime::Repositories::ConfiguracionRedDTO cfgDb{};
-            if (!DbRuntime::Repositories::RepoConfiguracionRed::obtenerOInicializar(cfgDb)) {
-                throw std::runtime_error("RuntimeError: no se pudo leer ConfiguracionRed desde la base de datos");
-            }
-
-            const EstadoRedWiFi& estado = WiFiInicializador::instanciaActiva->obtenerEstadoRed();
-            ResConfiguracionWiFiDTO salida{};
-            strncpy(salida.ssidSta, cfgDb.ssid_sta, sizeof(salida.ssidSta) - 1);
-            strncpy(salida.ssidAp,  cfgDb.ssid_ap,  sizeof(salida.ssidAp) - 1);
-            strncpy(salida.ipSta,   estado.ipEstacionLAN, sizeof(salida.ipSta) - 1);
-            strncpy(salida.ipAp,    estado.ipPuntoAcceso, sizeof(salida.ipAp) - 1);
-            salida.conectadoARouter  = estado.conectadoARouter ? 1 : 0;
-            salida.puntoAccesoActivo = estado.puntoAccesoActivo ? 1 : 0;
-            return salida;
+            auditarAccionSistema("WIFI_ACTUALIZAR_TODO", in.ssidAp, CriticidadEvento::ALTA);
+            return construirRespuestaWiFi();
         },
         RolUsuario::ADMIN
     );
 
-    // 13. Obtener configuración WiFi completa incluyendo SSIDs (ADMIN)
+    // 13. Obtener configuración WiFi completa incluyendo SSIDs y estado real (ADMIN)
     inline auto obtenerConfiguracionWiFi = llamadoSemantico.alMenosUnaVez<void, ResConfiguracionWiFiDTO>(
         "obtenerConfiguracionWiFi",
         []() -> ResConfiguracionWiFiDTO {
-            DbRuntime::Repositories::ConfiguracionRedDTO cfgDb{};
-            if (!DbRuntime::Repositories::RepoConfiguracionRed::obtenerOInicializar(cfgDb)) {
-                throw std::runtime_error("RuntimeError: no se pudo leer ConfiguracionRed desde la base de datos");
-            }
-
-            ResConfiguracionWiFiDTO salida{};
-            strncpy(salida.ssidSta, cfgDb.ssid_sta, sizeof(salida.ssidSta) - 1);
-            strncpy(salida.ssidAp,  cfgDb.ssid_ap,  sizeof(salida.ssidAp) - 1);
-
-            if (WiFiInicializador::instanciaActiva != nullptr) {
-                const EstadoRedWiFi& estado = WiFiInicializador::instanciaActiva->obtenerEstadoRed();
-                strncpy(salida.ipSta, estado.ipEstacionLAN, sizeof(salida.ipSta) - 1);
-                strncpy(salida.ipAp,  estado.ipPuntoAcceso, sizeof(salida.ipAp) - 1);
-                salida.conectadoARouter  = estado.conectadoARouter ? 1 : 0;
-                salida.puntoAccesoActivo = estado.puntoAccesoActivo ? 1 : 0;
-            }
-            return salida;
+            return construirRespuestaWiFi();
         },
         RolUsuario::ADMIN
     );
 
+    // 14. Apagado seguro (shutdown controlado) (ADMIN)
+    inline auto solicitarApagadoSeguro = llamadoSemantico.exactamenteUnaVez<void, ResApagadoSeguroDTO>(
+        "solicitarApagadoSeguro",
+        []() -> ResApagadoSeguroDTO {
+            ResApagadoSeguroDTO out{};
+            out.apagadoIniciado = true;
+            out.motivo = "APAGADO_REMOTO_ADMIN";
 
-    // ============================================================================
-// 14. APAGADO SEGURO (SHUTDOWN CONTROLADO)
-// ============================================================================
-//  ¿Qué hace?:
-//    - Silencia bocina y apaga LED de inmediato.
-//    - Avisa por OLED y registra auditoría en SD.
-//    - Lanza una tarea de bajo nivel que espera 800 ms (para que la respuesta
-//      RPC salga por los canales activos), desconecta WiFi, cierra la SD
-//      y entra en deep sleep (~10 µA, solo dominio RTC alimentado).
-//  ¿Cómo se recupera el sistema?
-//    - Reset físico (botón EN) o wake source configurado en RTC.
-//    - Si tu placa tiene latch de potencia por GPIO, agregar la liberación
-//      del GPIO antes del deep sleep (ver nota al final).
-// ----------------------------------------------------------------------------
-
-inline auto solicitarApagadoSeguro = llamadoSemantico.exactamenteUnaVez<void, ResApagadoSeguroDTO>(
-    "solicitarApagadoSeguro",
-    []() -> ResApagadoSeguroDTO {
-        ResApagadoSeguroDTO out{};
-        out.apagadoIniciado = true;
-        out.motivo = "APAGADO_REMOTO_ADMIN";
-
-        // 1. Apagar actuadores INMEDIATAMENTE (seguridad)
-        buzz.silenciarAlarmaActiva();
-        led.apagarLed();
-        out.alarmaSilenciada = true;
-        out.ledApagado       = true;
-
-        // 2. Mostrar en OLED que el sistema se está apagando (lo dibuja TaskOled en Core 0)
-        RTOS::pizarraOled.publicarMensajeTemporal("SISTEMA", "Apagando...", "Espere cierre SD", "", "", 15000);
-
-        // 3. Auditoría (se escribirá a SD antes del cierre si hay margen)
-        const uint8_t slot = RPCBase::contextoActual().slotClienteOrigen;
-        RTOS::encolarAuditoria(
-            RTOS::TipoRegistroDB::AUDITORIA_TRANSACCION,
-            RPAuth::obtenerIdUsuarioSlot(slot),
-            RPAuth::obtenerNombreUsuarioSlot(slot),
-            "SISTEMA",
-            "APAGADO_SEGURO_SOLICITADO"
-        );
-
-        // 4. Tarea de bajo nivel para cerrar ordenadamente
-        xTaskCreate([](void*) {
-            // Pausa para que la respuesta RPC salga por L1 / L2 / L3
-            vTaskDelay(pdMS_TO_TICKS(800));
-
-            // Desconectar WiFi de forma limpia (apaga la radio)
-            WiFi.disconnect(true, true);
-
-            // Cerrar la tarjeta SD de forma segura
-            // AJUSTAR: usar el método real de TarjetaSD (cerrar(), close(), SD.end(), etc.)
-            if (TarjetaSD::getInstance().estaInicializada()) {
-                SD.end();
-            }
-
-            // Margen para que cualquier operación pendiente de flash/SD termine
-            vTaskDelay(pdMS_TO_TICKS(300));
-
-            // Apagar nuevamente actuadores por seguridad
             buzz.silenciarAlarmaActiva();
             led.apagarLed();
-            RTOS::pizarraOled.publicarMensajeTemporal("", "", "", "", "", 15000);
+            out.alarmaSilenciada = true;
+            out.ledApagado       = true;
 
-            vTaskDelay(pdMS_TO_TICKS(200));
+            RTOS::pizarraOled.publicarMensajeTemporal("SISTEMA", "Apagando...", "Espere cierre SD", "", "", 15000);
+            auditarAccionSistema("APAGADO_SEGURO_SOLICITADO", "SISTEMA", CriticidadEvento::ALTA);
 
-            // Apagado lógico: deep sleep = mínimo consumo (~10 µA)
-            // Despertar solo por reset físico o wake source RTC configurado
-            esp_deep_sleep_start();
-        }, "SafeShutdown", 4096, nullptr, 2, nullptr);
+            xTaskCreate([](void*) {
+                vTaskDelay(pdMS_TO_TICKS(800));
+                WiFi.disconnect(true, true);
+                if (TarjetaSD::getInstance().estaInicializada()) {
+                    SD.end();
+                }
+                vTaskDelay(pdMS_TO_TICKS(300));
+                buzz.silenciarAlarmaActiva();
+                led.apagarLed();
+                RTOS::pizarraOled.publicarMensajeTemporal("", "", "", "", "", 15000);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_deep_sleep_start();
+            }, "SafeShutdown", 4096, nullptr, 2, nullptr);
 
-        out.tareaDeCierreLanzada = true;
-        return out;
-    },
-    RolUsuario::ADMIN
-);
+            out.tareaDeCierreLanzada = true;
+            return out;
+        },
+        RolUsuario::ADMIN
+    );
 
 } // namespace RPSistema
 

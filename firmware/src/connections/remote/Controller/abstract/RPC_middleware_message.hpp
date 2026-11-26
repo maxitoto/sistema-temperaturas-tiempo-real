@@ -10,7 +10,7 @@
 
 class RPCMiddlewareMessage : public RPCBase {
 public:
-    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 64;
+    static constexpr size_t MAX_PROCEDIMIENTOS_REGISTRADOS = 80;
     using InvocadorBorradoFn = MascaraClientes (*)(const SobreMensajeRPC&, MascaraClientes& refSuscriptoresStream);
     using EmisorStreamFn     = size_t (*)(uint16_t ticketSecuencia, uint16_t idProc, uint8_t* bufferOut, size_t capMax);
     using FuncionDifusionL1  = void (*)(const uint8_t* buffer, size_t longitud, MascaraClientes destinatarios, CanalSalida canal);
@@ -78,6 +78,7 @@ public:
         }
 
         ejecutarConCapturaNativa(sobre.idTicket, sobre.idProcedimiento, [&]() {
+            RPAuth::verificarCuotaMensajeria(sobre.slotClienteOrigen, "PROC_DESCONOCIDO");
             throw std::runtime_error("NameError: procedimiento remoto no existe en el servidor");
         });
         return static_cast<MascaraClientes>(1u << sobre.slotClienteOrigen);
@@ -120,6 +121,7 @@ public:
     template <typename EntradaDTO, typename SalidaDTO, typename Callable>
     static MascaraClientes ejecutarEnvuelto(
         const SobreMensajeRPC& sobre,
+        const char* nombreProcedimiento,
         RolUsuario rolMinimoRequerido,
         SemanticaEntrega semantica,
         MascaraClientes& refSuscriptoresStream,
@@ -130,8 +132,12 @@ public:
         int8_t idxTicket = -1;
 
         bool exito = ejecutarConCapturaNativa(sobre.idTicket, sobre.idProcedimiento, [&]() {
-            // 1. La validación de sesión y rol vive en RPAuth y lanza excepción si falla
-            RPAuth::exigirSesionAutorizada(sobre.slotClienteOrigen, rolMinimoRequerido);
+            // 1. Validación de sesión, cuota anti-flood y rol en RPAuth (con nombre de procedimiento para auditoría)
+            const RolUsuario rolReal = RPAuth::exigirSesionAutorizada(
+                sobre.slotClienteOrigen,
+                rolMinimoRequerido,
+                nombreProcedimiento
+            );
 
             if (semantica != SemanticaEntrega::EXACTAMENTE_UNA_VEZ &&
                 intentarAcoplarAPeticionEnVuelo(sobre.hashPeticion, sobre.slotClienteOrigen)) {
@@ -145,7 +151,8 @@ public:
                 throw std::runtime_error("RuntimeError: tabla de tickets llena en el servidor ESP32");
             }
 
-            sobreEnEjecucion = sobre;
+            sobreEnEjecucion                = sobre;
+            sobreEnEjecucion.rolAutenticado = rolReal;
 
             if constexpr (std::is_void_v<EntradaDTO>) {
                 if constexpr (std::is_void_v<SalidaDTO>) {
@@ -216,12 +223,13 @@ private:
         RolUsuario rolMinimo,
         Callable fn
     ) {
-        static Callable fnEstatica = fn;
-        static RolUsuario rolEstatico = rolMinimo;
+        static Callable    fnEstatica     = fn;
+        static RolUsuario  rolEstatico    = rolMinimo;
+        static const char* nombreEstatico = nombreProcedimiento;
 
         auto trampolin = +[](const SobreMensajeRPC& sobre, MascaraClientes& refSuscriptores) -> MascaraClientes {
             return RPCMiddlewareMessage::ejecutarEnvuelto<EntradaDTO, SalidaDTO>(
-                sobre, rolEstatico, Sem, refSuscriptores, fnEstatica
+                sobre, nombreEstatico, rolEstatico, Sem, refSuscriptores, fnEstatica
             );
         };
 

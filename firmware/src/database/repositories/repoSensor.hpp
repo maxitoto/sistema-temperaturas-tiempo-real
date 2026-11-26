@@ -124,7 +124,7 @@ namespace DbRuntime::Repositories {
                 throw std::invalid_argument("ValueError: umbral_inf no puede ser mayor que umbral_sup");
             }
 
-            SensorDTO dummy{};
+            
             if (existePorMac(entrada.mac.c_str())) {
                 throw std::runtime_error("UniqueViolation: ya existe un sensor con esa MAC");
             }
