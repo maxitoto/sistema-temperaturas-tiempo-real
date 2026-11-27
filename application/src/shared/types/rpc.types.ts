@@ -345,10 +345,76 @@ export interface ConfiguracionSistemaDTO {
   fechaModificacion: number;
 }
 
+export interface EstadoRelayLocalDTO {
+  activo: boolean;
+  ipLan: string;
+  puertoTunel: number;
+  puertoClientes: number;
+  espConectado: boolean;
+  clientesConectados: number;
+}
+
+export interface ConfigInicioRelayLocalDTO {
+  puertoTunel?: number;
+  puertoClientes?: number;
+  nodeId?: string;
+  secreto?: string;
+}
+
 export type ActualizarConfigSistemaInputDTO = Omit<
   ConfiguracionSistemaDTO,
   "idConfiguracionSistema" | "fechaModificacion"
 >;
+
+export enum EstadoRelay {
+  DESHABILITADO = 0,
+  SIN_WIFI_STA = 1,
+  DESCONECTADO = 2,
+  ESPERANDO_CHALLENGE = 3,
+  ESPERANDO_AUTH_OK = 4,
+  ACTIVO = 5,
+}
+
+export enum ErrorRelay {
+  NINGUNO = 0,
+  CONEXION_FALLIDA = 1,
+  AUTH_RECHAZADA = 2,
+  TIMEOUT_HANDSHAKE = 3,
+  TIMEOUT_KEEPALIVE = 4,
+  TRAMA_INVALIDA = 5,
+  SOCKET_CAIDO = 6,
+}
+
+export interface ConfiguracionRelayDTO {
+  idConfiguracionRed: number;
+  hostRelay: string;
+  puerto: number;
+  nodeId: string;
+  secreto: string;
+  activa: boolean;
+  fechaCreacion: string;
+  fechaModificacion: string;
+}
+
+export type ActualizarConfigRelayInputDTO = Omit<
+  ConfiguracionRelayDTO,
+  "idConfiguracionRed" | "fechaCreacion" | "fechaModificacion"
+>;
+
+export interface EstadoRelaySistemaDTO {
+  habilitado: boolean;
+  conectado: boolean;
+  estado: EstadoRelay;
+  ultimoError: ErrorRelay;
+  uptimeSegundos: number;
+  reconexionesTotales: number;
+  tramasRxTotales: number;
+  tramasTxTotales: number;
+  puerto: number;
+  clientesRelayActivos: number;
+  host: string;
+  nodeId: string;
+}
 
 export interface ConfiguracionSmtpDTO {
   idConfiguracionSmtp: number;
@@ -526,6 +592,13 @@ export interface ServiceClientAPI {
   invalidarCache(): Promise<void>;
   iniciarSesion(usuario: string, clavePlana: string): Promise<SesionIniciadaCliente>;
   cerrarSesion(): Promise<void>;
+  obtenerEstadoRelay(): Promise<EstadoRelaySistemaDTO>;
+  obtenerConfiguracionRelay(): Promise<ConfiguracionRelayDTO>;
+  actualizarConfiguracionRelay(dto: ActualizarConfigRelayInputDTO): Promise<ConfiguracionRelayDTO>;
+
+  iniciarRelayLocal(cfg?: ConfigInicioRelayLocalDTO): Promise<EstadoRelayLocalDTO>;
+  detenerRelayLocal(): Promise<EstadoRelayLocalDTO>;
+  obtenerEstadoRelayLocal(): Promise<EstadoRelayLocalDTO>;
 
   // Dominio 1: Sistema, Hardware, Red y BIOS RTOS
   obtenerInfoRedPublica(): Promise<InfoRedPublicaDTO>;

@@ -18,6 +18,8 @@ import {
   HelpCircle,
   RotateCw,
   Unlink,
+  Cloud,
+  Power,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { useAuth } from "../contexts/AuthContext";
@@ -38,6 +40,11 @@ import {
   ServidorNtpItemDTO,
   TipoRecepcionCorreo,
   ResultadoEnvioSmtpDTO,
+  ConfiguracionRelayDTO,
+  EstadoRelaySistemaDTO,
+  EstadoRelay,
+  ErrorRelay,
+  EstadoRelayLocalDTO,
 } from "#types/rpc.types";
 import { FormulaTooltip } from "../components/ui/FormulaTooltip";
 import {
@@ -89,6 +96,25 @@ function ParamHelpTooltip({
     </span>
   );
 }
+
+const LABEL_ESTADO_RELAY: Record<EstadoRelay, string> = {
+  [EstadoRelay.DESHABILITADO]: "Deshabilitado",
+  [EstadoRelay.SIN_WIFI_STA]: "Esperando WiFi STA",
+  [EstadoRelay.DESCONECTADO]: "Desconectado (reintentando)",
+  [EstadoRelay.ESPERANDO_CHALLENGE]: "Conectando (reto)",
+  [EstadoRelay.ESPERANDO_AUTH_OK]: "Autenticando HMAC",
+  [EstadoRelay.ACTIVO]: "Túnel Activo",
+};
+
+const LABEL_ERROR_RELAY: Record<ErrorRelay, string> = {
+  [ErrorRelay.NINGUNO]: "Sin errores",
+  [ErrorRelay.CONEXION_FALLIDA]: "No se pudo conectar al VPS",
+  [ErrorRelay.AUTH_RECHAZADA]: "Auth rechazada (revisá Node ID / Secreto)",
+  [ErrorRelay.TIMEOUT_HANDSHAKE]: "Timeout en handshake",
+  [ErrorRelay.TIMEOUT_KEEPALIVE]: "Timeout de keepalive",
+  [ErrorRelay.TRAMA_INVALIDA]: "Trama Mux inválida",
+  [ErrorRelay.SOCKET_CAIDO]: "Socket caído",
+};
 
 export function ConfiguracionView({
   tabInicial = "SISTEMA",
@@ -144,6 +170,25 @@ export function ConfiguracionView({
   const [accionWifi, setAccionWifi] = useState<
     null | "RECONECTAR" | "STA" | "AP" | "LIMPIAR_STA"
   >(null);
+
+  // --- Túnel Remoto (Reverse TCP Relay) ---
+  const [relayCfg, setRelayCfg] = useState<ConfiguracionRelayDTO | null>(null);
+  const [relayEstado, setRelayEstado] = useState<EstadoRelaySistemaDTO | null>(
+    null
+  );
+  const [formRelay, setFormRelay] = useState({
+    hostRelay: "",
+    puerto: 9443,
+    nodeId: "ESP32-UNTDF-0001",
+    secreto: "",
+    activa: false,
+  });
+  const [guardandoRelay, setGuardandoRelay] = useState(false);
+
+  const [relayLocal, setRelayLocal] = useState<EstadoRelayLocalDTO | null>(
+    null
+  );
+  const [cambiandoRelayLocal, setCambiandoRelayLocal] = useState(false);
 
   // --- Pestaña 4: SMTP y Destinatarios de Correo ---
   const [correos, setCorreos] = useState<CorreoItemDTO[]>([]);
@@ -229,15 +274,46 @@ export function ConfiguracionView({
           silent: true,
         });
       }
-      const w = await safeRpc(
-        () => client.obtenerConfiguracionWiFi(),
-        "obtenerConfiguracionWiFi"
-      );
+      const [w, rCfg, rEst, rLocal] = await Promise.all([
+        safeRpc(
+          () => client.obtenerConfiguracionWiFi(),
+          "obtenerConfiguracionWiFi"
+        ),
+        safeRpc(
+          () => client.obtenerConfiguracionRelay(),
+          "obtenerConfiguracionRelay",
+          { silent: true }
+        ),
+        safeRpc(() => client.obtenerEstadoRelay(), "obtenerEstadoRelay", {
+          silent: true,
+        }),
+        safeRpc(
+          () => client.obtenerEstadoRelayLocal(),
+          "obtenerEstadoRelayLocal",
+          { silent: true }
+        ),
+      ]);
       setCargando(false);
       if (w) {
         setWifiInfo(w);
         setFormWifiSta((prev) => ({ ...prev, ssidSta: w.ssidSta }));
         setFormWifiAp((prev) => ({ ...prev, ssidAp: w.ssidAp }));
+      }
+      if (rCfg) {
+        setRelayCfg(rCfg);
+        setFormRelay({
+          hostRelay: rCfg.hostRelay,
+          puerto: rCfg.puerto || 9443,
+          nodeId: rCfg.nodeId || "ESP32-UNTDF-0001",
+          secreto: "",
+          activa: rCfg.activa,
+        });
+      }
+      if (rEst) {
+        setRelayEstado(rEst);
+      }
+      if (rLocal) {
+        setRelayLocal(rLocal);
       }
     },
     [esAdmin]
@@ -458,6 +534,114 @@ export function ConfiguracionView({
       setWifiInfo(res);
       setFormWifiAp({ ssidAp: res.ssidAp, claveAp: "" });
     }
+  };
+
+  const guardarRelay = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const host = formRelay.hostRelay.trim();
+    const nodeId = formRelay.nodeId.trim() || "ESP32-UNTDF-0001";
+    const tieneSecretoPrevio = Boolean(relayCfg?.secreto);
+
+    if (formRelay.activa && !host) {
+      toast.warning("Ingresá la IP o dominio del VPS Relay antes de activarlo.");
+      return;
+    }
+    if (
+      formRelay.activa &&
+      formRelay.secreto.length > 0 &&
+      formRelay.secreto.length < 16
+    ) {
+      toast.warning("El secreto del Relay debe tener al menos 16 caracteres.");
+      return;
+    }
+    if (formRelay.activa && !formRelay.secreto && !tieneSecretoPrevio) {
+      toast.warning("Ingresá un secreto compartido (mín. 16 caracteres).");
+      return;
+    }
+
+    setGuardandoRelay(true);
+    const res = await safeRpc(
+      () =>
+        client.actualizarConfiguracionRelay({
+          hostRelay: host,
+          puerto: Math.round(formRelay.puerto),
+          nodeId,
+          secreto: formRelay.secreto,
+          activa: formRelay.activa,
+        }),
+      "actualizarConfiguracionRelay",
+      {
+        mensajeExito: formRelay.activa
+          ? "Túnel Relay guardado y activado en caliente."
+          : "Túnel Relay desactivado.",
+      }
+    );
+    setGuardandoRelay(false);
+
+    if (res) {
+      setRelayCfg(res);
+      setFormRelay({
+        hostRelay: res.hostRelay,
+        puerto: res.puerto || 9443,
+        nodeId: res.nodeId || "ESP32-UNTDF-0001",
+        secreto: "",
+        activa: res.activa,
+      });
+      setTimeout(async () => {
+        const [est, estLocal] = await Promise.all([
+          safeRpc(() => client.obtenerEstadoRelay(), "obtenerEstadoRelay", {
+            silent: true,
+          }),
+          safeRpc(
+            () => client.obtenerEstadoRelayLocal(),
+            "obtenerEstadoRelayLocal",
+            { silent: true }
+          ),
+        ]);
+        if (est) setRelayEstado(est);
+        if (estLocal) setRelayLocal(estLocal);
+      }, 1200);
+    }
+  };
+
+  const alternarRelayLocal = async () => {
+    setCambiandoRelayLocal(true);
+    if (relayLocal?.activo) {
+      const est = await safeRpc(
+        () => client.detenerRelayLocal(),
+        "detenerRelayLocal",
+        { mensajeExito: "Servidor Relay local de prueba detenido." }
+      );
+      if (est) setRelayLocal(est);
+    } else {
+      const secretoUsar =
+        formRelay.secreto.trim() ||
+        relayCfg?.secreto?.trim() ||
+        "prueba_local_untdf_2026_1234";
+
+      const est = await safeRpc(
+        () =>
+          client.iniciarRelayLocal({
+            puertoTunel: Math.round(formRelay.puerto || 9443),
+            puertoClientes: 8443,
+            nodeId: formRelay.nodeId.trim() || "ESP32-UNTDF-0001",
+            secreto: secretoUsar,
+          }),
+        "iniciarRelayLocal"
+      );
+      if (est) {
+        setRelayLocal(est);
+        setFormRelay((prev) => ({
+          ...prev,
+          hostRelay: prev.hostRelay.trim() || est.ipLan,
+          secreto: prev.secreto || (relayCfg?.secreto ? "" : secretoUsar),
+        }));
+        toast.success(
+          `Relay local encendido en ${est.ipLan}:${est.puertoTunel} (clientes en :${est.puertoClientes}).`
+        );
+      }
+    }
+    setCambiandoRelayLocal(false);
   };
 
   const guardarSmtp = async (e: React.FormEvent) => {
@@ -1109,9 +1293,7 @@ export function ConfiguracionView({
                   </button>
                   <button
                     type="button"
-                    disabled={
-                      accionWifi !== null || !wifiInfo?.ssidSta
-                    }
+                    disabled={accionWifi !== null || !wifiInfo?.ssidSta}
                     onClick={() => void reconectarWifiSta()}
                     className={`btn px-2.5 py-1 text-xs font-semibold ${
                       wifiInfo?.conectadoARouter
@@ -1318,6 +1500,227 @@ export function ConfiguracionView({
               </div>
             </form>
           </div>
+
+          {/* Tarjeta 3: Túnel Remoto Saliente (Reverse TCP Relay a ancho completo) */}
+          <form
+            onSubmit={guardarRelay}
+            className="space-y-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Cloud className="h-4 w-4 text-primary" />
+                <div>
+                  <h2 className="text-sm font-bold">
+                    Acceso Remoto Autónomo (Reverse TCP Relay)
+                  </h2>
+                  <p className="text-[11px] text-foreground-secondary">
+                    El ESP32 mantiene un túnel saliente contra tu VPS para
+                    cruzar CGNAT sin depender de ninguna PC puente.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs">
+                {relayEstado && (
+                  <span
+                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                      relayEstado.conectado
+                        ? "bg-alert-success-bg text-alert-success-icon"
+                        : relayEstado.habilitado
+                          ? "bg-warning/15 text-warning"
+                          : "bg-alert-inactive-bg text-alert-inactive-icon"
+                    }`}
+                  >
+                    {LABEL_ESTADO_RELAY[relayEstado.estado] ?? "Desconocido"}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  disabled={cargando || guardandoRelay}
+                  onClick={() => void cargarWifi(true)}
+                  className="btn btn-outline px-2 py-1 text-xs"
+                  title="Refrescar estado en vivo del túnel"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${cargando ? "animate-spin" : ""}`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {relayEstado && relayEstado.habilitado && (
+              <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-background p-2.5 font-mono text-[11px] sm:grid-cols-4">
+                <div>
+                  <span className="text-foreground-secondary">Uptime: </span>
+                  <strong>{relayEstado.uptimeSegundos}s</strong>
+                </div>
+                <div>
+                  <span className="text-foreground-secondary">
+                    Clientes remotos:{" "}
+                  </span>
+                  <strong>{relayEstado.clientesRelayActivos}</strong>
+                </div>
+                <div>
+                  <span className="text-foreground-secondary">
+                    Reconexiones:{" "}
+                  </span>
+                  <strong>{relayEstado.reconexionesTotales}</strong>
+                </div>
+                <div>
+                  <span className="text-foreground-secondary">
+                    Diagnóstico:{" "}
+                  </span>
+                  <strong
+                    className={
+                      relayEstado.ultimoError === ErrorRelay.NINGUNO
+                        ? "text-success"
+                        : "text-error"
+                    }
+                  >
+                    {LABEL_ERROR_RELAY[relayEstado.ultimoError] ?? "—"}
+                  </strong>
+                </div>
+              </div>
+            )}
+
+            {/* Panel de control del Servidor Relay Local de Prueba */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background p-3 text-xs">
+              <div className="space-y-0.5">
+                <div className="font-semibold">
+                  Túnel de Prueba Local (en esta PC)
+                </div>
+                <div className="font-mono text-[11px] text-foreground-secondary">
+                  {relayLocal?.activo
+                    ? `Activo en ${relayLocal.ipLan}:${relayLocal.puertoTunel} · Clientes: ${relayLocal.ipLan}:${relayLocal.puertoClientes} · ESP32: ${relayLocal.espConectado ? "Conectado" : "Esperando..."}`
+                    : "Apagado · Encendelo para probar el túnel sin VPS usando tu IP local."}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={cambiandoRelayLocal}
+                onClick={() => void alternarRelayLocal()}
+                className={`btn px-3 py-1.5 text-xs font-bold ${
+                  relayLocal?.activo
+                    ? "btn-solid btn-error"
+                    : "btn-solid btn-success"
+                }`}
+              >
+                {cambiandoRelayLocal ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Power className="h-3.5 w-3.5" />
+                )}
+                {relayLocal?.activo
+                  ? "Apagar Túnel de Prueba"
+                  : "Encender Túnel de Prueba"}
+              </button>
+            </div>
+
+            {/* Inputs apilados verticalmente a ancho completo */}
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="mb-1 block font-medium">
+                  Host / IP del Servidor Relay (VPS o IP LAN local)
+                </label>
+                <input
+                  type="text"
+                  maxLength={63}
+                  value={formRelay.hostRelay}
+                  onChange={(e) =>
+                    setFormRelay({ ...formRelay, hostRelay: e.target.value })
+                  }
+                  placeholder="Ej. 192.168.1.20 o relay.tudominio.com"
+                  className="w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium">
+                  Puerto del Túnel (por defecto 9443)
+                </label>
+                <NumericInput
+                  value={formRelay.puerto}
+                  onChange={(v) => setFormRelay((p) => ({ ...p, puerto: v }))}
+                  decimals={0}
+                  allowNegative={false}
+                  min={1}
+                  max={65535}
+                  className="w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium">
+                  Node ID (identificador del ESP32, máx. 16 caracteres)
+                </label>
+                <input
+                  type="text"
+                  maxLength={16}
+                  value={formRelay.nodeId}
+                  onChange={(e) =>
+                    setFormRelay({ ...formRelay, nodeId: e.target.value })
+                  }
+                  placeholder="ESP32-UNTDF-0001"
+                  className="w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium">
+                  Secreto Compartido (mín. 16 caracteres)
+                </label>
+                <PasswordInput
+                  maxLength={63}
+                  value={formRelay.secreto}
+                  onChange={(e) =>
+                    setFormRelay({ ...formRelay, secreto: e.target.value })
+                  }
+                  placeholder={
+                    relayCfg?.secreto
+                      ? "Vacío = conservar secreto actual"
+                      : "Clave secreta compartida con el servidor Relay"
+                  }
+                  className="w-full rounded border border-border bg-background px-3 py-2"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={formRelay.activa}
+                  onChange={(e) =>
+                    setFormRelay({ ...formRelay, activa: e.target.checked })
+                  }
+                />
+                Activar túnel saliente 24/7 (requiere WiFi STA conectado)
+              </label>
+
+              <button
+                type="submit"
+                disabled={guardandoRelay}
+                className="btn btn-solid btn-primary px-4 py-1.5 text-xs font-bold"
+              >
+                {guardandoRelay ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                Guardar Túnel Relay
+              </button>
+            </div>
+
+            {formRelay.hostRelay.trim() && (
+              <div className="text-[11px] text-foreground-secondary">
+                Dirección para conectar clientes Electron desde Internet:{" "}
+                <code className="font-mono font-bold text-foreground">
+                  {formRelay.hostRelay.trim()}:8443
+                </code>
+              </div>
+            )}
+          </form>
         </div>
       )}
 

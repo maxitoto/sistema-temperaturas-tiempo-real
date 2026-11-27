@@ -331,6 +331,7 @@ public:
         wifiUdp(wifiUdpRt),
         colaRpc(colaTrabajoRt) {
         instanciaActiva = this;
+        wifiTcp.configurarCallbackDatosRelay(&MiddlewareInterface::callbackDatosRelayDesdeTcp, this);
         cifradorWiFi.inicializarConPsk(clavePsk16);
         estadoCryptoUdp.reiniciar();
         // L2 y L3 corren en Core 1: sus callbacks publican hacia Core 0 a través de ColaTrabajoRPC
@@ -515,6 +516,20 @@ private:
             instanciaActiva->colaRpc.solicitarCierreFisico(slotCliente);
         }
     }
+    static void callbackDatosRelayDesdeTcp(uint8_t slot, const uint8_t* data, size_t len, void* ctx) {
+    if (!ctx || !data || len == 0 || slot < 1 || slot > WiFiTcpTlsRuntime::MAXIMO_CLIENTES_TLS) return;
+    auto* self = static_cast<MiddlewareInterface*>(ctx);
+    AcumuladorFramingTcp& acc = self->acumuladoresTcp[slot - 1];
+    const size_t libre = sizeof(acc.buffer) - acc.bytesAcumulados;
+    if (len > libre) {
+        self->registrarIncidenteRedThrottled(slot, "WIFI_OVERFLOW_BUFFER_RX", CriticidadEvento::ALTA);
+        self->solicitarLimpiezaSesionDesdeCore0(slot);
+        self->cerrarConexionFisicaPorSlot(slot);
+        return;
+    }
+    memcpy(acc.buffer + acc.bytesAcumulados, data, len);
+    acc.bytesAcumulados += len;
+}
 };
 
 #endif

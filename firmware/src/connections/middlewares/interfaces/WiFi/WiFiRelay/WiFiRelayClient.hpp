@@ -48,7 +48,7 @@ struct SnapshotEstadoRelay {
 
 class WiFiRelayClient {
 public:
-    static constexpr size_t   MAX_PAYLOAD_RX_MUX    = 1024;    // Cubre cualquier trama RPC entrante AEAD (<= 512 B)
+    static constexpr size_t   MAX_PAYLOAD_RX_MUX    = 512;    // Cubre cualquier trama RPC entrante AEAD (<= 512 B)
     static constexpr size_t   MAX_PAYLOAD_TX_MUX    = 2048;    // Cubre CAPACIDAD_SALIDA_CIFRADA (<= 1566 B)
     static constexpr uint8_t  MAX_TRAMAS_POR_CICLO  = 4;
     static constexpr uint32_t TIMEOUT_CONNECT_MS    = 600UL;   // Evita congelar TaskComms si el VPS no responde
@@ -275,14 +275,16 @@ private:
         }
 
         switch (op) {
-            case OP_OPEN: 
+            case OP_OPEN:
                 if (sid >= 1 && sid <= 15) { mascaraSidsActivos |= static_cast<uint16_t>(1u << sid); actualizarConteoSids(); }
+                if (cbs.onAbrirCliente) cbs.onAbrirCliente(sid, cbs.ctx);
                 break;
             case OP_DATA:
                 if (cbs.onDatosCliente && len > 0) cbs.onDatosCliente(sid, payload, len, cbs.ctx);
                 break;
             case OP_CLOSE:
                 if (sid >= 1 && sid <= 15) { mascaraSidsActivos &= static_cast<uint16_t>(~(1u << sid)); actualizarConteoSids(); }
+                if (cbs.onCerrarCliente) cbs.onCerrarCliente(sid, cbs.ctx);
                 break;
             case OP_PING:
                 enviarPaqueteMux(OP_PONG, 0, nullptr, 0);

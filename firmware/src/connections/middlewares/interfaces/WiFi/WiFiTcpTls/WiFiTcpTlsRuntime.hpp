@@ -19,55 +19,9 @@ public:
     static constexpr uint16_t PUERTO_SERVIDOR_TLS     = 8443;
     static constexpr uint8_t  MAXIMO_CLIENTES_TLS     = 4;
     static constexpr uint32_t INTERVALO_MIN_ACCEPT_MS = 50;
-    static constexpr size_t   CAPACIDAD_RX_RELAY_SLOT = 512;
+    
 
 private:
-    struct ColaBytesRelay {
-        uint8_t datos[CAPACIDAD_RX_RELAY_SLOT]{0};
-        size_t  cabeza{0};
-        size_t  cola{0};
-        size_t  cantidad{0};
-
-        void limpiar() {
-            cabeza   = 0;
-            cola     = 0;
-            cantidad = 0;
-        }
-
-        bool escribir(const uint8_t* src, size_t len) {
-            if (!src || len == 0) return true;
-            if (len > (CAPACIDAD_RX_RELAY_SLOT - cantidad)) {
-                return false;
-            }
-            const size_t primerTramo = CAPACIDAD_RX_RELAY_SLOT - cabeza;
-            if (len <= primerTramo) {
-                memcpy(datos + cabeza, src, len);
-                cabeza = (cabeza + len) % CAPACIDAD_RX_RELAY_SLOT;
-            } else {
-                memcpy(datos + cabeza, src, primerTramo);
-                memcpy(datos, src + primerTramo, len - primerTramo);
-                cabeza = len - primerTramo;
-            }
-            cantidad += len;
-            return true;
-        }
-
-        size_t leer(uint8_t* dst, size_t maxLen) {
-            if (!dst || maxLen == 0 || cantidad == 0) return 0;
-            const size_t aLeer = (cantidad < maxLen) ? cantidad : maxLen;
-            const size_t primerTramo = CAPACIDAD_RX_RELAY_SLOT - cola;
-            if (aLeer <= primerTramo) {
-                memcpy(dst, datos + cola, aLeer);
-                cola = (cola + aLeer) % CAPACIDAD_RX_RELAY_SLOT;
-            } else {
-                memcpy(dst, datos + cola, primerTramo);
-                memcpy(dst + primerTramo, datos, aLeer - primerTramo);
-                cola = aLeer - primerTramo;
-            }
-            cantidad -= aLeer;
-            return aLeer;
-        }
-    };
 
     WiFiServer servidorTcp{PUERTO_SERVIDOR_TLS};
     WiFiClient clientesTcp[MAXIMO_CLIENTES_TLS]{};
@@ -80,7 +34,9 @@ private:
     bool             pendienteAceptarRelay[MAXIMO_CLIENTES_TLS]{false};
     bool             caidoRelay[MAXIMO_CLIENTES_TLS]{false};
     uint8_t          sidRelay[MAXIMO_CLIENTES_TLS]{0};
-    ColaBytesRelay   rxRelay[MAXIMO_CLIENTES_TLS]{};
+    void (*onDatosSlotRelay)(uint8_t slot, const uint8_t* data, size_t len, void* ctx){nullptr};
+    void* ctxDatosSlotRelay{nullptr};
+    
 
     int8_t buscarIndicePorSid(uint8_t sid) const {
         if (sid == 0) return -1;
@@ -102,7 +58,6 @@ private:
             caidoRelay[existente]            = true;
             pendienteAceptarRelay[existente] = false;
             sidRelay[existente]              = 0;
-            rxRelay[existente].limpiar();
         }
 
         for (uint8_t i = 0; i < MAXIMO_CLIENTES_TLS; ++i) {
@@ -115,7 +70,6 @@ private:
                 pendienteAceptarRelay[i] = true;
                 caidoRelay[i]            = false;
                 sidRelay[i]              = sid;
-                rxRelay[i].limpiar();
                 return;
             }
         }
@@ -129,16 +83,9 @@ private:
     // ¿Cómo lo hace?: Inserta los bytes cifrados del cliente remoto en su cola circular RX; si desborda, marca el slot caído.
     void manejarDatosClienteRelay(uint8_t sid, const uint8_t* data, size_t len) {
         const int8_t idx = buscarIndicePorSid(sid);
-        if (idx < 0) return;
-
-        if (!rxRelay[idx].escribir(data, len)) {
-            if (refRelay) {
-                refRelay->cerrarClienteRemoto(sid);
-            }
-            caidoRelay[idx]            = true;
-            pendienteAceptarRelay[idx] = false;
-            sidRelay[idx]              = 0;
-            rxRelay[idx].limpiar();
+        if (idx < 0 || !data || len == 0) return;
+        if (onDatosSlotRelay) {
+            onDatosSlotRelay(static_cast<uint8_t>(idx + 1), data, len, ctxDatosSlotRelay);
         }
     }
 
@@ -148,7 +95,6 @@ private:
         caidoRelay[idx]            = true;
         pendienteAceptarRelay[idx] = false;
         sidRelay[idx]              = 0;
-        rxRelay[idx].limpiar();
     }
 
     void manejarTunelRelayCaido() {
@@ -157,7 +103,6 @@ private:
                 caidoRelay[i]            = true;
                 pendienteAceptarRelay[i] = false;
                 sidRelay[i]              = 0;
-                rxRelay[i].limpiar();
             }
         }
     }
@@ -190,6 +135,11 @@ public:
             cbs.ctx             = this;
             refRelay->vincularCallbacks(cbs);
         }
+    }
+
+    void configurarCallbackDatosRelay(void (*cb)(uint8_t slot, const uint8_t* data, size_t len, void* ctx), void* ctx) {
+        onDatosSlotRelay  = cb;
+        ctxDatosSlotRelay = ctx;
     }
 
     // ¿Cómo lo hace?: Ejecuta un paso no bloqueante del cliente Reverse TCP Relay en Core 0.
@@ -299,7 +249,7 @@ public:
         }
 
         if (esRelay[idx]) {
-            return caidoRelay[idx] ? 0 : rxRelay[idx].leer(bufferDestino, capacidadMaxima);
+            return 0;
         }
 
         if (!clientesTcp[idx].connected()) {
@@ -353,7 +303,6 @@ public:
             pendienteAceptarRelay[idx] = false;
             caidoRelay[idx]            = false;
             sidRelay[idx]              = 0;
-            rxRelay[idx].limpiar();
         } else {
             clientesTcp[idx].stop();
         }
@@ -370,7 +319,6 @@ public:
                 pendienteAceptarRelay[i] = false;
                 caidoRelay[i]            = false;
                 sidRelay[i]              = 0;
-                rxRelay[i].limpiar();
                 mascaraCaidos |= static_cast<uint16_t>(1u << (i + 1));
             }
         }

@@ -2,6 +2,7 @@
 // ADAPTADOR AL TRANSPORTE RPC EXISTENTE DE ELECTRON
 // ============================================================================
 
+import { ActualizarConfigRelayInputDTO, ConfiguracionRelayDTO, ErrorRelay, EstadoRelay, EstadoRelaySistemaDTO } from "#shared/types/rpc.types";
 import {
   clienteFirmware,
   OpcionesInvocacionRPC,
@@ -39,6 +40,8 @@ const POLITICA_LECTURA_POR_NOMBRE: Record<string, { cacheTtlMs: number }> = {
   obtenerAuditoriaAuthPorId:            { cacheTtlMs: 60000 },
   obtenerEstructuraBaseDatos:           { cacheTtlMs: 120000 },
   obtenerColumnasTablaEstructura:       { cacheTtlMs: 120000 },
+  obtenerEstadoRelay:                   { cacheTtlMs: 0 },
+  obtenerConfiguracionRelay:            { cacheTtlMs: 60000 },
 };
 
 export interface InvocadorBinarioRPC {
@@ -608,6 +611,20 @@ function decodificarConfigSmtp(buf: Uint8Array): ConfiguracionSmtpDTO {
     activa: buf[337] !== 0,
     fechaCreacion: leerTextoFijo(buf, 338, 20),
     fechaModificacion: leerTextoFijo(buf, 358, 20),
+  };
+}
+
+function decodificarConfigRelay(buf: Uint8Array): ConfiguracionRelayDTO {
+  const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  return {
+    idConfiguracionRed: v.getInt32(0, true),
+    hostRelay: leerTextoFijo(buf, 4, 64),
+    puerto: v.getUint32(68, true),
+    nodeId: leerTextoFijo(buf, 72, 20),
+    secreto: leerTextoFijo(buf, 92, 64),
+    activa: buf[156] !== 0,
+    fechaCreacion: leerTextoFijo(buf, 157, 20),
+    fechaModificacion: leerTextoFijo(buf, 177, 20),
   };
 }
 
@@ -1314,7 +1331,47 @@ export class ProcedimientosRemotosFirmware {
       salidaPsql: leerTextoFijo(buf, 44, 1024),
     };
   };
+
+  obtenerEstadoRelay = async (): Promise<EstadoRelaySistemaDTO> => {
+    const buf = await this.invocar("obtenerEstadoRelay");
+    const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    return {
+      habilitado: buf[0] !== 0,
+      conectado: buf[1] !== 0,
+      estado: buf[2] as EstadoRelay,
+      ultimoError: buf[3] as ErrorRelay,
+      uptimeSegundos: v.getUint32(4, true),
+      reconexionesTotales: v.getUint32(8, true),
+      tramasRxTotales: v.getUint32(12, true),
+      tramasTxTotales: v.getUint32(16, true),
+      puerto: v.getUint16(20, true),
+      clientesRelayActivos: buf[22],
+      host: leerTextoFijo(buf, 24, 64),
+      nodeId: leerTextoFijo(buf, 88, 20),
+    };
+  };
+
+  obtenerConfiguracionRelay = async (): Promise<ConfiguracionRelayDTO> => {
+    const buf = await this.invocar("obtenerConfiguracionRelay");
+    return decodificarConfigRelay(buf);
+  };
+
+  actualizarConfiguracionRelay = async (
+    dto: ActualizarConfigRelayInputDTO
+  ): Promise<ConfiguracionRelayDTO> => {
+    const payload = new Uint8Array(156);
+    const v = new DataView(payload.buffer);
+    escribirTextoFijo(payload, 0, 64, dto.hostRelay.trim());
+    v.setUint32(64, dto.puerto, true);
+    escribirTextoFijo(payload, 68, 20, dto.nodeId.trim() || "ESP32-UNTDF-0001");
+    escribirTextoFijo(payload, 88, 64, dto.secreto);
+    payload[152] = dto.activa ? 1 : 0;
+
+    const buf = await this.invocar("actualizarConfiguracionRelay", payload);
+    return decodificarConfigRelay(buf);
+  };
 }
+
 
 // ============================================================================
 // INSTANCIA EXPORTADA COMO OBJETO PLANO ENUMERABLE PARA clientServices.ts E IPC
@@ -1356,6 +1413,9 @@ export const procedimientosRemotosFirmware = {
   controlarHardwareDirecto: instancia.controlarHardwareDirecto,
   leerHelpLogBios: instancia.leerHelpLogBios,
   solicitarApagadoSeguro: instancia.solicitarApagadoSeguro,
+  obtenerEstadoRelay: instancia.obtenerEstadoRelay,
+  obtenerConfiguracionRelay: instancia.obtenerConfiguracionRelay,
+  actualizarConfiguracionRelay: instancia.actualizarConfiguracionRelay,
 
   // Dominio 2: CRUD Completo de Tablas
   obtenerCalibracionAmbiente: instancia.obtenerCalibracionAmbiente,
