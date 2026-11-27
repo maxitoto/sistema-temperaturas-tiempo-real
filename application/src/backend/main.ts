@@ -14,8 +14,8 @@ if (VITE_DEV_SERVER_URL) {
   process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 }
 
-export const MAIN_DIST = join(process.env.APP_ROOT, 'dist-electron');
-export const RENDERER_DIST = join(process.env.APP_ROOT, 'dist');
+export const MAIN_DIST = __dirname;
+export const RENDERER_DIST = join(__dirname, '../dist');
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL 
   ? join(process.env.APP_ROOT, 'public')
