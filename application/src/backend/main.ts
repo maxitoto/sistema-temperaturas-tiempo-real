@@ -4,21 +4,22 @@ import { fileURLToPath } from 'node:url';
 import { startHandlers } from './handles';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = app.isPackaged
-  ? app.getAppPath()
+const APP_ROOT = app.isPackaged
+  ? app.getAppPath() // Siempre devuelve ".../resources/app.asar"
   : join(__dirname, '../../');
 
+process.env.APP_ROOT = APP_ROOT;
+
 export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
+export const MAIN_DIST = __dirname;
+export const RENDERER_DIST = join(APP_ROOT, 'dist');
 
 if (VITE_DEV_SERVER_URL) {
   process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 }
 
-export const MAIN_DIST = __dirname;
-export const RENDERER_DIST = join(__dirname, '../dist');
-
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL 
-  ? join(process.env.APP_ROOT, 'public')
+process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
+  ? join(APP_ROOT, 'public')
   : RENDERER_DIST;
 
 let mainWindow: BrowserWindow | null = null;
@@ -27,7 +28,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    icon: join(process.env.VITE_PUBLIC! , 'electron-vite.svg'),
+    icon: join(process.env.VITE_PUBLIC!, 'electron-vite.svg'),
     webPreferences: {
       preload: join(__dirname, 'preload.mjs'),
       contextIsolation: true,
@@ -46,8 +47,8 @@ function createWindow() {
 app.disableHardwareAcceleration();
 
 app.whenReady().then(async () => {
-  console.log('APP_ROOT:', process.env.APP_ROOT);
-  console.log('RENDERER_DIST:', process.env.RENDERER_DIST);
+  console.log('APP_ROOT:', APP_ROOT);
+  console.log('RENDERER_DIST:', RENDERER_DIST);
   console.log('isPackaged:', app.isPackaged);
   startHandlers();
   createWindow();

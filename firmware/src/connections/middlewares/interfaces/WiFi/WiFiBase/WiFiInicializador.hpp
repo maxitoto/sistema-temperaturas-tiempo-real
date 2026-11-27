@@ -196,7 +196,12 @@ public:
         vTaskDelay(pdMS_TO_TICKS(80));
 
         WiFi.setAutoReconnect(true);
-        WiFi.begin(ssidStaCache, claveStaCache);
+        WiFi.setAutoReconnect(true);
+        if (strlen(claveStaCache) > 0) {
+            WiFi.begin(ssidStaCache, claveStaCache);
+        } else {
+            WiFi.begin(ssidStaCache);
+        }
         const uint32_t inicioMs = millis();
 
         while (WiFi.status() != WL_CONNECTED && (millis() - inicioMs) < TIMEOUT_CONEXION_STA_MS) {

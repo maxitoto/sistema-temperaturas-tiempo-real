@@ -526,7 +526,8 @@ namespace RPSistema {
             const size_t lenSsidAp   = strnlen(in.ssidAp,   sizeof(in.ssidAp));
             const size_t lenClaveAp  = strnlen(in.claveAp,  sizeof(in.claveAp));
 
-            if (lenClaveSta > 0 && lenClaveSta < 8) {
+            const bool staAbierta = (strncmp(in.claveSta, "__OPEN__", sizeof(in.claveSta)) == 0);
+            if (!staAbierta && lenClaveSta > 0 && lenClaveSta < 8) {
                 throw std::invalid_argument("ValueError: la clave WiFi STA requiere al menos 8 caracteres (WPA2)");
             }
             if (lenClaveAp > 0 && lenClaveAp < 8) {

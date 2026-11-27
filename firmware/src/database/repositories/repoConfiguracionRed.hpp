@@ -72,15 +72,19 @@ namespace DbRuntime::Repositories {
             ConfiguracionRedDTO actual{};
             if (!obtenerOInicializar(actual)) return false;
 
-            const char* ssidFinal = ssidSta ? ssidSta : "";
-            const bool claveVacia = (!passwordSta || passwordSta[0] == '\0');
-            if (!claveVacia && strlen(passwordSta) < 8) {
+            const char* ssidFinal   = ssidSta ? ssidSta : "";
+            const bool esRedAbierta = (passwordSta != nullptr && strcmp(passwordSta, "__OPEN__") == 0);
+            const bool claveVacia   = (!passwordSta || passwordSta[0] == '\0');
+
+            if (!esRedAbierta && !claveVacia && strlen(passwordSta) < 8) {
                 throw std::invalid_argument("ValueError: la clave WiFi STA debe tener al menos 8 caracteres (WPA2)");
             }
 
-            const char* claveFinal = (claveVacia && conservarClaveSiVacia && ssidFinal[0] != '\0')
-                ? actual.password_sta.c_str()
-                : (passwordSta ? passwordSta : "");
+            const char* claveFinal = esRedAbierta
+                ? ""
+                : ((claveVacia && conservarClaveSiVacia && ssidFinal[0] != '\0')
+                    ? actual.password_sta.c_str()
+                    : (passwordSta ? passwordSta : ""));
 
             const uint16_t n = PgBinaryStorage::getInstance().updateWhere(
                 TABLA,

@@ -136,6 +136,7 @@ export function ConfiguracionView({
   const [formWifiSta, setFormWifiSta] = useState({
     ssidSta: "",
     claveSta: "",
+    esPublica: false,
   });
   const [formWifiAp, setFormWifiAp] = useState({
     ssidAp: "",
@@ -381,23 +382,32 @@ export function ConfiguracionView({
       toast.warning("Ingresá el SSID de la red local (router) para STA.");
       return;
     }
-    if (formWifiSta.claveSta.length > 0 && formWifiSta.claveSta.length < 8) {
+    if (
+      !formWifiSta.esPublica &&
+      formWifiSta.claveSta.length > 0 &&
+      formWifiSta.claveSta.length < 8
+    ) {
       toast.warning(
         "La clave WiFi STA debe tener al menos 8 caracteres (WPA2), o dejala vacía para conservar la actual."
       );
       return;
     }
 
+    const claveEnviar = formWifiSta.esPublica ? "__OPEN__" : formWifiSta.claveSta;
+
     setAccionWifi("STA");
     const res = await safeRpc(
-      () =>
-        client.actualizarConfiguracionWiFi(ssid, formWifiSta.claveSta, "", ""),
+      () => client.actualizarConfiguracionWiFi(ssid, claveEnviar, "", ""),
       "actualizarWifiSta"
     );
     setAccionWifi(null);
     if (res) {
       setWifiInfo(res);
-      setFormWifiSta({ ssidSta: res.ssidSta, claveSta: "" });
+      setFormWifiSta({
+        ssidSta: res.ssidSta,
+        claveSta: "",
+        esPublica: formWifiSta.esPublica,
+      });
       if (res.conectadoARouter) {
         toast.success(`WiFi STA guardado y conectado (IP ${res.ipSta}).`);
       } else {
@@ -425,7 +435,7 @@ export function ConfiguracionView({
     setAccionWifi(null);
     if (res) {
       setWifiInfo(res);
-      setFormWifiSta({ ssidSta: "", claveSta: "" });
+      setFormWifiSta({ ssidSta: "", claveSta: "", esPublica: false });
     }
   };
 
@@ -1193,22 +1203,41 @@ export function ConfiguracionView({
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block font-medium">
-                      Clave WiFi STA (mín. 8 chars WPA2)
-                    </label>
-                    <PasswordInput
-                      maxLength={63}
-                      value={formWifiSta.claveSta}
-                      onChange={(e) =>
-                        setFormWifiSta({
-                          ...formWifiSta,
-                          claveSta: e.target.value,
-                        })
-                      }
-                      placeholder="Vacío = conservar clave actual"
-                      className="w-full rounded border border-border bg-background px-3 py-1.5"
-                    />
-                  </div>
+                 <label className="mb-1 block font-medium">
+                   Clave WiFi STA (mín. 8 chars WPA2)
+                 </label>
+                 <PasswordInput
+                   maxLength={63}
+                   disabled={formWifiSta.esPublica}
+                   value={formWifiSta.esPublica ? "" : formWifiSta.claveSta}
+                   onChange={(e) =>
+                     setFormWifiSta({
+                       ...formWifiSta,
+                       claveSta: e.target.value,
+                     })
+                   }
+                   placeholder={
+                     formWifiSta.esPublica
+                       ? "Red abierta (sin contraseña)"
+                       : "Vacío = conservar clave actual"
+                   }
+                   className="w-full rounded border border-border bg-background px-3 py-1.5 disabled:opacity-50"
+                 />
+               </div>
+               <label className="flex items-center gap-2 pt-0.5 text-xs">
+                 <input
+                   type="checkbox"
+                   checked={formWifiSta.esPublica}
+                   onChange={(e) =>
+                     setFormWifiSta({
+                       ...formWifiSta,
+                       esPublica: e.target.checked,
+                       claveSta: e.target.checked ? "" : formWifiSta.claveSta,
+                     })
+                   }
+                 />
+                 Red pública / abierta (sin contraseña)
+               </label>
                 </div>
               </div>
 
